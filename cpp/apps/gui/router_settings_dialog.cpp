@@ -166,16 +166,29 @@ void save_gui_router_settings(const std::filesystem::path& app_root, GuiRouterSe
 }
 
 std::optional<std::filesystem::path> find_bundled_i2pd_binary() {
-    const QString mac = QCoreApplication::applicationDirPath() +
-                        QStringLiteral("/../Resources/vendor/i2pd");
-    const std::filesystem::path vendor = mac.toStdString();
-    const char* names[] = {"darwin-arm64/i2pd", "darwin-x64/i2pd", "macos-arm64/i2pd",
-                           "macos-x64/i2pd", "linux-x64/i2pd", "linux-aarch64/i2pd"};
-    for (const char* name : names) {
-        const auto candidate = vendor / name;
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(candidate, ec)) {
-            return candidate;
+    const QStringList roots = {
+        QCoreApplication::applicationDirPath() + QStringLiteral("/vendor/i2pd"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../Resources/vendor/i2pd"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../../vendor/i2pd"),
+    };
+    const char* names[] = {
+        "windows-x64/i2pd.exe",
+        "darwin-arm64/i2pd",
+        "darwin-x64/i2pd",
+        "macos-arm64/i2pd",
+        "macos-x64/i2pd",
+        "linux-x64/i2pd",
+        "linux-x86_64/i2pd",
+        "linux-aarch64/i2pd",
+    };
+    for (const QString& root_q : roots) {
+        const std::filesystem::path vendor = root_q.toStdString();
+        for (const char* name : names) {
+            const auto candidate = vendor / name;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(candidate, ec)) {
+                return candidate;
+            }
         }
     }
     return std::nullopt;

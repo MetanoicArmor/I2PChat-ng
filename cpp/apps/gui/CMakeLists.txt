@@ -8,6 +8,8 @@ qt_add_executable(i2pchat-gui
   main.cpp
   chat_window.cpp
   profile_select_dialog.cpp
+  profile_combo.cpp
+  rounded_scrollbar.cpp
   actions_popup.cpp
   chat_model.cpp
   chat_item_delegate.cpp
@@ -21,6 +23,11 @@ qt_add_executable(i2pchat-gui
   resources.qrc
   ${CMAKE_CURRENT_SOURCE_DIR}/../tui/options.cpp
 )
+if(WIN32)
+  # Avoid a spare console window for the GUI itself (i2pd is started separately).
+  set_target_properties(i2pchat-gui PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
 
 target_include_directories(i2pchat-gui PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

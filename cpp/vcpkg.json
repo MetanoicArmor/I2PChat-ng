@@ -4,13 +4,12 @@
   "description": "I2PChat C++ client: peer-to-peer chat over the I2P network",
   "homepage": "https://github.com/MetanoicArmor/I2PChat",
   "license": "AGPL-3.0-or-later",
+  "builtin-baseline": "a4c8cc7eef578f43d36aca111b523180960c0c2e",
   "dependencies": [
     "libsodium",
     "nlohmann-json",
-    {
-      "name": "boost-asio",
-      "version>=": "1.81.0"
-    },
+    "zlib",
+    "boost-asio",
     "boost-process",
     "boost-system"
   ],

@@ -6,7 +6,9 @@
 #include <QDesktopServices>
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPushButton>
@@ -15,6 +17,7 @@
 
 #include "i2pchat/runtime/identity.hpp"
 #include "dialog_theme.hpp"
+#include "profile_combo.hpp"
 
 namespace i2pchat::gui {
 
@@ -65,8 +68,11 @@ ProfileSelectDialog::ProfileSelectDialog(const std::filesystem::path& app_root, 
     layout->addWidget(title);
 
     auto* subtitle = new QLabel(tr("Choose profile"), this);
+    subtitle->setObjectName("ProfileSelectSubtitle");
     subtitle->setAlignment(Qt::AlignCenter);
     layout->addWidget(subtitle);
+
+    layout->addSpacing(8);
 
     auto* hint = new QLabel(
         tr("Use <b>%1</b> for a one-time session, or enter a name to save your identity.<br>"
@@ -75,41 +81,52 @@ ProfileSelectDialog::ProfileSelectDialog(const std::filesystem::path& app_root, 
             .arg(QString::fromUtf8(runtime::kTransientProfile.data(),
                                    static_cast<int>(runtime::kTransientProfile.size()))),
         this);
+    hint->setObjectName("ProfileSelectHint");
     hint->setWordWrap(true);
     hint->setAlignment(Qt::AlignCenter);
     hint->setTextFormat(Qt::RichText);
     layout->addWidget(hint);
 
-    layout->addWidget(new QLabel(tr("Profile:"), this));
-    combo_ = new QComboBox(this);
+    auto* profile_label = new QLabel(tr("Profile:"), this);
+    profile_label->setObjectName("ProfileSelectLabel");
+    layout->addWidget(profile_label);
+    combo_widget_ = new ProfileComboWithArrow(this);
+    combo_ = combo_widget_->combo();
     combo_->setEditable(true);
     combo_->setInsertPolicy(QComboBox::NoInsert);
+    combo_->setCompleter(nullptr);
     combo_->addItem(QString::fromUtf8(runtime::kTransientProfile.data(),
                                       static_cast<int>(runtime::kTransientProfile.size())));
     for (const std::string& name : list_profile_names(app_root)) {
         combo_->addItem(QString::fromStdString(name));
     }
     combo_->setCurrentIndex(0);
-    layout->addWidget(combo_);
+    combo_widget_->enable_autocomplete();
+    combo_widget_->apply_theme(dark);
+    layout->addWidget(combo_widget_);
 
     auto* combo_hint = new QLabel(
         tr("Click the list on the right to pick an existing profile, or type a new name above."),
         this);
+    combo_hint->setObjectName("ProfileSelectComboHint");
     combo_hint->setWordWrap(true);
     layout->addWidget(combo_hint);
 
     const QString folder = QString::fromStdString((app_root / "profiles").string());
     auto* path_hint = new QLabel(tr("Data folder: %1 (each profile: profiles/<name>/)").arg(folder),
                                  this);
+    path_hint->setObjectName("ProfileSelectPathHint");
     path_hint->setWordWrap(true);
     path_hint->setCursor(Qt::PointingHandCursor);
     path_hint->setToolTip(tr("Click to open folder"));
-    QObject::connect(path_hint, &QLabel::linkActivated, this, [](const QString&) {});
     path_hint->installEventFilter(this);
     path_hint->setProperty("folder", folder);
     layout->addWidget(path_hint);
 
+    layout->addSpacing(12);
+
     auto* buttons = new QHBoxLayout();
+    buttons->setSpacing(12);
     buttons->addStretch();
     auto* cancel = new QPushButton(tr("Cancel"), this);
     cancel->setObjectName("SecondaryButton");
@@ -118,6 +135,7 @@ ProfileSelectDialog::ProfileSelectDialog(const std::filesystem::path& app_root, 
     auto* cont = new QPushButton(tr("Continue"), this);
     cont->setObjectName("PrimaryButton");
     cont->setDefault(true);
+    cont->setAutoDefault(true);
     cont->setMinimumWidth(120);
     connect(cont, &QPushButton::clicked, this, &QDialog::accept);
     buttons->addWidget(cancel);
@@ -126,10 +144,23 @@ ProfileSelectDialog::ProfileSelectDialog(const std::filesystem::path& app_root, 
     layout->addLayout(buttons);
 
     apply_dialog_theme(this, dark);
+    combo_widget_->apply_theme(dark);
+    combo_->setFocus(Qt::OtherFocusReason);
+    if (combo_->lineEdit() != nullptr) {
+        combo_->lineEdit()->selectAll();
+    }
 }
 
 QString ProfileSelectDialog::selected_profile() const {
     return combo_->currentText().trimmed();
+}
+
+void ProfileSelectDialog::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        accept();
+        return;
+    }
+    QDialog::keyPressEvent(event);
 }
 
 bool ProfileSelectDialog::eventFilter(QObject* watched, QEvent* event) {

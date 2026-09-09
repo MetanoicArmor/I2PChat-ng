@@ -1,5 +1,7 @@
 #include "emoji_picker.hpp"
 #include "emoji_chars.hpp"
+#include "popup_chrome.hpp"
+#include "rounded_scrollbar.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QHideEvent>
 #include <QKeyEvent>
@@ -16,6 +19,8 @@
 #include <QPixmap>
 #include <QScreen>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QShowEvent>
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -112,27 +117,42 @@ QIcon tinted_face_icon(bool dark) {
 
 EmojiPickerPopup::EmojiPickerPopup(QWidget* parent) : QFrame(parent) {
     setObjectName("EmojiPickerPopupWindow");
-    setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setFocusPolicy(Qt::StrongFocus);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
     auto* surface = new QFrame(this);
     surface->setObjectName("EmojiPickerPopupSurface");
+    surface->setAttribute(Qt::WA_TranslucentBackground, true);
+    surface->setFocusPolicy(Qt::NoFocus);
     root->addWidget(surface);
     auto* lay = new QVBoxLayout(surface);
     lay->setContentsMargins(6, 6, 6, 6);
+    lay->setSpacing(0);
     scroll_ = new QScrollArea(surface);
     scroll_->setObjectName("EmojiPickerScroll");
     scroll_->setWidgetResizable(true);
     scroll_->setFrameShape(QFrame::NoFrame);
     scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll_->setFixedHeight(260);
+    scroll_->setFocusPolicy(Qt::NoFocus);
     inner_ = new QWidget();
     inner_->setObjectName("EmojiPickerGridHost");
+    inner_->setFocusPolicy(Qt::NoFocus);
     scroll_->setWidget(inner_);
-    lay->addWidget(scroll_);
-    setFixedWidth(kCols * 44 + 24);
+    scrollbar_ = new RoundedVerticalScrollbar(scroll_->verticalScrollBar(), surface);
+    auto* scroll_row = new QHBoxLayout();
+    scroll_row->setContentsMargins(0, 0, 0, 0);
+    scroll_row->setSpacing(4);
+    scroll_row->addWidget(scroll_, 1);
+    scroll_row->addWidget(scrollbar_, 0);
+    lay->addLayout(scroll_row);
+    connect(scroll_->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+            [this](int, int) { sync_scrollbar(); });
+    setFixedWidth(std::min(kCols * 44 + 34, 392));
     root_ = find_fluent_emoji_root();
     if (!root_.empty()) {
         std::ifstream in(root_ / "manifest.json");
@@ -147,6 +167,7 @@ EmojiPickerPopup::EmojiPickerPopup(QWidget* parent) : QFrame(parent) {
         }
     }
     rebuild();
+    apply_theme();
 }
 
 void EmojiPickerPopup::rebuild() {
@@ -183,6 +204,35 @@ void EmojiPickerPopup::rebuild() {
         buttons_.push_back(btn);
         ++i;
     }
+    sync_scrollbar();
+}
+
+void EmojiPickerPopup::sync_scrollbar() {
+    if (scrollbar_ == nullptr || scroll_ == nullptr) {
+        return;
+    }
+    QScrollBar* vsb = scroll_->verticalScrollBar();
+    scrollbar_->setVisible(vsb != nullptr && vsb->maximum() > 0);
+    scrollbar_->update();
+}
+
+void EmojiPickerPopup::apply_theme() {
+    if (night_) {
+        popup_bg_ = QColor(34, 37, 45, 244);
+        popup_border_ = QColor(58, 62, 74);
+        scrollbar_->set_colors(QColor(255, 255, 255, 51), QColor(0, 0, 0, 0));
+    } else {
+        popup_bg_ = QColor(246, 247, 250);
+        popup_border_ = QColor(208, 211, 218);
+        scrollbar_->set_colors(QColor(60, 60, 67, 72), QColor(0, 0, 0, 0));
+    }
+    setStyleSheet(QStringLiteral(
+        "QFrame#EmojiPickerPopupWindow { background: transparent; border: none; }"
+        "QFrame#EmojiPickerPopupSurface { background: transparent; border: none; }"
+        "QScrollArea#EmojiPickerScroll { border: none; background: transparent; }"
+        "QWidget#EmojiPickerGridHost { background: transparent; }"));
+    sync_scrollbar();
+    update();
 }
 
 void EmojiPickerPopup::sync_focus_visual() {
@@ -251,7 +301,23 @@ void EmojiPickerPopup::keyPressEvent(QKeyEvent* event) {
     QFrame::keyPressEvent(event);
 }
 
-void EmojiPickerPopup::set_night(bool night) { night_ = night; }
+void EmojiPickerPopup::set_night(bool night) {
+    night_ = night;
+    apply_theme();
+}
+
+void EmojiPickerPopup::paintEvent(QPaintEvent*) {
+    paint_rounded_popup_bg(this, popup_bg_, popup_border_, 14.0);
+}
+
+void EmojiPickerPopup::showEvent(QShowEvent* event) {
+    QFrame::showEvent(event);
+    if (!dwm_patched_) {
+        disable_dwm_rounded_frame(this);
+        dwm_patched_ = true;
+    }
+    sync_scrollbar();
+}
 
 void EmojiPickerPopup::show_above(QWidget* anchor) {
     adjustSize();

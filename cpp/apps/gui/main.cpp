@@ -1,6 +1,8 @@
 #include <QCoreApplication>
 #include <QApplication>
 #include <QFont>
+#include <QFontInfo>
+#include <QIcon>
 #include <QPalette>
 #include <QStyleFactory>
 #include <iostream>
@@ -8,7 +10,6 @@
 #include <vector>
 
 #include "chat_window.hpp"
-#include "profile_select_dialog.hpp"
 #include "options.hpp"
 #include "profile_select_dialog.hpp"
 
@@ -17,15 +18,26 @@ int main(int argc, char** argv) {
     app.setApplicationName("I2PChat");
     app.setOrganizationName("I2PChat");
     app.setApplicationVersion(I2PCHAT_VERSION);
+    app.setWindowIcon(QIcon(QStringLiteral(":/i2pchat/icons/app.ico")));
     app.setQuitOnLastWindowClosed(true);
-#ifdef Q_OS_MACOS
+    // Same as Python: Fusion + Inter 10pt on Windows (system fonts render larger there).
     app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
-#endif
-    QFont font = app.font();
-    if (font.pointSize() < 12) {
-        font.setPointSize(12);
-        app.setFont(font);
+#ifdef Q_OS_WIN
+    QFont font(QStringLiteral("Inter"), 10);
+    font.setStyleHint(QFont::SansSerif);
+    if (QFontInfo(font).family().compare(QStringLiteral("Inter"), Qt::CaseInsensitive) != 0) {
+        font.setFamily(QStringLiteral("Segoe UI"));
     }
+    app.setFont(font);
+#elif defined(Q_OS_MACOS)
+    QFont font = app.font();
+    font.setPointSize(13);
+    app.setFont(font);
+#else
+    QFont font(QStringLiteral("Inter"), 13);
+    font.setStyleHint(QFont::SansSerif);
+    app.setFont(font);
+#endif
 
     std::vector<std::string> args;
     const QStringList raw = QCoreApplication::arguments();

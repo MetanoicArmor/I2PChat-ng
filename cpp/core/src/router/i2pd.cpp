@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 #include "i2pchat/crypto.hpp"
 #include "i2pchat/encoding.hpp"
@@ -16,6 +17,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace i2pchat::router {
@@ -214,7 +220,32 @@ void I2pdManager::start() {
     }
     pid_ = static_cast<int>(child);
 #else
-    throw RouterError("Starting a bundled i2pd is not implemented on Windows yet");
+    // i2pd.exe is a console subsystem binary; without CREATE_NO_WINDOW Windows
+    // flashes a permanent black cmd window (same as Python's bundled launcher).
+    std::wstring command = L"\"" + config_.binary.wstring() + L"\" --conf=\"" +
+                           config_.runtime.conf_path.wstring() + L"\" --datadir=\"" +
+                           config_.data_dir.wstring() + L"\"";
+    std::vector<wchar_t> cmdline(command.begin(), command.end());
+    cmdline.push_back(L'\0');
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION process{};
+
+    const std::wstring workdir = config_.binary.parent_path().wstring();
+    const DWORD flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS;
+    if (!::CreateProcessW(config_.binary.c_str(), cmdline.data(), nullptr, nullptr, FALSE,
+                          flags, nullptr, workdir.empty() ? nullptr : workdir.c_str(),
+                          &startup, &process)) {
+        throw RouterError("CreateProcess failed while starting i2pd (error " +
+                          std::to_string(static_cast<unsigned long>(::GetLastError())) +
+                          ")");
+    }
+    pid_ = static_cast<int>(process.dwProcessId);
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
 #endif
 }
 
@@ -240,6 +271,21 @@ void I2pdManager::stop(std::chrono::steady_clock::duration grace) {
     ::kill(child, SIGKILL);
     int status = 0;
     ::waitpid(child, &status, 0);
+#else
+    const DWORD child = static_cast<DWORD>(*pid_);
+    HANDLE handle = ::OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, child);
+    if (handle == nullptr) {
+        pid_.reset();
+        return;
+    }
+    // Detached console-less i2pd has no Ctrl-C path; escalate with TerminateProcess.
+    const auto grace_ms =
+        static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(grace).count());
+    if (::WaitForSingleObject(handle, grace_ms) != WAIT_OBJECT_0) {
+        ::TerminateProcess(handle, 1);
+        ::WaitForSingleObject(handle, 3000);
+    }
+    ::CloseHandle(handle);
 #endif
     pid_.reset();
 }
@@ -254,7 +300,15 @@ bool I2pdManager::is_running() const {
 #ifndef _WIN32
     return ::kill(static_cast<pid_t>(*pid_), 0) == 0;
 #else
-    return false;
+    HANDLE handle =
+        ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(*pid_));
+    if (handle == nullptr) {
+        return false;
+    }
+    DWORD exit_code = 0;
+    const BOOL ok = ::GetExitCodeProcess(handle, &exit_code);
+    ::CloseHandle(handle);
+    return ok && exit_code == STILL_ACTIVE;
 #endif
 }
 

@@ -1,42 +1,68 @@
 #include "actions_popup.hpp"
+#include "popup_chrome.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <QApplication>
 #include <QEnterEvent>
-#include <QEvent>
+#include <QFont>
+#include <QHideEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QResizeEvent>
 #include <QScreen>
+#include <QShowEvent>
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QWidget>
 
 namespace i2pchat::gui {
+namespace {
+
+constexpr qreal kOuterRadius = 14.0;
+
+}  // namespace
 
 ActionsPopupItem::ActionsPopupItem(const QString& title, const QString& shortcut,
                                    const QString& tooltip, QWidget* parent)
     : QFrame(parent) {
     setObjectName("ActionsPopupItem");
+    setFrameShape(QFrame::NoFrame);
     setAttribute(Qt::WA_Hover, true);
+    setAttribute(Qt::WA_StyledBackground, true);
     setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::NoFocus);
     if (!tooltip.isEmpty()) {
         setToolTip(tooltip);
     }
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(10, 2, 10, 2);
-    layout->setSpacing(8);
+    layout->setContentsMargins(12, 5, 12, 5);
+    layout->setSpacing(10);
     title_label_ = new QLabel(title, this);
     title_label_->setObjectName("ActionsPopupItemTitle");
     title_label_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     layout->addWidget(title_label_, 1);
-    auto* shortcut_label = new QLabel(shortcut, this);
-    shortcut_label->setObjectName("ActionsPopupItemShortcut");
-    shortcut_label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    shortcut_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    shortcut_label->setVisible(!shortcut.isEmpty());
-    layout->addWidget(shortcut_label, 0);
+    shortcut_label_ = new QLabel(shortcut, this);
+    shortcut_label_->setObjectName("ActionsPopupItemShortcut");
+    shortcut_label_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    shortcut_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    shortcut_label_->setVisible(!shortcut.trimmed().isEmpty());
+    layout->addWidget(shortcut_label_, 0);
+    apply_item_fonts();
+}
+
+void ActionsPopupItem::apply_item_fonts() {
+    QFont base = QApplication::font();
+    if (base.pointSizeF() <= 0) {
+        base.setPointSize(13);
+    }
+    title_label_->setFont(base);
+    QFont sc = base;
+    const qreal step = base.pointSizeF() > 10.5 ? 1.25 : 1.0;
+    sc.setPointSizeF(std::max(9.0, base.pointSizeF() - step));
+    shortcut_label_->setFont(sc);
 }
 
 void ActionsPopupItem::set_title(const QString& title) {
@@ -45,36 +71,106 @@ void ActionsPopupItem::set_title(const QString& title) {
     }
 }
 
-void ActionsPopupItem::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
+void ActionsPopupItem::apply_row_colors(bool night) {
+    night_ = night;
+    const char* title = night ? "#eceff4" : "#1d1d1f";
+    const char* sc = night ? "#8a93a8" : "#5c5c63";
+    title_label_->setStyleSheet(
+        QStringLiteral("QLabel#ActionsPopupItemTitle { color: %1; background: transparent; }")
+            .arg(QLatin1String(title)));
+    shortcut_label_->setStyleSheet(
+        QStringLiteral("QLabel#ActionsPopupItemShortcut { color: %1; background: transparent; }")
+            .arg(QLatin1String(sc)));
+    update();
+}
+
+void ActionsPopupItem::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && isEnabled() && rect().contains(event->pos())) {
         emit clicked();
         event->accept();
         return;
     }
-    QFrame::mousePressEvent(event);
-}
-
-void ActionsPopupItem::mouseReleaseEvent(QMouseEvent* event) {
     QFrame::mouseReleaseEvent(event);
 }
 
-void ActionsPopupItem::enterEvent(QEnterEvent*) { setProperty("hover", true); style()->unpolish(this); style()->polish(this); }
-void ActionsPopupItem::leaveEvent(QEvent*) { setProperty("hover", false); style()->unpolish(this); style()->polish(this); }
+void ActionsPopupItem::enterEvent(QEnterEvent* event) {
+    if (host_ != nullptr) {
+        host_->cancel_keyboard_highlight();
+    }
+    hover_ = true;
+    update();
+    QFrame::enterEvent(event);
+}
+
+void ActionsPopupItem::leaveEvent(QEvent* event) {
+    hover_ = false;
+    update();
+    QFrame::leaveEvent(event);
+}
+
+void ActionsPopupItem::paintEvent(QPaintEvent*) {
+    if (!hover_ || !isEnabled()) {
+        return;
+    }
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(night_ ? QColor(255, 255, 255, 26) : QColor(0xe5, 0xea, 0xf2));
+    painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10.0, 10.0);
+}
 
 ActionsPopup::ActionsPopup(QWidget* parent) : QFrame(parent) {
     setObjectName("ActionsPopupWindow");
-    setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    Qt::WindowFlags flags = Qt::Popup | Qt::FramelessWindowHint;
+#ifdef Q_OS_WIN
+    flags |= Qt::NoDropShadowWindowHint;
+#endif
+    setWindowFlags(flags);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setMinimumWidth(236);
+    setFocusPolicy(Qt::StrongFocus);
+
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
     surface_ = new QFrame(this);
     surface_->setObjectName("ActionsPopupSurface");
+    surface_->setAttribute(Qt::WA_TranslucentBackground, true);
+    surface_->setFocusPolicy(Qt::NoFocus);
     root->addWidget(surface_);
     surface_layout_ = new QVBoxLayout(surface_);
-    surface_layout_->setContentsMargins(6, 6, 6, 6);
-    surface_layout_->setSpacing(0);
+    surface_layout_->setContentsMargins(8, 6, 8, 6);
+    surface_layout_->setSpacing(1);
+    apply_theme();
+}
+
+void ActionsPopup::apply_theme() {
+    if (night_) {
+        popup_bg_ = QColor(34, 37, 45, 244);
+        popup_border_ = QColor(58, 62, 74);
+    } else {
+        popup_bg_ = QColor(246, 247, 250);
+        popup_border_ = QColor(208, 211, 218);
+    }
+    setStyleSheet(QStringLiteral(
+        "#ActionsPopupWindow { background: transparent; border: none; }"
+        "#ActionsPopupSurface { background: transparent; border: none; }"
+        "QFrame#ActionsPopupItem { background: transparent; border: none; }"
+        "QFrame#ActionsPopupSeparator {"
+        "  background: %1; max-height: 1px; min-height: 1px; border: none; margin: 3px 6px;"
+        "}")
+                      .arg(night_ ? QStringLiteral("#343a46") : QStringLiteral("#d6dce7")));
+    refresh_row_colors();
+    update();
+}
+
+void ActionsPopup::refresh_row_colors() {
+    for (int i = 0; i < surface_layout_->count(); ++i) {
+        auto* item = qobject_cast<ActionsPopupItem*>(surface_layout_->itemAt(i)->widget());
+        if (item != nullptr) {
+            item->apply_row_colors(night_);
+        }
+    }
 }
 
 void ActionsPopup::clear_actions() {
@@ -88,8 +184,11 @@ void ActionsPopup::clear_actions() {
 }
 
 ActionsPopupItem* ActionsPopup::add_action(const QString& title, const QString& shortcut,
-                              const std::function<void()>& callback, const QString& tooltip) {
+                                           const std::function<void()>& callback,
+                                           const QString& tooltip) {
     auto* item = new ActionsPopupItem(title, shortcut, tooltip, surface_);
+    item->set_host(this);
+    item->apply_row_colors(night_);
     connect(item, &ActionsPopupItem::clicked, this, [this, callback] {
         hide();
         if (callback) {
@@ -103,13 +202,29 @@ ActionsPopupItem* ActionsPopup::add_action(const QString& title, const QString& 
 void ActionsPopup::add_separator() {
     auto* sep = new QFrame(surface_);
     sep->setObjectName("ActionsPopupSeparator");
-    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShape(QFrame::NoFrame);
     sep->setFixedHeight(1);
     surface_layout_->addWidget(sep);
 }
 
 void ActionsPopup::show_below(QWidget* anchor) {
-    show_at(anchor->mapToGlobal(QPoint(anchor->width() - sizeHint().width(), anchor->height() + 4)));
+    adjustSize();
+    const int popup_w = width();
+    const int popup_h = height();
+    const int x_local = std::max(0, anchor->width() - popup_w);
+    QPoint pos = anchor->mapToGlobal(QPoint(x_local, anchor->height() + 6));
+    const QPoint above = anchor->mapToGlobal(QPoint(x_local, -popup_h - 6));
+    if (QScreen* screen = QApplication::screenAt(anchor->mapToGlobal(anchor->rect().center()))) {
+        const QRect avail = screen->availableGeometry();
+        if (pos.y() > avail.bottom() - popup_h + 1 && above.y() >= avail.top()) {
+            pos = above;
+        }
+        pos.setX(std::clamp(pos.x(), avail.left(), avail.right() - popup_w + 1));
+        pos.setY(std::clamp(pos.y(), avail.top(), avail.bottom() - popup_h + 1));
+    }
+    move(pos);
+    show();
+    QTimer::singleShot(0, this, [this] { setFocus(Qt::PopupFocusReason); });
 }
 
 void ActionsPopup::show_at(const QPoint& global_pos) {
@@ -117,22 +232,39 @@ void ActionsPopup::show_at(const QPoint& global_pos) {
     QPoint pos = global_pos;
     if (QScreen* screen = QApplication::screenAt(pos)) {
         const QRect avail = screen->availableGeometry();
-        if (height() > avail.height() - 12) {
-            setMaximumHeight(avail.height() - 12);
-            adjustSize();
-        } else {
-            setMaximumHeight(QWIDGETSIZE_MAX);
-        }
-        pos.setX(std::min(pos.x(), avail.right() - width() + 1));
-        pos.setY(std::min(pos.y(), avail.bottom() - height() + 1));
-        pos.setX(std::max(pos.x(), avail.left()));
-        pos.setY(std::max(pos.y(), avail.top()));
+        pos.setX(std::clamp(pos.x(), avail.left(), avail.right() - width() + 1));
+        pos.setY(std::clamp(pos.y(), avail.top(), avail.bottom() - height() + 1));
     }
     move(pos);
     show();
-    raise();
+    QTimer::singleShot(0, this, [this] { setFocus(Qt::PopupFocusReason); });
 }
 
-void ActionsPopup::set_night(bool night) { night_ = night; }
+void ActionsPopup::set_night(bool night) {
+    night_ = night;
+    apply_theme();
+}
+
+void ActionsPopup::cancel_keyboard_highlight() {}
+
+void ActionsPopup::paintEvent(QPaintEvent*) {
+    paint_rounded_popup_bg(this, popup_bg_, popup_border_, kOuterRadius);
+}
+
+void ActionsPopup::showEvent(QShowEvent* event) {
+    QFrame::showEvent(event);
+    if (!dwm_patched_) {
+        disable_dwm_rounded_frame(this);
+        dwm_patched_ = true;
+    }
+}
+
+void ActionsPopup::hideEvent(QHideEvent* event) {
+    QFrame::hideEvent(event);
+}
+
+void ActionsPopup::resizeEvent(QResizeEvent* event) {
+    QFrame::resizeEvent(event);
+}
 
 }  // namespace i2pchat::gui

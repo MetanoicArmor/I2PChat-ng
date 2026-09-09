@@ -7,8 +7,11 @@
 
 class QComboBox;
 class QEvent;
+class QKeyEvent;
 
 namespace i2pchat::gui {
+
+class ProfileComboWithArrow;
 
 [[nodiscard]] std::vector<std::string> list_profile_names(
     const std::filesystem::path& app_root);
@@ -23,9 +26,11 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void accept() override;
 
 private:
+    ProfileComboWithArrow* combo_widget_ = nullptr;
     QComboBox* combo_ = nullptr;
 };
 

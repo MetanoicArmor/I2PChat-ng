@@ -34,6 +34,7 @@ class QLineEdit;
 class QListView;
 class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
 class QSplitter;
 class QToolButton;
 class QVBoxLayout;
@@ -43,6 +44,7 @@ namespace i2pchat::gui {
 
 class ActionsPopup;
 class EmojiPickerPopup;
+class RoundedVerticalScrollbar;
 
 struct GuiOptions {
     std::filesystem::path app_root;
@@ -121,6 +123,9 @@ private:
     void apply_empty_state();
     void highlight_search();
     void rebuild_search_console();
+    void update_search_hit_highlight();
+    void layout_search_status_overlay();
+    [[nodiscard]] QString search_hit_label(int row) const;
     void notify_incoming(const std::string& peer, const QString& preview);
     void sync_media_dirs();
     void sync_sidebar_toggle_margin();
@@ -169,8 +174,12 @@ private:
     QWidget* sidebar_grip_ = nullptr;
     QLineEdit* search_edit_ = nullptr;
     QLabel* search_status_ = nullptr;
+    QWidget* search_field_wrap_ = nullptr;
     QWidget* search_console_ = nullptr;
+    QScrollArea* search_scroll_ = nullptr;
+    RoundedVerticalScrollbar* search_hits_bar_ = nullptr;
     QVBoxLayout* search_hits_layout_ = nullptr;
+    QVector<QPushButton*> search_hit_buttons_;
     QListView* chat_view_ = nullptr;
     QLabel* empty_hint_ = nullptr;
     QPlainTextEdit* composer_ = nullptr;

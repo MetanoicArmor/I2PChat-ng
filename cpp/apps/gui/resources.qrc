@@ -8,5 +8,6 @@
     <file alias="blindbox/install.sh">../../../i2pchat/blindbox/daemon/install/install.sh</file>
     <file alias="sounds/notify.wav">../../../assets/sounds/notify.wav</file>
     <file alias="icons/face.dashed.png">../../../i2pchat/gui/icons/face.dashed.png</file>
+    <file alias="icons/app.ico">../../../i2pchat.ico</file>
   </qresource>
 </RCC>

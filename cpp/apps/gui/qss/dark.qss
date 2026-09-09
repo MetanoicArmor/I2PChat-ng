@@ -7,7 +7,8 @@ QLabel#StatusLabel {
   padding: 0px 8px;
   min-height: 30px;
   color: #9fa1b5;
-  font-size: 12px;
+  font-family: "Segoe UI", "Inter", sans-serif;
+  font-size: 11px;
 }
 QToolButton#ThemeSwitchButton {
   background-color: rgba(255, 255, 255, 0.08);
@@ -156,37 +157,53 @@ QMenu::item {
 QMenu::item:selected { background: rgba(255, 255, 255, 0.10); }
 QMenu::separator { height: 1px; margin: 6px 8px; background: #343a46; }
 QFrame#ActionsPopupWindow { background: transparent; border: none; }
-QFrame#ActionsPopupSurface {
-  background: rgba(34, 37, 45, 0.96);
-  border: none;
-  border-radius: 14px;
-}
-QFrame#ActionsPopupItem {
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  padding: 0px;
-}
-QFrame#ActionsPopupItem:hover { background: rgba(255, 255, 255, 0.10); }
-QLabel#ActionsPopupItemTitle { color: #e3e8f1; font-size: 12px; background: transparent; }
-QLabel#ActionsPopupItemShortcut { color: #8b93a3; font-size: 11px; background: transparent; }
+QFrame#ActionsPopupSurface { background: transparent; border: none; }
+QFrame#ActionsPopupItem { background: transparent; border: none; }
+QLabel#ActionsPopupItemTitle { color: #eceff4; background: transparent; }
+QLabel#ActionsPopupItemShortcut { color: #8a93a8; background: transparent; }
 QFrame#ActionsPopupSeparator { background: #343a46; border: none; margin: 3px 6px; max-height: 1px; min-height: 1px; }
-QScrollBar:vertical { background: transparent; width: 7px; margin: 2px 0px; }
+QScrollBar:vertical { background: transparent; width: 6px; margin: 0px; }
 QScrollBar::handle:vertical {
   background: rgba(255, 255, 255, 0.20);
   min-height: 24px;
   border-radius: 3px;
+  border: none;
 }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-QPushButton#ChatSearchHitButton {
-  text-align: left;
-  padding: 4px 8px;
-  font-size: 12px;
+QScrollBar::groove:vertical { background: transparent; border: none; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; width: 0px; }
+QFrame#ChatSearchHitsConsole { background: transparent; border: none; }
+QScrollArea#ChatSearchHitsScroll {
   background: transparent;
   border: none;
-  border-radius: 6px;
 }
-QPushButton#ChatSearchHitButton:hover { background: rgba(255, 255, 255, 0.10); }
+QWidget#ChatSearchHitsInner { background: transparent; }
+QPushButton#ChatSearchHitRow {
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 11px;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #8fd99a;
+  min-width: 0px;
+  min-height: 0px;
+}
+QPushButton#ChatSearchHitRow:hover { background: rgba(48, 209, 88, 0.10); }
+QPushButton#ChatSearchHitRow[hitSelected="true"] {
+  background: rgba(48, 209, 88, 0.18);
+  color: #d8ffe0;
+}
+QFrame#ChatSearchHitsConsole QScrollBar:vertical {
+  background: transparent;
+  width: 6px;
+  margin: 0px;
+}
+QFrame#ChatSearchHitsConsole QScrollBar::handle:vertical {
+  background: rgba(255, 255, 255, 0.18);
+  min-height: 20px;
+  border-radius: 3px;
+}
 QLabel#RouterStatusLabel { color: #8d95a6; font-size: 12px; }
 QLabel#RouterSectionTitle { color: #f5f5f7; font-size: 13px; font-weight: 600; margin-top: 4px; }
 QLabel#RouterSectionSecondaryTitle { color: #9aa3b5; font-size: 12px; font-weight: 600; margin-top: 8px; }
@@ -223,11 +240,9 @@ QToolButton#EmojiPickerButton {
 }
 QToolButton#EmojiPickerButton:hover { background: rgba(255, 255, 255, 0.12); }
 QFrame#EmojiPickerPopupWindow { background: transparent; border: none; }
-QFrame#EmojiPickerPopupSurface {
-  background: rgba(34, 37, 45, 0.96);
-  border: none;
-  border-radius: 14px;
-}
+QFrame#EmojiPickerPopupSurface { background: transparent; border: none; }
+QScrollArea#EmojiPickerScroll { border: none; background: transparent; }
+QWidget#EmojiPickerGridHost { background: transparent; }
 QToolButton#EmojiCell {
   background: transparent;
   border: none;

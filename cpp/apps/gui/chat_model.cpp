@@ -69,7 +69,11 @@ QVector<int> ChatModel::match_rows(const QString& query) const {
         return hits;
     }
     for (int row = 0; row < lines_.size(); ++row) {
-        const QString hay = QString::fromStdString(lines_.at(row).text);
+        const auto& line = lines_.at(row);
+        const QString hay = QStringLiteral("%1 %2 %3")
+                                .arg(QString::fromStdString(line.time),
+                                     QString::fromStdString(line.author),
+                                     QString::fromStdString(line.text));
         if (hay.contains(needle, Qt::CaseInsensitive)) {
             hits.push_back(row);
         }

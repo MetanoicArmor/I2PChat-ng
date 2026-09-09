@@ -3,6 +3,8 @@
 #include "dialog_theme.hpp"
 #include "emoji_picker.hpp"
 #include "group_topology_map.hpp"
+#include "popup_chrome.hpp"
+#include "rounded_scrollbar.hpp"
 #include "router_settings_dialog.hpp"
 
 #include <algorithm>
@@ -44,6 +46,8 @@
 #include <QPen>
 #include <QGuiApplication>
 #include <QImage>
+#include <QIcon>
+#include <QStyle>
 #include <QStyleHints>
 #include <QCursor>
 #include <QDateTime>
@@ -54,7 +58,11 @@
 #include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QPushButton>
+#include <QFontDatabase>
+#include <QFontInfo>
+#include <QStyleFactory>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSettings>
@@ -382,8 +390,7 @@ public:
     explicit SearchHitsConsole(QWidget* parent = nullptr) : QFrame(parent) {
         setObjectName("ChatSearchHitsConsole");
         setFrameShape(QFrame::NoFrame);
-        setAttribute(Qt::WA_TranslucentBackground, true);
-        setAutoFillBackground(false);
+        prepare_translucent_popup(this);
         setProperty("night", true);
     }
 
@@ -395,16 +402,24 @@ protected:
             return;
         }
         const bool night = property("night").toBool();
-        QPainterPath path;
-        path.addRoundedRect(QRectF(0.75, 0.75, w - 1.5, h - 1.5), 10, 10);
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(rect(), QColor(0, 0, 0, 0));
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        QPainterPath path;
+        path.addRoundedRect(QRectF(0.75, 0.75, w - 1.5, h - 1.5), 10, 10);
         painter.fillPath(path, night ? QColor(18, 22, 28, 115) : QColor(232, 236, 244, 130));
         QPen pen(night ? QColor(255, 255, 255, 82) : QColor(60, 60, 67, 110));
         pen.setWidthF(1.35);
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
         painter.drawPath(path);
+    }
+
+    void resizeEvent(QResizeEvent* event) override {
+        QFrame::resizeEvent(event);
+        apply_rounded_popup_mask(this, 10.0);
     }
 };
 
@@ -414,7 +429,7 @@ ChatWindow::ChatWindow(GuiOptions options, QWidget* parent)
     : QMainWindow(parent), options_(std::move(options)) {
     setWindowTitle(QString("I2PChat @ %1").arg(QString::fromStdString(options_.profile)));
     setAcceptDrops(true);
-    resize(980, 640);
+    resize(900, 600);
     QSettings settings;
     history_enabled_ = settings.value(QStringLiteral("historyEnabled"), true).toBool();
     privacy_mode_ = settings.value(QStringLiteral("privacyMode"), false).toBool();
@@ -433,7 +448,17 @@ ChatWindow::ChatWindow(GuiOptions options, QWidget* parent)
     compose_drafts_timer_->setInterval(kComposeDraftsDebounceMs);
     connect(compose_drafts_timer_, &QTimer::timeout, this, [this] { flush_compose_drafts(); });
     apply_theme();
-    start_core();
+    // Defer router/SAM bring-up until after the first paint so the window appears
+    // immediately instead of blocking for several seconds on a cold i2pd.
+    status_label_->setText(tr("Status: waiting for I2P router…"));
+    QTimer::singleShot(0, this, [this] {
+        try {
+            start_core();
+        } catch (const std::exception& ex) {
+            status_label_->setText(tr("Status: failed — %1").arg(QString::fromUtf8(ex.what())));
+            QMessageBox::warning(this, tr("I2PChat"), QString::fromUtf8(ex.what()));
+        }
+    });
 }
 
 ChatWindow::~ChatWindow() {
@@ -527,10 +552,22 @@ void ChatWindow::build_ui() {
     search_edit_->setObjectName("ChatSearchLineEdit");
     search_edit_->setPlaceholderText(tr("Search in this chat…"));
     search_edit_->setFixedHeight(34);
+    search_edit_->setMinimumWidth(0);
+    search_edit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(search_edit_, &QLineEdit::textChanged, this, &ChatWindow::search_changed);
-    search_status_ = new QLabel(chat_surface);
+    search_field_wrap_ = new QWidget(chat_surface);
+    search_field_wrap_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    search_field_wrap_->setFixedHeight(34);
+    auto* search_wrap_lay = new QHBoxLayout(search_field_wrap_);
+    search_wrap_lay->setContentsMargins(0, 0, 0, 0);
+    search_wrap_lay->setSpacing(0);
+    search_wrap_lay->addWidget(search_edit_, 1);
+    search_status_ = new QLabel(search_field_wrap_);
     search_status_->setObjectName("ChatSearchStatusInline");
+    search_status_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    search_status_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     search_status_->hide();
+    search_field_wrap_->installEventFilter(this);
     auto* search_prev = new QPushButton(QStringLiteral("◀"), chat_surface);
     search_prev->setObjectName("ChatSearchStepButton");
     search_prev->setFixedSize(36, 34);
@@ -549,8 +586,7 @@ void ChatWindow::build_ui() {
     auto* search_row = new QHBoxLayout(search_row_w);
     search_row->setContentsMargins(4, 0, 0, 4);
     search_row->setSpacing(8);
-    search_row->addWidget(search_edit_, 1);
-    search_row->addWidget(search_status_);
+    search_row->addWidget(search_field_wrap_, 1);
     search_row->addWidget(search_prev);
     search_row->addWidget(search_next);
     search_header_lay->addWidget(search_row_w);
@@ -564,19 +600,40 @@ void ChatWindow::build_ui() {
     console_lay->setContentsMargins(8, 5, 8, 7);
     console_lay->setSpacing(0);
     auto* scroll = new QScrollArea(search_console_);
+    search_scroll_ = scroll;
     scroll->setObjectName("ChatSearchHitsScroll");
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setMaximumHeight(108);
+    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    prepare_translucent_popup(scroll);
+    make_widget_palette_transparent(scroll);
+    make_widget_palette_transparent(scroll->viewport());
     auto* hits_inner = new QWidget();
     hits_inner->setObjectName("ChatSearchHitsInner");
+    prepare_translucent_popup(hits_inner);
+    make_widget_palette_transparent(hits_inner);
     search_hits_layout_ = new QVBoxLayout(hits_inner);
     search_hits_layout_->setContentsMargins(2, 2, 2, 2);
     search_hits_layout_->setSpacing(3);
-    search_hits_layout_->addStretch(1);
     scroll->setWidget(hits_inner);
-    console_lay->addWidget(scroll);
+    auto* hits_scroll = new RoundedVerticalScrollbar(scroll->verticalScrollBar(), search_console_);
+    search_hits_bar_ = hits_scroll;
+    hits_scroll->set_colors(QColor(60, 60, 67, 72), QColor(0, 0, 0, 0));
+    hits_scroll->hide();
+    connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int max) {
+        if (search_hits_bar_ != nullptr) {
+            search_hits_bar_->setVisible(max > 0);
+        }
+    });
+    auto* scroll_row = new QHBoxLayout();
+    scroll_row->setContentsMargins(0, 0, 0, 0);
+    scroll_row->setSpacing(4);
+    scroll_row->addWidget(scroll, 1);
+    scroll_row->addWidget(hits_scroll, 0);
+    console_lay->addLayout(scroll_row);
 
     chat_view_ = new QListView(chat_surface);
     chat_view_->setObjectName("ChatView");
@@ -821,6 +878,17 @@ void ChatWindow::build_ui() {
 
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray_ = new QSystemTrayIcon(this);
+        QIcon tray_icon = windowIcon();
+        if (tray_icon.isNull()) {
+            tray_icon = QIcon(QStringLiteral(":/i2pchat/icons/app.ico"));
+        }
+        if (tray_icon.isNull()) {
+            tray_icon = style()->standardIcon(QStyle::SP_ComputerIcon);
+        }
+        if (!tray_icon.isNull()) {
+            setWindowIcon(tray_icon);
+            tray_->setIcon(tray_icon);
+        }
         tray_->setToolTip("I2PChat");
         auto* tray_menu = new QMenu(this);
         tray_menu->addAction(tr("Show"), this, &QWidget::showNormal);
@@ -848,6 +916,13 @@ void ChatWindow::apply_theme() {
     if (search_console_) {
         search_console_->setProperty("night", options_.dark);
         search_console_->update();
+    }
+    if (search_hits_bar_) {
+        if (options_.dark) {
+            search_hits_bar_->set_colors(QColor(255, 255, 255, 51), QColor(0, 0, 0, 0));
+        } else {
+            search_hits_bar_->set_colors(QColor(60, 60, 67, 72), QColor(0, 0, 0, 0));
+        }
     }
     if (contact_delegate_) {
         contact_delegate_->set_dark(options_.dark);
@@ -3114,28 +3189,71 @@ void ChatWindow::rebuild_search_console() {
         }
         delete item;
     }
+    search_hit_buttons_.clear();
     const QString query = search_edit_->text().trimmed();
-    if (query.isEmpty() || search_hits_.isEmpty()) {
+    if (query.isEmpty() || search_hits_.isEmpty() || search_hits_.size() == 1) {
         search_console_->hide();
         search_console_->setMaximumHeight(0);
         return;
     }
+    QWidget* hits_parent = search_scroll_ != nullptr ? search_scroll_->widget() : search_console_;
+    QFont hits_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    if (!QFontInfo(hits_font).fixedPitch()) {
+        hits_font = QFont(QStringLiteral("Consolas"), 11);
+    }
+    if (hits_font.pointSize() <= 0 || hits_font.pointSize() > 12) {
+        hits_font.setPointSize(11);
+    }
     for (int i = 0; i < search_hits_.size(); ++i) {
         const int row = search_hits_.at(i);
-        const QString text = chat_->index(row, 0).data(ChatModel::TextRole).toString().simplified();
-        auto* btn = new QPushButton(text.left(120), search_console_);
-        btn->setObjectName("ChatSearchHitButton");
-        btn->setCursor(Qt::PointingHandCursor);
+        auto* btn = new QPushButton(search_hit_label(row), hits_parent);
+        btn->setObjectName("ChatSearchHitRow");
         btn->setFlat(true);
+        btn->setFont(hits_font);
+        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        btn->setMinimumWidth(0);
         QObject::connect(btn, &QPushButton::clicked, this, [this, i] {
             search_cur_ = i;
             highlight_search();
         });
         search_hits_layout_->addWidget(btn);
+        search_hit_buttons_.push_back(btn);
     }
-    search_hits_layout_->addStretch(1);
     search_console_->show();
     search_console_->setMaximumHeight(128);
+    apply_rounded_popup_mask(search_console_, 10.0);
+    update_search_hit_highlight();
+}
+
+QString ChatWindow::search_hit_label(int row) const {
+    const QModelIndex index = chat_->index(row, 0);
+    QString text = index.data(ChatModel::TextRole).toString().replace(QLatin1Char('\n'), QLatin1Char(' '));
+    if (text.size() > 100) {
+        text = text.left(99) + QStringLiteral("…");
+    }
+    const QString time = index.data(ChatModel::TimeRole).toString();
+    const QString author = index.data(ChatModel::AuthorRole).toString();
+    if (time.isEmpty() && author.isEmpty()) {
+        return text;
+    }
+    return QStringLiteral("[%1] %2: %3").arg(time, author, text);
+}
+
+void ChatWindow::update_search_hit_highlight() {
+    for (int i = 0; i < search_hit_buttons_.size(); ++i) {
+        QPushButton* btn = search_hit_buttons_.at(i);
+        const bool sel = search_cur_ == i;
+        if (btn->property("hitSelected").toBool() != sel) {
+            btn->setProperty("hitSelected", sel);
+            btn->style()->unpolish(btn);
+            btn->style()->polish(btn);
+        }
+    }
+    if (search_scroll_ != nullptr && search_cur_ >= 0 && search_cur_ < search_hit_buttons_.size()) {
+        search_scroll_->ensureWidgetVisible(search_hit_buttons_.at(search_cur_));
+    }
 }
 
 void ChatWindow::notify_incoming(const std::string& peer, const QString& preview) {
@@ -3169,6 +3287,9 @@ void ChatWindow::sync_media_dirs() {
 }
 
 bool ChatWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == search_field_wrap_ && event->type() == QEvent::Resize) {
+        layout_search_status_overlay();
+    }
     if (emoji_button_ != nullptr && watched == emoji_button_->parent() &&
         event->type() == QEvent::Resize) {
         position_emoji_button();
@@ -3250,18 +3371,43 @@ void ChatWindow::search_step(int delta) {
     highlight_search();
 }
 
+void ChatWindow::layout_search_status_overlay() {
+    if (search_edit_ == nullptr || search_status_ == nullptr || search_field_wrap_ == nullptr) {
+        return;
+    }
+    constexpr int pad_l = 6;
+    if (!search_status_->isVisible() || search_status_->text().isEmpty()) {
+        search_edit_->setTextMargins(pad_l, 0, 0, 0);
+        return;
+    }
+    search_status_->adjustSize();
+    const int pad_r = search_status_->width() + 12;
+    search_edit_->setTextMargins(pad_l, 0, pad_r, 0);
+    const QRect eg = search_edit_->geometry();
+    const int x = eg.x() + eg.width() - search_status_->width() - 8;
+    const int y = eg.y() + std::max(0, (eg.height() - search_status_->height()) / 2);
+    search_status_->move(x, y);
+    search_status_->raise();
+}
+
 void ChatWindow::highlight_search() {
     if (search_edit_->text().trimmed().isEmpty()) {
+        search_status_->clear();
         search_status_->hide();
+        layout_search_status_overlay();
         return;
     }
     if (search_hits_.isEmpty()) {
-        search_status_->setText(tr("0"));
+        search_status_->setText(tr("No matches"));
         search_status_->show();
+        layout_search_status_overlay();
         return;
     }
     search_status_->setText(QString("%1/%2").arg(search_cur_ + 1).arg(search_hits_.size()));
     search_status_->show();
+    layout_search_status_overlay();
+    QTimer::singleShot(0, this, &ChatWindow::layout_search_status_overlay);
+    update_search_hit_highlight();
     const QModelIndex index = chat_->index(search_hits_.at(search_cur_), 0);
     chat_view_->scrollTo(index, QAbstractItemView::PositionAtCenter);
 }

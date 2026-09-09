@@ -112,10 +112,29 @@ function Copy-I2pdInto {
     }
 }
 
+function Copy-VcpkgRuntimeDlls {
+    param(
+        [Parameter(Mandatory = $true)][string]$Dest,
+        [Parameter(Mandatory = $true)][string]$BuildDir
+    )
+    $bin = Join-Path $BuildDir "vcpkg_installed\x64-windows\bin"
+    if (-not (Test-Path -LiteralPath $bin)) {
+        return
+    }
+    # App-local DLLs linked by i2pchat_core (cmake install only places the .exe).
+    foreach ($name in @("libsodium.dll", "z.dll")) {
+        $src = Join-Path $bin $name
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item $src $Dest -Force
+        }
+    }
+}
+
 function Publish-CppTree {
     param(
         [Parameter(Mandatory = $true)][string]$Stage,
         [Parameter(Mandatory = $true)][string]$Dest,
+        [Parameter(Mandatory = $true)][string]$BuildDir,
         [switch]$OmitI2pd
     )
     New-Item -ItemType Directory -Force -Path $Dest | Out-Null
@@ -128,6 +147,7 @@ function Publish-CppTree {
     Get-ChildItem (Join-Path $Stage "bin\*.dll") -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-Item $_.FullName $Dest -Force
     }
+    Copy-VcpkgRuntimeDlls -Dest $Dest -BuildDir $BuildDir
     if (-not $OmitI2pd) {
         Copy-I2pdInto -Root $Dest
     }
@@ -170,9 +190,42 @@ if (-not $ReleaseVersion) {
     throw "VERSION file is empty: $VersionFile"
 }
 
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+function Resolve-CMakeExecutable {
+    $fromPath = Get-Command cmake -ErrorAction SilentlyContinue
+    if ($fromPath) {
+        return $fromPath.Source
+    }
+    foreach ($candidate in @(
+            (Join-Path $env:ProgramFiles "CMake\bin\cmake.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "CMake\bin\cmake.exe")
+        )) {
+        if (Test-Path -LiteralPath $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere) {
+        $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath 2>$null
+        if (-not $vsRoot) {
+            $vsRoot = & $vswhere -latest -products * -property installationPath 2>$null
+        }
+        if ($vsRoot) {
+            $vsCmake = Join-Path $vsRoot.Trim() "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+            if (Test-Path -LiteralPath $vsCmake) {
+                return (Resolve-Path -LiteralPath $vsCmake).Path
+            }
+        }
+    }
+    return $null
+}
+
+$CMakeExe = Resolve-CMakeExecutable
+if (-not $CMakeExe) {
     throw "cmake is required (https://cmake.org/download/ or Visual Studio installer)."
 }
+# Ensure subsequent Invoke-NativeChecked "cmake" ... resolves (PATH may lack it in a fresh shell).
+$env:Path = "$(Split-Path -Parent $CMakeExe);$env:Path"
+Write-Host "==> Using cmake: $CMakeExe"
 
 if ($env:I2PCHAT_OMIT_BUNDLED_I2PD -ne "1" -and -not (Test-Path "vendor\i2pd\windows-x64\i2pd.exe")) {
     Write-Host "==> Checking optional bundled Windows i2pd source"
@@ -240,8 +293,11 @@ elseif ($env:VCPKG_ROOT) {
     if (Test-Path $tc) {
         $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$tc"
         if (-not $env:VCPKG_MANIFEST_FEATURES) {
-            $env:VCPKG_MANIFEST_FEATURES = "tui;gui"
+            # Prefer system Qt via CMAKE_PREFIX_PATH; only pull FTXUI from vcpkg.
+            # Set VCPKG_MANIFEST_FEATURES=tui;gui to also build Qt from vcpkg.
+            $env:VCPKG_MANIFEST_FEATURES = "tui"
         }
+        $cmakeArgs += "-DVCPKG_MANIFEST_FEATURES=$($env:VCPKG_MANIFEST_FEATURES)"
     }
 }
 if ($env:CMAKE_PREFIX_PATH) {
@@ -263,7 +319,7 @@ if (-not (Test-Path $guiExe) -or -not (Test-Path $tuiExe)) {
 
 Write-Host "==> Stage dist\I2PChat"
 Remove-PathWithRetry -Path "dist\I2PChat"
-Publish-CppTree -Stage $Stage -Dest "dist\I2PChat"
+Publish-CppTree -Stage $Stage -Dest "dist\I2PChat" -BuildDir $BuildDir
 Invoke-WinDeployQt -Exe "dist\I2PChat\I2PChat.exe"
 
 Write-Host ""
