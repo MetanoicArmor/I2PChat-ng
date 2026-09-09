@@ -148,6 +148,8 @@ QColor bubble_color(presentation::LineKind kind, bool dark) {
             return dark ? QColor(0x34, 0x38, 0x42) : QColor(0xe2, 0xe6, 0xef);
         case presentation::LineKind::Error:
             return dark ? QColor(0x5a, 0x35, 0x36) : QColor(0xf2, 0xd8, 0xd7);
+        case presentation::LineKind::Success:
+            return QColor(0x50, 0xfa, 0x7b);
         case presentation::LineKind::System:
             return Qt::transparent;
     }
@@ -162,6 +164,8 @@ QColor text_color(presentation::LineKind kind, bool dark) {
             return dark ? QColor(0xf2, 0xf2, 0xf7) : QColor(0x1c, 0x1c, 0x1e);
         case presentation::LineKind::Error:
             return dark ? QColor(0xff, 0xd9, 0xd6) : QColor(0x7c, 0x30, 0x2c);
+        case presentation::LineKind::Success:
+            return QColor(0x28, 0x2a, 0x36);
         case presentation::LineKind::System:
             return dark ? QColor(0xa3, 0xac, 0xbc) : QColor(0x5f, 0x66, 0x73);
     }

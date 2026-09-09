@@ -27,6 +27,8 @@ enum class LineKind {
     Outgoing,
     System,
     Error,
+    /// Green banner, matching the Python "Online! My Address" bubble.
+    Success,
 };
 
 /// One drawable line of a conversation.

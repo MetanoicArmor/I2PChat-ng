@@ -160,6 +160,14 @@ TEST_CASE("two clients exchange text through the router") {
     start_both(context, alice, bob);
     CHECK(alice.local_addr.size() == 52);
     CHECK(alice.local_addr != bob.local_addr);
+    REQUIRE(run_until(context, [&] {
+        return std::any_of(alice.systems.begin(), alice.systems.end(), [](const std::string& text) {
+            return text.find("Online! My Address:") != std::string::npos;
+        });
+    }));
+    CHECK(std::any_of(alice.systems.begin(), alice.systems.end(), [](const std::string& text) {
+        return text.find("Initializing Profile:") != std::string::npos;
+    }));
 
     bool connected = false;
     bool result = false;

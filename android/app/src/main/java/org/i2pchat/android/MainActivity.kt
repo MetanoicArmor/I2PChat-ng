@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -138,6 +140,39 @@ fun I2PChatRoot(bridge: ChatBridge) {
     }
 }
 
+@Composable
+fun SessionNoticeRow(msg: MessageUi) {
+    val system = msg.kind == "system" || msg.kind == "info"
+    val success = msg.kind == "success"
+    val error = msg.kind == "error"
+    if (system) {
+        Text(
+            msg.text,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = when {
+                    success -> Color(0xFF50FA7B)
+                    error -> MaterialTheme.colorScheme.errorContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                },
+                contentColor = when {
+                    success -> Color(0xFF282A36)
+                    error -> MaterialTheme.colorScheme.onErrorContainer
+                    else -> MaterialTheme.colorScheme.onSurface
+                },
+            ),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        ) {
+            Text(msg.text, modifier = Modifier.padding(10.dp), fontWeight = if (success) FontWeight.SemiBold else FontWeight.Normal)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
@@ -183,6 +218,14 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
                 Text(state.error, color = MaterialTheme.colorScheme.error)
             }
             Text(state.status, style = MaterialTheme.typography.bodySmall)
+            if (state.sessionNotices.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(Modifier.weight(1f, fill = false)) {
+                    items(state.sessionNotices) { notice ->
+                        SessionNoticeRow(notice)
+                    }
+                }
+            }
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = { bridge.start(name.ifBlank { "random_address" }) },
@@ -294,6 +337,11 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+            if (state.sessionNotices.isNotEmpty()) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    state.sessionNotices.takeLast(8).forEach { SessionNoticeRow(it) }
+                }
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filtered, key = { it.addr }) { item ->
@@ -421,21 +469,25 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
             }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
                 items(shown) { msg ->
-                    val mine = msg.kind == "out" || msg.kind == "me"
-                    Column(
-                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
-                    ) {
-                        Card {
-                            Column(Modifier.padding(10.dp)) {
-                                if (group && msg.sender.isNotBlank()) {
-                                    Text(msg.sender.take(16), style = MaterialTheme.typography.labelSmall)
+                    if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
+                        SessionNoticeRow(msg)
+                    } else {
+                        val mine = msg.kind == "out" || msg.kind == "me"
+                        Column(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+                        ) {
+                            Card {
+                                Column(Modifier.padding(10.dp)) {
+                                    if (group && msg.sender.isNotBlank()) {
+                                        Text(msg.sender.take(16), style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    Text(msg.text)
+                                    Text(
+                                        listOf(msg.ts.take(19), msg.delivery).filter { it.isNotBlank() }.joinToString(" · "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
                                 }
-                                Text(msg.text)
-                                Text(
-                                    listOf(msg.ts.take(19), msg.delivery).filter { it.isNotBlank() }.joinToString(" · "),
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
                             }
                         }
                     }

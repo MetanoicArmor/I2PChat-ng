@@ -65,6 +65,7 @@ data class ChatUiState(
     val contacts: List<ContactUi> = emptyList(),
     val groups: List<ContactUi> = emptyList(),
     val messages: List<MessageUi> = emptyList(),
+    val sessionNotices: List<MessageUi> = emptyList(),
     val selectedId: String = "",
     val selectedIsGroup: Boolean = false,
     val compose: String = "",
@@ -172,9 +173,27 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     fun start(profile: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            _state.update { it.copy(starting = true, profile = profile, error = "", status = "Starting I2P…") }
             val router = RouterPrefs.load(appRoot)
             val ui = UiPrefs.load(appRoot)
+            _state.update {
+                it.copy(
+                    starting = true,
+                    profile = profile,
+                    error = "",
+                    status = "Starting I2P…",
+                    sessionNotices = listOf(
+                        MessageUi(
+                            "system",
+                            if (router.usingBundled) {
+                                "Starting bundled i2pd…"
+                            } else {
+                                "Starting I2P session, please wait…"
+                            },
+                            "",
+                        ),
+                    ),
+                )
+            }
             I2pdForegroundService.start(
                 getApplication(),
                 appRoot,
@@ -182,7 +201,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 if (router.usingBundled) "Starting bundled i2pd…" else "Using external SAM ${router.samHost}:${router.samPort}",
             )
             val timeout = if (router.usingBundled) 180_000 else 8_000
-            _state.update { it.copy(status = "Waiting for SAM ${router.samHost}:${router.samPort}…") }
+            appendNotice("system", "Waiting for SAM ${router.samHost}:${router.samPort}…")
             val ready = waitForSam(router.samHost, router.samPort, timeout) {
                 val msg = I2pdForegroundService.readStatus(appRoot)
                 if (msg.isNotBlank()) {
@@ -259,6 +278,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     contacts = emptyList(),
                     groups = emptyList(),
                     messages = emptyList(),
+                    sessionNotices = emptyList(),
                 )
             }
         }
@@ -620,12 +640,25 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
     }
 
+    private fun appendNotice(kind: String, text: String) {
+        val noticeKind = if (text.startsWith("Online! My Address:")) "success" else kind
+        _state.update {
+            val notices = if (it.sessionNotices.lastOrNull()?.text == text) {
+                it.sessionNotices
+            } else {
+                it.sessionNotices + MessageUi(noticeKind, text, "")
+            }
+            it.copy(sessionNotices = notices, status = text)
+        }
+    }
+
     override fun onSystem(message: String) = onMain {
-        _state.update { it.copy(status = message) }
+        appendNotice("system", message)
     }
 
     override fun onError(message: String) = onMain {
-        _state.update { it.copy(error = message, status = message) }
+        appendNotice("error", message)
+        _state.update { it.copy(error = message) }
     }
 
     override fun onHistory(peer: String, json: String) = onMain {

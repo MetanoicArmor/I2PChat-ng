@@ -40,6 +40,8 @@ Color color_for(presentation::LineKind kind) {
             return Color::Cyan;
         case presentation::LineKind::Error:
             return Color::RedLight;
+        case presentation::LineKind::Success:
+            return Color::GreenLight;
         case presentation::LineKind::System:
             return Color::Yellow;
     }
@@ -189,7 +191,10 @@ void TuiApp::start_core() {
     runtime::ChatEvents events;
     events.on_system = [this](const std::string& message) {
         post_ui([this, message] {
-            append_local(presentation::LineKind::System, message);
+            const auto kind = message.rfind("Online! My Address:", 0) == 0
+                                  ? presentation::LineKind::Success
+                                  : presentation::LineKind::System;
+            append_local(kind, message);
             screen_.RequestAnimationFrame();
         });
     };

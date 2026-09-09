@@ -1435,6 +1435,9 @@ void ChatWindow::play_notify_sound() {
 }
 
 void ChatWindow::start_core() {
+    session_log_.clear();
+    chat_->clear();
+    apply_empty_state();
     apply_router_settings_to_options();
     ensure_bundled_router();
     wait_for_sam_ready(bundled_router_ ? 45000 : 8000);
@@ -1448,25 +1451,15 @@ void ChatWindow::start_core() {
     runtime::ChatEvents events;
     events.on_system = [this](const std::string& message) {
         QMetaObject::invokeMethod(this, [this, message] {
-            presentation::ChatLine line;
-            line.kind = presentation::LineKind::System;
-            line.text = message;
-            if (!selected_.empty()) {
-                chat_->append(std::move(line));
-            }
-            refresh_status();
+            const auto kind = message.rfind("Online! My Address:", 0) == 0
+                                  ? presentation::LineKind::Success
+                                  : presentation::LineKind::System;
+            append_notice(kind, message);
         });
     };
     events.on_error = [this](const std::string& message) {
         QMetaObject::invokeMethod(this, [this, message] {
-            const QString text = friendly_error(message);
-            presentation::ChatLine line;
-            line.kind = presentation::LineKind::Error;
-            line.text = text.toStdString();
-            if (!selected_.empty()) {
-                chat_->append(std::move(line));
-            }
-            refresh_status();
+            append_notice(presentation::LineKind::Error, friendly_error(message).toStdString());
         });
     };
     events.on_history = [this](const std::string& peer, const storage::HistoryEntry& entry) {
@@ -1560,10 +1553,22 @@ void ChatWindow::start_core() {
     });
 }
 
+void ChatWindow::append_notice(presentation::LineKind kind, const std::string& text) {
+    presentation::ChatLine line;
+    line.kind = kind;
+    line.text = text;
+    session_log_.push_back(line);
+    chat_->append(std::move(line));
+    chat_view_->scrollToBottom();
+    apply_empty_state();
+    refresh_status();
+}
+
 void ChatWindow::stop_core() {
     if (!running_) {
         return;
     }
+    session_log_.clear();
     running_ = false;
     {
         std::lock_guard lock(trust_mutex_);
@@ -1695,8 +1700,7 @@ void ChatWindow::apply_empty_state() {
             stack = layout;
         }
     }
-    const bool show_chat =
-        (!selected_.empty() || !active_group_id_.empty()) && chat_->rowCount() > 0;
+    const bool show_chat = chat_->rowCount() > 0;
     if (stack != nullptr) {
         stack->setCurrentWidget(show_chat ? static_cast<QWidget*>(chat_view_)
                                           : static_cast<QWidget*>(empty_hint_));
@@ -1740,7 +1744,8 @@ void ChatWindow::reload_selected() {
         return;
     }
     if (selected_.empty()) {
-        chat_->clear();
+        chat_->set_lines(session_log_);
+        chat_view_->scrollToBottom();
         apply_empty_state();
         return;
     }

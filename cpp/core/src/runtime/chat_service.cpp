@@ -25,6 +25,7 @@
 #include "i2pchat/sam/destination.hpp"
 #include "i2pchat/session/peer_session.hpp"
 #include "i2pchat/storage/contacts.hpp"
+#include "i2pchat/storage/keyring.hpp"
 
 namespace i2pchat::runtime {
 namespace {
@@ -134,6 +135,23 @@ asio::awaitable<void> ChatService::start() {
     std::filesystem::create_directories(config_.downloads_dir);
     std::filesystem::create_directories(config_.images_dir);
 
+    emit_system("Initializing Profile: " + config_.profile);
+    if (config_.profile == kTransientProfile) {
+        emit_system(
+            "Security note: TRANSIENT profile does not persist TOFU trust pins between restarts.");
+        emit_system("Use a named profile for persistent peer-key trust continuity.");
+    }
+    const bool had_destination = load_destination(paths_).has_value();
+    const bool had_keyring =
+        storage::keyring::get(storage::kKeyringService, config_.profile).has_value();
+    if (had_keyring) {
+        emit_system("Loaded identity from secure keyring");
+    } else if (had_destination) {
+        emit_system("Loaded identity from encrypted " + paths_.identity_dat().string());
+    } else {
+        emit_system("Generating new Ed25519 identity...");
+    }
+
     if (config_.profile != kTransientProfile) {
         trust_ = session::TrustStore(paths_.trust_store());
         trust_.load();
@@ -157,6 +175,11 @@ asio::awaitable<void> ChatService::start() {
         }
     }
 
+    if (!had_destination && !had_keyring && config_.profile != kTransientProfile) {
+        emit_system("Identity will be saved encrypted to " + paths_.identity_dat().string());
+    }
+
+    emit_system("Starting I2P session, please wait…");
     sam_ = std::make_shared<sam::SamSession>(executor_, config_.sam);
     try {
         if (identity_.destination_base64.empty()) {
@@ -185,7 +208,7 @@ asio::awaitable<void> ChatService::start() {
         co_return;
     }
 
-    sessions_.set_transport_state(session::TransportState::WarmingTunnels,
+    sessions_.set_transport_state(session::TransportState::SamConnected,
                                   "sam-session-created");
     running_ = true;
     stopping_ = false;
@@ -220,11 +243,38 @@ asio::awaitable<void> ChatService::start() {
     if (events_.on_local_address) {
         events_.on_local_address(identity_.local_addr);
     }
-    emit_system("I2P session ready at " + identity_.local_addr);
+    emit_system("Building I2P tunnels (may take 1–2 min)...");
+    sessions_.set_transport_state(session::TransportState::WarmingTunnels, "tunnel-warmup");
 
     asio::co_spawn(executor_, [this] { return accept_loop(); }, asio::detached);
     if (config_.blindbox_enabled) {
         asio::co_spawn(executor_, [this] { return blindbox_loop(); }, asio::detached);
+    }
+
+    bool tunnels_ready = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (!stopping_ && std::chrono::steady_clock::now() < deadline) {
+        try {
+            (void)co_await sam_->naming_lookup(identity_.local_addr + ".b32.i2p");
+            tunnels_ready = true;
+            break;
+        } catch (const std::exception&) {
+        }
+        asio::steady_timer timer(executor_);
+        timer.expires_after(std::chrono::seconds(3));
+        boost::system::error_code wait_error;
+        co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+    }
+    if (stopping_) {
+        co_return;
+    }
+    emit_system("Online! My Address: " + identity_.local_addr);
+    if (tunnels_ready) {
+        emit_system("Tunnels ready. Waiting for incoming connections...");
+        sessions_.set_transport_state(session::TransportState::Ready, "tunnels-ready");
+    } else {
+        emit_system("Tunnels may still be building. Wait 1–2 min before connecting.");
+        sessions_.set_transport_state(session::TransportState::Degraded, "tunnels-pending");
     }
 }
 

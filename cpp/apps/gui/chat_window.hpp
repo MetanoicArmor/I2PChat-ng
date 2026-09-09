@@ -20,6 +20,7 @@
 #include "chat_model.hpp"
 #include "contact_item_delegate.hpp"
 #include "contact_list_model.hpp"
+#include "i2pchat/presentation/chat_view.hpp"
 #include "i2pchat/router/i2pd.hpp"
 #include "i2pchat/runtime/chat_service.hpp"
 #include "i2pchat/session/manager.hpp"
@@ -121,6 +122,7 @@ private:
     [[nodiscard]] bool resolved_dark() const;
     void apply_theme();
     void apply_empty_state();
+    void append_notice(presentation::LineKind kind, const std::string& text);
     void highlight_search();
     void rebuild_search_console();
     void update_search_hit_highlight();
@@ -218,6 +220,7 @@ private:
     std::optional<std::string> compose_draft_active_key_;
     QTimer* compose_drafts_timer_ = nullptr;
     std::map<std::string, unsigned> unread_;
+    std::vector<presentation::ChatLine> session_log_;
     QString theme_pref_ = QStringLiteral("auto");
     session::TransportState transport_ = session::TransportState::Starting;
     std::string transport_reason_;
