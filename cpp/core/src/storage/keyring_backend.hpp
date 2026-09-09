@@ -18,4 +18,9 @@ namespace i2pchat::storage::keyring::backend {
 
 [[nodiscard]] bool erase(std::string_view service, std::string_view account);
 
+#if defined(__ANDROID__)
+/// Called from JNI_OnLoad so wrap-key lookups can reach Android Keystore.
+void set_java_vm(void* vm);
+#endif
+
 }  // namespace i2pchat::storage::keyring::backend

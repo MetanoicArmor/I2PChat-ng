@@ -43,6 +43,7 @@ add_library(i2pchat_core
   src/storage/keyring_macos.cpp
   src/storage/keyring_linux.cpp
   src/storage/keyring_windows.cpp
+  src/storage/keyring_android.cpp
   src/runtime/chat_service.cpp
   src/runtime/identity.cpp
   src/runtime/peer_link.cpp
@@ -71,6 +72,10 @@ target_link_libraries(i2pchat_core
     ZLIB::ZLIB
     i2pchat_project_options
 )
+# Modular Boost CMake (FetchContent) puts Asio on Boost::asio, not Boost::headers.
+if(TARGET Boost::asio)
+  target_link_libraries(i2pchat_core PUBLIC Boost::asio)
+endif()
 
 # Asio needs threads and, on some platforms, an explicit standalone switch.
 find_package(Threads REQUIRED)
@@ -83,6 +88,9 @@ if(APPLE)
 elseif(WIN32)
   # Credential Manager, for the wrap-key store.
   target_link_libraries(i2pchat_core PRIVATE advapi32)
+elseif(ANDROID)
+  # Wrap keys live in the Android Keystore, reached through JNI.
+  target_link_libraries(i2pchat_core PRIVATE log)
 elseif(UNIX)
   # libsecret is optional: without it the .dat.wrap sidecar is the only wrap-key
   # store, which is a supported configuration rather than a broken build.

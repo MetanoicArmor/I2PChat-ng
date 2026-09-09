@@ -14,6 +14,7 @@ __pycache__/
 *.pyo
 .Python
 *.so
+!android/app/src/main/jniLibs/**/libi2pd.so
 .gm/
 .venv/
 .venv*/
@@ -81,6 +82,15 @@ docs/CURSOR_*.md
 *.swp
 *.swo
 *~
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/.cxx/
+android/**/capture/
 
 # Tests / coverage
 .coverage

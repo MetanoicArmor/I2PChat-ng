@@ -21,7 +21,14 @@ endif()
 option(I2PCHAT_BUILD_TESTS "Build the C++ test suite" ON)
 option(I2PCHAT_BUILD_TUI "Build the FTXUI terminal client" ON)
 option(I2PCHAT_BUILD_GUI "Build the Qt 6 desktop client" OFF)
+option(I2PCHAT_ANDROID "Build the core library for Android NDK" OFF)
 option(I2PCHAT_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+if(I2PCHAT_ANDROID)
+  set(I2PCHAT_BUILD_TESTS OFF)
+  set(I2PCHAT_BUILD_TUI OFF)
+  set(I2PCHAT_BUILD_GUI OFF)
+endif()
 
 # Homebrew prefixes are not on the default search path for find_package.
 if(APPLE)
@@ -55,7 +62,9 @@ find_package(PkgConfig QUIET)
 
 # libsodium ships a CMake config only in some distributions; fall back to
 # pkg-config and then to a manual search so the build works on stock Homebrew,
-# vcpkg and Debian alike.
+# vcpkg and Debian alike. The Android NDK build may already have created the
+# alias from FetchContent before this file is included.
+if(NOT TARGET i2pchat::sodium)
 find_package(unofficial-sodium CONFIG QUIET)
 if(TARGET unofficial-sodium::sodium)
   add_library(i2pchat::sodium ALIAS unofficial-sodium::sodium)
@@ -75,9 +84,14 @@ else()
     add_library(i2pchat::sodium ALIAS i2pchat_sodium)
   endif()
 endif()
+endif()
 
-find_package(nlohmann_json 3.10 REQUIRED)
-find_package(Boost 1.81 REQUIRED)
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  find_package(nlohmann_json 3.10 REQUIRED)
+endif()
+if(NOT TARGET Boost::headers)
+  find_package(Boost 1.81 REQUIRED)
+endif()
 
 # Third-party headers do not survive our warning set, and their noise would bury
 # warnings about our own code. Boost usually lives in a default search path, so
@@ -89,7 +103,9 @@ target_compile_options(i2pchat_project_options INTERFACE
 )
 
 add_subdirectory(core)
-add_subdirectory(apps/blindbox-daemon)
+if(NOT I2PCHAT_ANDROID)
+  add_subdirectory(apps/blindbox-daemon)
+endif()
 
 if(I2PCHAT_BUILD_TESTS)
   enable_testing()

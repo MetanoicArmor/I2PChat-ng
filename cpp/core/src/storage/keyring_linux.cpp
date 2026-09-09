@@ -1,6 +1,6 @@
 #include "keyring_backend.hpp"
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 
 #include <string>
 
@@ -95,4 +95,4 @@ bool erase(std::string_view, std::string_view) { return false; }
 
 }  // namespace i2pchat::storage::keyring::backend
 
-#endif  // __linux__
+#endif  // __linux__ && !__ANDROID__
