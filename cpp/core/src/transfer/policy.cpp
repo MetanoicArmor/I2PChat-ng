@@ -57,7 +57,10 @@ RetryDecision should_retry(int attempt, FailureReason reason, const RetryPolicy&
     // Doubling from the base, so a peer that is down is asked less and less
     // often, up to the cap.
     const auto exponent = std::max(0, attempt - 1);
-    const auto uncapped = policy.backoff_base * (1LL << exponent);
+    // `1LL` promotes the duration rep to long long; cast back so std::min
+    // sees two std::chrono::milliseconds on libstdc++ (rep is long, not long long).
+    const auto uncapped = std::chrono::duration_cast<std::chrono::milliseconds>(
+        policy.backoff_base * (1LL << exponent));
     return RetryDecision{true, std::min(uncapped, policy.max_backoff)};
 }
 

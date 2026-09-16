@@ -86,8 +86,17 @@ else()
 endif()
 endif()
 
+# nlohmann_json ships a CMake config on Debian/Homebrew/vcpkg; fall back to
+# FetchContent so a stock Arch/CachyOS box can configure without extra packages.
+include(FetchContent)
 if(NOT TARGET nlohmann_json::nlohmann_json)
-  find_package(nlohmann_json 3.10 REQUIRED)
+  find_package(nlohmann_json 3.10 QUIET)
+endif()
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  FetchContent_Declare(nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
 endif()
 if(NOT TARGET Boost::headers)
   find_package(Boost 1.81 REQUIRED)

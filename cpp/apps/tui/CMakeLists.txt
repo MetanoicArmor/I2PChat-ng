@@ -4,6 +4,17 @@ if(NOT TARGET ftxui::component)
   find_package(ftxui QUIET)
 endif()
 if(NOT TARGET ftxui::component)
+  include(FetchContent)
+  FetchContent_Declare(ftxui
+    URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v6.1.9.tar.gz
+  )
+  set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(ftxui)
+endif()
+if(NOT TARGET ftxui::component)
   message(FATAL_ERROR "FTXUI not found. Install it (e.g. brew install ftxui) "
                       "or enable the vcpkg `tui` feature.")
 endif()
