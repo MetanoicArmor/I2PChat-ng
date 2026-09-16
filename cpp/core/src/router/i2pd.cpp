@@ -11,6 +11,8 @@
 #include "i2pchat/crypto.hpp"
 #include "i2pchat/encoding.hpp"
 
+#include <sodium.h>
+
 #ifndef _WIN32
 #include <csignal>
 #include <sys/stat.h>
@@ -94,17 +96,21 @@ std::string file_sha256(const std::filesystem::path& path) {
     if (!stream) {
         throw RouterError("Cannot read " + path.string());
     }
-    // Hash in chunks: a router binary is tens of megabytes.
-    Bytes buffer(1024 * 1024);
-    Bytes contents;
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    Bytes buffer(64 * 1024);
     while (stream) {
         stream.read(reinterpret_cast<char*>(buffer.data()),
                     static_cast<std::streamsize>(buffer.size()));
         const auto read = static_cast<std::size_t>(stream.gcount());
-        contents.insert(contents.end(), buffer.begin(),
-                        buffer.begin() + static_cast<std::ptrdiff_t>(read));
+        if (read == 0) {
+            break;
+        }
+        crypto_hash_sha256_update(&state, buffer.data(), read);
     }
-    return encoding::hex_encode(ByteView(crypto::sha256(ByteView(contents))));
+    Bytes digest(crypto_hash_sha256_BYTES);
+    crypto_hash_sha256_final(&state, digest.data());
+    return encoding::hex_encode(ByteView(digest));
 }
 
 void verify_bundled_binary(const std::filesystem::path& binary) {

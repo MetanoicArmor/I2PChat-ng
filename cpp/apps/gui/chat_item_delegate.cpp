@@ -5,6 +5,7 @@
 #include <QEvent>
 #include <QFileInfo>
 #include <QFontMetrics>
+#include <QImageReader>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -176,6 +177,28 @@ QColor text_color(presentation::LineKind kind, bool dark) {
 
 ChatItemDelegate::ChatItemDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
 
+QPixmap ChatItemDelegate::cached_thumb(const QString& path, int max_w) const {
+    if (path.isEmpty()) {
+        return {};
+    }
+    const QString key = path + QLatin1Char('\n') + QString::number(max_w);
+    const auto found = thumbs_.constFind(key);
+    if (found != thumbs_.cend()) {
+        return found.value();
+    }
+    QPixmap pix(path);
+    if (pix.isNull()) {
+        return {};
+    }
+    if (thumbs_.size() > 64) {
+        thumbs_.clear();
+    }
+    const QSize sz = thumb_size(pix, max_w);
+    const QPixmap scaled = pix.scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    thumbs_.insert(key, scaled);
+    return scaled;
+}
+
 QSize ChatItemDelegate::sizeHint(const QStyleOptionViewItem& option,
                                  const QModelIndex& index) const {
     const QString text = index.data(ChatModel::TextRole).toString();
@@ -203,10 +226,12 @@ QSize ChatItemDelegate::sizeHint(const QStyleOptionViewItem& option,
     const int bubble_w = bubble_width_px(cell, shown.isEmpty() ? text : shown, font);
     const int inner = inner_text_width(bubble_w);
     qreal height = wrapped_height(shown.isEmpty() ? text : shown, font, inner);
-    if (media.kind == MediaHint::Kind::Image) {
-        QPixmap pix(resolved);
-        if (!pix.isNull()) {
-            height += thumb_size(pix, inner).height() + 6;
+    if (media.kind == MediaHint::Kind::Image && !resolved.isEmpty()) {
+        QImageReader reader(resolved);
+        QSize native = reader.size();
+        if (native.isValid()) {
+            native.scale(std::min(inner, kThumbMaxW), kThumbMaxH, Qt::KeepAspectRatio);
+            height += native.height() + 6;
         }
     }
     height += kPaddingY * 2 + 2 * kBubbleOuterY;
@@ -276,14 +301,12 @@ void ChatItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
     const QRectF inner = bubble.adjusted(kPaddingX, kPaddingY, -kPaddingX, -kPaddingY);
     qreal y = inner.top();
     if (media.kind == MediaHint::Kind::Image) {
-        QPixmap pix(resolved);
-        if (!pix.isNull()) {
-            const QSize sz = thumb_size(pix, static_cast<int>(inner.width()));
-            const QPixmap scaled = pix.scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-            const int draw_x = outgoing ? static_cast<int>(inner.right()) - sz.width()
+        const QPixmap scaled = cached_thumb(resolved, static_cast<int>(inner.width()));
+        if (!scaled.isNull()) {
+            const int draw_x = outgoing ? static_cast<int>(inner.right()) - scaled.width()
                                         : static_cast<int>(inner.left());
             painter->drawPixmap(draw_x, static_cast<int>(y), scaled);
-            y += sz.height() + 4;
+            y += scaled.height() + 4;
         }
     }
     const QRectF text_area(inner.left(), y, inner.width(),

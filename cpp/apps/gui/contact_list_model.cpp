@@ -42,6 +42,9 @@ Qt::ItemFlags ContactListModel::flags(const QModelIndex& index) const {
 }
 
 void ContactListModel::set_rows(QVector<SidebarRow> rows) {
+    if (rows == rows_) {
+        return;
+    }
     beginResetModel();
     rows_ = std::move(rows);
     endResetModel();

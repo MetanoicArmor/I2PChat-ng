@@ -73,9 +73,9 @@
 #include <QSplitter>
 #include <QStackedLayout>
 #include <QTabWidget>
+#include <QAbstractSocket>
 #include <QTcpSocket>
 #include <QTextCursor>
-#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -447,6 +447,10 @@ ChatWindow::ChatWindow(GuiOptions options, QWidget* parent)
     compose_drafts_timer_->setSingleShot(true);
     compose_drafts_timer_->setInterval(kComposeDraftsDebounceMs);
     connect(compose_drafts_timer_, &QTimer::timeout, this, [this] { flush_compose_drafts(); });
+    contacts_refresh_timer_ = new QTimer(this);
+    contacts_refresh_timer_->setSingleShot(true);
+    contacts_refresh_timer_->setInterval(150);
+    connect(contacts_refresh_timer_, &QTimer::timeout, this, &ChatWindow::rebuild_contacts_sidebar);
     apply_theme();
     // Defer router/SAM bring-up until after the first paint so the window appears
     // immediately instead of blocking for several seconds on a cold i2pd.
@@ -865,6 +869,7 @@ void ChatWindow::build_ui() {
     bind_shortcut(QStringLiteral("Ctrl+R"), [this] { router_settings(); });
     bind_shortcut(QStringLiteral("Ctrl+Shift+C"), [this] { copy_address(); });
     bind_shortcut(QStringLiteral("Ctrl+Shift+G"), [this] { copy_group_invite(); });
+    new QShortcut(QKeySequence::Quit, this, [this] { request_quit(); });
     new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this, SLOT(send_current()));
     new QShortcut(QKeySequence(QStringLiteral("Ctrl+;")), this, SLOT(toggle_emoji_picker()));
 
@@ -891,8 +896,12 @@ void ChatWindow::build_ui() {
         }
         tray_->setToolTip("I2PChat");
         auto* tray_menu = new QMenu(this);
-        tray_menu->addAction(tr("Show"), this, &QWidget::showNormal);
-        tray_menu->addAction(tr("Quit"), qApp, &QApplication::quit);
+        tray_menu->addAction(tr("Show"), this, [this] {
+            showNormal();
+            raise();
+            activateWindow();
+        });
+        tray_menu->addAction(tr("Quit"), this, &ChatWindow::request_quit);
         tray_->setContextMenu(tray_menu);
         connect(tray_, &QSystemTrayIcon::activated, this, &ChatWindow::tray_activated);
         tray_->show();
@@ -1307,6 +1316,9 @@ void ChatWindow::show_more_menu() {
             notify_sound_ = !notify_sound_;
             QSettings().setValue(QStringLiteral("notifySound"), notify_sound_);
         });
+    more_popup_->add_separator();
+    more_popup_->add_action(tr("Quit"), QStringLiteral("Ctrl+Q"), [this] { request_quit(); },
+                            tr("Close I2PChat completely."));
     more_popup_->show_below(more_button_);
 }
 
@@ -1371,24 +1383,50 @@ void ChatWindow::ensure_bundled_router() {
     bundled_router_->start();
 }
 
-bool ChatWindow::wait_for_sam_ready(int timeout_ms) {
-    QElapsedTimer timer;
-    timer.start();
-    while (timer.elapsed() < timeout_ms) {
-        QTcpSocket sock;
-        sock.connectToHost(QString::fromStdString(options_.sam_host), options_.sam_port);
-        if (sock.waitForConnected(400)) {
-            sock.write("HELLO VERSION MIN=3.1 MAX=3.3\n");
-            if (sock.waitForReadyRead(800)) {
-                if (sock.readAll().contains("HELLO REPLY")) {
-                    return true;
-                }
-            }
-        }
-        QThread::msleep(250);
-        QCoreApplication::processEvents();
+void ChatWindow::probe_sam(int generation) {
+    if (generation != sam_wait_generation_) {
+        return;
     }
-    return false;
+    if (!sam_wait_clock_.isValid() || sam_wait_clock_.elapsed() >= sam_wait_timeout_ms_) {
+        start_core_session();
+        return;
+    }
+
+    auto* sock = new QTcpSocket(this);
+    auto finish_retry = [this, sock, generation] {
+        if (sock->property("samHandled").toBool()) {
+            return;
+        }
+        sock->setProperty("samHandled", true);
+        sock->deleteLater();
+        QTimer::singleShot(250, this, [this, generation] { probe_sam(generation); });
+    };
+    auto* timeout = new QTimer(sock);
+    timeout->setSingleShot(true);
+    timeout->setInterval(900);
+    connect(timeout, &QTimer::timeout, sock, [sock] { sock->abort(); });
+    connect(sock, &QTcpSocket::connected, this, [sock] {
+        sock->write("HELLO VERSION MIN=3.1 MAX=3.3\n");
+    });
+    connect(sock, &QTcpSocket::readyRead, this, [this, sock, generation] {
+        if (generation != sam_wait_generation_) {
+            sock->setProperty("samHandled", true);
+            sock->deleteLater();
+            return;
+        }
+        if (!sock->readAll().contains("HELLO REPLY")) {
+            return;
+        }
+        sock->setProperty("samHandled", true);
+        sock->disconnect();
+        sock->deleteLater();
+        start_core_session();
+    });
+    connect(sock, &QAbstractSocket::errorOccurred, this,
+            [finish_retry](QAbstractSocket::SocketError) { finish_retry(); });
+    connect(sock, &QAbstractSocket::disconnected, this, finish_retry);
+    timeout->start();
+    sock->connectToHost(QString::fromStdString(options_.sam_host), options_.sam_port);
 }
 
 void ChatWindow::play_notify_sound() {
@@ -1440,7 +1478,19 @@ void ChatWindow::start_core() {
     apply_empty_state();
     apply_router_settings_to_options();
     ensure_bundled_router();
-    wait_for_sam_ready(bundled_router_ ? 45000 : 8000);
+    ++sam_wait_generation_;
+    sam_wait_timeout_ms_ = bundled_router_ ? 45000 : 8000;
+    sam_wait_clock_.restart();
+    status_label_->setText(tr("Status: waiting for I2P router…"));
+    probe_sam(sam_wait_generation_);
+}
+
+void ChatWindow::start_core_session() {
+    if (running_) {
+        return;
+    }
+    ++sam_wait_generation_;
+    sam_wait_clock_.invalidate();
     runtime::ChatServiceConfig config;
     config.app_root = options_.app_root;
     config.profile = options_.profile;
@@ -1469,7 +1519,7 @@ void ChatWindow::start_core() {
                 notify_incoming(peer, QString::fromStdString(entry.text));
             }
             if (!history_enabled_) {
-                refresh_contacts();
+                schedule_refresh_contacts();
                 return;
             }
             if (peer == selected_) {
@@ -1478,7 +1528,7 @@ void ChatWindow::start_core() {
                 chat_view_->scrollToBottom();
                 apply_empty_state();
             }
-            refresh_contacts();
+            schedule_refresh_contacts();
         });
     };
     events.on_local_address = [this](const std::string& addr) {
@@ -1498,20 +1548,21 @@ void ChatWindow::start_core() {
     };
     events.on_peer_state = [this](const std::string&, session::PeerState, const std::string&) {
         QMetaObject::invokeMethod(this, [this] {
-            refresh_contacts();
+            schedule_refresh_contacts();
             refresh_status();
             refresh_connection_buttons();
         });
     };
     events.on_contacts_changed = [this] {
-        QMetaObject::invokeMethod(this, [this] { refresh_contacts(); });
+        QMetaObject::invokeMethod(this, [this] { schedule_refresh_contacts(); });
     };
     events.on_group_message = [this](const std::string& group_id) {
         QMetaObject::invokeMethod(this, [this, group_id] {
             if (group_id != active_group_id_) {
                 note_unread(group_id);
             }
-            refresh_contacts();
+            groups_sidebar_cache_valid_ = false;
+            schedule_refresh_contacts();
             if (group_id == active_group_id_) {
                 reload_selected();
             }
@@ -1565,6 +1616,10 @@ void ChatWindow::append_notice(presentation::LineKind kind, const std::string& t
 }
 
 void ChatWindow::stop_core() {
+    ++sam_wait_generation_;
+    sam_wait_clock_.invalidate();
+    groups_sidebar_cache_valid_ = false;
+    groups_sidebar_cache_.clear();
     if (!running_) {
         return;
     }
@@ -1577,7 +1632,7 @@ void ChatWindow::stop_core() {
         }
         trust_cv_.notify_all();
     }
-    asio::co_spawn(
+        asio::co_spawn(
         core_,
         [this]() -> asio::awaitable<void> {
             if (service_) {
@@ -1586,6 +1641,9 @@ void ChatWindow::stop_core() {
             core_.stop();
         },
         asio::detached);
+    // Unblock run() even if ChatService::stop never completes; otherwise the
+    // GUI thread joins forever and Linux users cannot quit.
+    core_.stop();
     if (core_thread_.joinable()) {
         core_thread_.join();
     }
@@ -1615,36 +1673,48 @@ session::TrustDecision ChatWindow::on_trust(session::TrustPrompt prompt,
     return *trust_decision_;
 }
 
+void ChatWindow::schedule_refresh_contacts() {
+    if (contacts_refresh_timer_ == nullptr) {
+        refresh_contacts();
+        return;
+    }
+    contacts_refresh_timer_->start();
+}
+
 void ChatWindow::refresh_contacts() {
+    groups_sidebar_cache_valid_ = false;
+    rebuild_contacts_sidebar();
+}
+
+void ChatWindow::rebuild_contacts_sidebar() {
     if (!service_) {
         return;
     }
-    QVector<SidebarRow> groups;
-    for (const auto& state : service_->list_groups()) {
-        SidebarRow row;
-        row.kind = SidebarKind::Group;
-        row.addr = QString::fromStdString(state.group_id());
-        row.title = state.title().empty() ? row.addr : QString::fromStdString(state.title());
-        const int peers = std::max(0, static_cast<int>(state.members().size()) - 1);
-        QString preview =
-            peers == 0 ? tr("Only you are in this group.")
-                       : tr("%1 peer%2").arg(peers).arg(peers == 1 ? QString() : QStringLiteral("s"));
-        if (const auto conv = service_->load_group(state.group_id()); conv && !conv->history.empty()) {
-            const auto& last = conv->history.back();
-            if (!last.text.empty()) {
-                preview += QStringLiteral(" · ") + QString::fromStdString(last.text);
-            }
+    if (!groups_sidebar_cache_valid_) {
+        groups_sidebar_cache_.clear();
+        for (const auto& state : service_->list_groups()) {
+            SidebarRow row;
+            row.kind = SidebarKind::Group;
+            row.addr = QString::fromStdString(state.group_id());
+            row.title = state.title().empty() ? row.addr : QString::fromStdString(state.title());
+            const int peers = std::max(0, static_cast<int>(state.members().size()) - 1);
+            row.subtitle =
+                peers == 0 ? tr("Only you are in this group.")
+                           : tr("%1 peer%2").arg(peers).arg(peers == 1 ? QString()
+                                                                       : QStringLiteral("s"));
+            groups_sidebar_cache_.push_back(std::move(row));
         }
-        row.subtitle = preview;
-        row.selected = state.group_id() == active_group_id_;
-        row.unread = unread_[state.group_id()];
-        groups.push_back(std::move(row));
+        groups_sidebar_cache_valid_ = true;
+    }
+    for (SidebarRow& row : groups_sidebar_cache_) {
+        row.selected = row.addr.toStdString() == active_group_id_;
+        row.unread = unread_[row.addr.toStdString()];
     }
     std::vector<std::pair<std::string, unsigned>> unread_pairs(unread_.begin(), unread_.end());
     contacts_model_->set_rows(sidebar_from_contacts(
         presentation::contact_rows(service_->contacts(), service_->connected_peers(), selected_,
                                    unread_pairs),
-        groups));
+        groups_sidebar_cache_));
 }
 
 void ChatWindow::refresh_status() {
@@ -1800,7 +1870,7 @@ void ChatWindow::send_current() {
             return;
         }
         if (text == "/quit") {
-            close();
+            request_quit();
             return;
         }
         if (text.startsWith("/connect ")) {
@@ -2281,7 +2351,6 @@ void ChatWindow::router_settings() {
             apply_router_settings_to_options();
             try {
                 ensure_bundled_router();
-                wait_for_sam_ready(45000);
                 restart_i2p_session();
             } catch (const std::exception& error) {
                 QMessageBox::warning(this, tr("I2P router"), QString::fromStdString(error.what()));
@@ -2301,7 +2370,6 @@ void ChatWindow::router_settings() {
             QMessageBox::warning(this, tr("I2P router"), QString::fromStdString(error.what()));
         }
     }
-    wait_for_sam_ready(next.backend == "bundled" ? 45000 : 8000);
     restart_i2p_session();
     status_label_->setText(
         tr("I2P router backend applied: %1 (SAM %2:%3)")
@@ -3418,11 +3486,24 @@ void ChatWindow::highlight_search() {
 }
 
 void ChatWindow::tray_activated(QSystemTrayIcon::ActivationReason reason) {
-    if (reason == QSystemTrayIcon::Trigger) {
+    if (reason == QSystemTrayIcon::Context) {
+        if (auto* menu = tray_ ? tray_->contextMenu() : nullptr) {
+            menu->popup(QCursor::pos());
+        }
+        return;
+    }
+    if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
         showNormal();
         raise();
         activateWindow();
     }
+}
+
+void ChatWindow::request_quit() {
+    if (tray_ != nullptr) {
+        tray_->hide();
+    }
+    close();
 }
 
 void ChatWindow::dragEnterEvent(QDragEnterEvent* event) {
@@ -3458,10 +3539,11 @@ void ChatWindow::dropEvent(QDropEvent* event) {
 
 void ChatWindow::closeEvent(QCloseEvent* event) {
     flush_compose_drafts();
-    if (tray_ && tray_->isVisible()) {
-        hide();
-        event->ignore();
-        return;
+    // Closing the window always quits. Hide-to-tray left Linux/Wayland users
+    // with no way out: StatusNotifier menus often never appear, so Quit in the
+    // tray was unreachable, and close() / the window button only hid the UI.
+    if (tray_ != nullptr) {
+        tray_->hide();
     }
     event->accept();
 }

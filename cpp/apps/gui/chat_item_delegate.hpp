@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QHash>
+#include <QPixmap>
 #include <QStyledItemDelegate>
 #include <QString>
 
@@ -27,9 +29,12 @@ public:
     }
 
 private:
+    [[nodiscard]] QPixmap cached_thumb(const QString& path, int max_w) const;
+
     bool dark_ = false;
     QString images_dir_;
     QString downloads_dir_;
+    mutable QHash<QString, QPixmap> thumbs_;
 };
 
 }  // namespace i2pchat::gui

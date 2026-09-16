@@ -2,6 +2,7 @@
 
 #include <QPoint>
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QVector>
 #include <QSystemTrayIcon>
@@ -104,14 +105,19 @@ private slots:
     void clear_history();
     void configure_history_retention();
     void tray_activated(QSystemTrayIcon::ActivationReason reason);
+    void request_quit();
 
 private:
     void build_ui();
     void start_core();
+    void start_core_session();
+    void probe_sam(int generation);
     void stop_core();
     void post_core(std::function<boost::asio::awaitable<void>()> work);
     void reload_selected();
+    void schedule_refresh_contacts();
     void refresh_contacts();
+    void rebuild_contacts_sidebar();
     void refresh_status();
     void refresh_connection_buttons();
     void show_theme_menu();
@@ -152,7 +158,6 @@ private:
     [[nodiscard]] int sidebar_open_target_px(int total) const;
     void apply_router_settings_to_options();
     void ensure_bundled_router();
-    bool wait_for_sam_ready(int timeout_ms);
     void play_notify_sound();
     void restart_i2p_session();
     QString bundled_router_status() const;
@@ -219,6 +224,12 @@ private:
     std::map<std::string, std::string> compose_drafts_;
     std::optional<std::string> compose_draft_active_key_;
     QTimer* compose_drafts_timer_ = nullptr;
+    QTimer* contacts_refresh_timer_ = nullptr;
+    QVector<SidebarRow> groups_sidebar_cache_;
+    bool groups_sidebar_cache_valid_ = false;
+    QElapsedTimer sam_wait_clock_;
+    int sam_wait_timeout_ms_ = 0;
+    int sam_wait_generation_ = 0;
     std::map<std::string, unsigned> unread_;
     std::vector<presentation::ChatLine> session_log_;
     QString theme_pref_ = QStringLiteral("auto");

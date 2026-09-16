@@ -21,6 +21,8 @@ struct SidebarRow {
     bool live = false;
     unsigned unread = 0;
     bool selected = false;
+
+    friend bool operator==(const SidebarRow&, const SidebarRow&) = default;
 };
 
 class ContactListModel : public QAbstractListModel {
