@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PREFIX="${1:-${PWD}/.cache/macos-x64-prefix}"
-QT_VERSION="${I2PCHAT_AQT_QT_VERSION:-6.8.3}"
+QT_VERSION="${I2PCHAT_AQT_QT_VERSION:-6.8.4}"
 QT_ROOT="${I2PCHAT_AQT_QT_ROOT:-${PWD}/.cache/aqt-qt}"
 ARCH_FLAGS=(-arch x86_64)
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
@@ -37,6 +37,24 @@ if [ -z "${QT_PREFIX}" ] || [ ! -d "${QT_PREFIX}" ]; then
   echo "ERROR: Qt prefix not found under ${QT_ROOT}" >&2
   ls -laR "${QT_ROOT}" >&2 || true
   exit 1
+fi
+
+# Belt-and-suspenders for QTBUG-137687 if an older Qt tree is reused.
+WRAP_OPENGL="$(find "${QT_PREFIX}" -path '*/cmake/Qt6/FindWrapOpenGL.cmake' 2>/dev/null | head -1 || true)"
+if [ -n "${WRAP_OPENGL}" ] && grep -q 'framework AGL' "${WRAP_OPENGL}" 2>/dev/null; then
+  echo "==> Patching FindWrapOpenGL.cmake (drop AGL fallback)"
+  python3 - "${WRAP_OPENGL}" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = 'set(__opengl_agl_fw_path "-framework AGL")'
+if old in text:
+    path.write_text(text.replace(old, 'set(__opengl_agl_fw_path "")'))
+    print(f"patched {path}")
+else:
+    print(f"no AGL fallback string in {path}")
+PY
 fi
 
 SODIUM_MARKER="${PREFIX}/lib/libsodium.a"
