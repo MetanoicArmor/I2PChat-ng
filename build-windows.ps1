@@ -342,18 +342,27 @@ Compress-Archive -Path "$ZipStage\*" -DestinationPath $ZipFile -CompressionLevel
 Remove-Item -Recurse -Force $ZipStage
 Write-Host "Packed: $ZipFile"
 
+# TUI zip must NOT inherit windeployqt Qt DLLs from the GUI tree.
+function Publish-TuiZipTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$DestRoot,
+        [Parameter(Mandatory = $true)][string]$BuildDir,
+        [switch]$OmitI2pd
+    )
+    New-Item -ItemType Directory -Force -Path $DestRoot | Out-Null
+    Copy-Item "dist\I2PChat\I2PChat-tui.exe" (Join-Path $DestRoot "I2PChat-tui.exe") -Force
+    Copy-VcpkgRuntimeDlls -Dest $DestRoot -BuildDir $BuildDir
+    if (-not $OmitI2pd) {
+        Copy-I2pdInto -Root $DestRoot
+    }
+}
+
 $TuiZipFile = "dist\I2PChat-windows-tui-x64-v$ReleaseVersion.zip"
 if (Test-Path $TuiZipFile) { Remove-Item -Force $TuiZipFile }
 $TuiStage = "dist\I2PChat-windows-tui-x64-v$ReleaseVersion"
 if (Test-Path $TuiStage) { Remove-Item -Recurse -Force $TuiStage }
 New-Item -ItemType Directory -Path "$TuiStage\I2PChat" | Out-Null
-Copy-Item "dist\I2PChat\I2PChat-tui.exe" "$TuiStage\I2PChat\"
-Get-ChildItem "dist\I2PChat\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-    Copy-Item $_.FullName "$TuiStage\I2PChat\"
-}
-if (Test-Path "dist\I2PChat\vendor") {
-    Copy-Item -Recurse "dist\I2PChat\vendor" "$TuiStage\I2PChat\vendor"
-}
+Publish-TuiZipTree -DestRoot "$TuiStage\I2PChat" -BuildDir $BuildDir
 Compress-Archive -Path "$TuiStage\*" -DestinationPath $TuiZipFile -CompressionLevel Optimal
 Remove-Item -Recurse -Force $TuiStage
 Write-Host "Packed (TUI only): $TuiZipFile"
@@ -377,10 +386,7 @@ if (Test-Path $WingetTuiZipFile) { Remove-Item -Force $WingetTuiZipFile }
 $WingetTuiStage = "dist\I2PChat-windows-tui-x64-winget-v$ReleaseVersion"
 if (Test-Path $WingetTuiStage) { Remove-Item -Recurse -Force $WingetTuiStage }
 New-Item -ItemType Directory -Path "$WingetTuiStage\I2PChat" | Out-Null
-Copy-Item "dist\I2PChat\I2PChat-tui.exe" "$WingetTuiStage\I2PChat\"
-Get-ChildItem "dist\I2PChat\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-    Copy-Item $_.FullName "$WingetTuiStage\I2PChat\"
-}
+Publish-TuiZipTree -DestRoot "$WingetTuiStage\I2PChat" -BuildDir $BuildDir -OmitI2pd
 Compress-Archive -Path "$WingetTuiStage\*" -DestinationPath $WingetTuiZipFile -CompressionLevel Optimal
 Remove-Item -Recurse -Force $WingetTuiStage
 Write-Host "Packed (winget TUI, no bundled i2pd): $WingetTuiZipFile"

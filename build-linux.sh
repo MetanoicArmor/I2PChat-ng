@@ -214,9 +214,12 @@ if [ -x "${DAEMON_BIN}" ]; then
   cp "${DAEMON_BIN}" "${ONEDIR}/i2pchat-blindbox-daemon"
   chmod +x "${ONEDIR}/i2pchat-blindbox-daemon"
 fi
-mkdir -p "${ONEDIR}/lib"
+# GUI + AppImage share ONEDIR/lib (Qt + TUI runtime). TUI zip uses lib-tui only —
+# never copy the merged GUI tree into the TUI artifact (that bloated TUI past GUI).
+mkdir -p "${ONEDIR}/lib" "${ONEDIR}/lib-tui"
 stage_elf_deps "${ONEDIR}/${APP_NAME}" "${ONEDIR}/lib"
 stage_elf_deps "${ONEDIR}/${APP_NAME}-tui" "${ONEDIR}/lib"
+stage_elf_deps "${ONEDIR}/${APP_NAME}-tui" "${ONEDIR}/lib-tui"
 if [ -d "vendor/i2pd/${I2PD_LINUX_SUBDIR}" ]; then
   mkdir -p "${ONEDIR}/vendor/i2pd/${I2PD_LINUX_SUBDIR}"
   cp -a "vendor/i2pd/${I2PD_LINUX_SUBDIR}/." "${ONEDIR}/vendor/i2pd/${I2PD_LINUX_SUBDIR}/"
@@ -373,7 +376,7 @@ TUI_STAGE="${APP_NAME}-linux-${ARCH_SUFFIX}-tui-v${RELEASE_VERSION}-stage"
 safe_rm_rf "${TUI_STAGE}"
 mkdir -p "${TUI_STAGE}/usr/bin" "${TUI_STAGE}/usr/lib"
 cp "${ONEDIR}/${APP_NAME}-tui" "${TUI_STAGE}/usr/bin/"
-cp -a "${ONEDIR}/lib/." "${TUI_STAGE}/usr/lib/" 2>/dev/null || true
+cp -a "${ONEDIR}/lib-tui/." "${TUI_STAGE}/usr/lib/" 2>/dev/null || true
 if [ -d "${ONEDIR}/vendor" ]; then
   cp -a "${ONEDIR}/vendor" "${TUI_STAGE}/usr/bin/vendor"
 fi
