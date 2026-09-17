@@ -160,8 +160,9 @@ if(I2PCHAT_BOOST_VIA_FETCHCONTENT)
         "SHELL:-isystem ${boost_SOURCE_DIR}")
     endif()
     # Asio/date_time still pull headers via explicit -I from boost_* targets.
+    # GCC 13+ also warns on Boost.Asio coroutine frames in our TUs (-Wmismatched-new-delete).
     target_compile_options(i2pchat_project_options INTERFACE
-      -Wno-error=sign-conversion -Wno-error=conversion)
+      -Wno-error=sign-conversion -Wno-error=conversion -Wno-error=mismatched-new-delete)
   endif()
 endif()
 
