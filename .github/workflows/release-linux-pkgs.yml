@@ -314,6 +314,8 @@ jobs:
     name: Deploy apt to GitHub Pages
     needs: deb-amd64
     if: needs.deb-amd64.outputs.apt_publish == 'true'
+    # Apt mirror is optional; do not fail the workflow after .deb/.rpm uploaded.
+    continue-on-error: true
     runs-on: ubuntu-latest
     environment:
       name: github-pages

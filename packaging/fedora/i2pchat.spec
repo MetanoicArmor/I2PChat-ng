@@ -8,11 +8,11 @@ Release:        1%{?dist}
 Summary:        Experimental peer-to-peer chat client for I2P (upstream AppImage)
 
 License:        AGPL-3.0-or-later
-URL:            https://github.com/MetanoicArmor/I2PChat
+URL:            https://github.com/MetanoicArmor/I2PChat-ng
 ExclusiveArch:  x86_64
 
-Source0:        https://github.com/MetanoicArmor/I2PChat/releases/download/v%{version}/I2PChat-linux-x86_64-v%{version}.zip
-Source1:        https://github.com/MetanoicArmor/I2PChat/raw/v%{version}/icon.png
+Source0:        https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v%{version}/I2PChat-linux-x86_64-v%{version}.zip
+Source1:        https://github.com/MetanoicArmor/I2PChat-ng/raw/v%{version}/icon.png
 
 BuildRequires:  unzip
 
