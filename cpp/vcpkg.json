@@ -23,8 +23,14 @@
       "dependencies": ["ftxui"]
     },
     "gui": {
-      "description": "Build the Qt 6 desktop client",
-      "dependencies": ["qtbase", "qtmultimedia"]
+      "description": "Build the Qt 6 desktop client (Widgets + Network only)",
+      "dependencies": [
+        {
+          "name": "qtbase",
+          "default-features": false,
+          "features": ["gui", "widgets", "network", "png", "openssl", "thread", "concurrent"]
+        }
+      ]
     }
   }
 }

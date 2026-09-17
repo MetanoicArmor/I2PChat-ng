@@ -50,6 +50,14 @@ I2PChat-linux-*.zip
 # Per-build integrity artifacts (attach to GitHub Releases; do not commit — differs per OS/artifact)
 SHA256SUMS
 SHA256SUMS.asc
+SHA256SUMS.linux-*
+SHA256SUMS.macos-*
+SHA256SUMS.windows-*
+SHA256SUMS.android
+
+# Local tooling download
+/actionlint
+I2PChat.app/
 
 # Optional local bundled-router blobs for portable release builds only.
 vendor/i2pd/

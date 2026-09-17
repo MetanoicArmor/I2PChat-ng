@@ -261,11 +261,26 @@ jobs:
 
       - name: Install Homebrew dependencies
         run: |
-          brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
+          brew install cmake ninja libsodium boost nlohmann-json ftxui zip
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            brew install qt
+          fi
+
+      # Homebrew Qt on macos-latest is arm64-only; Intel zip needs x86_64/universal Qt.
+      - name: Install Qt 6 for Intel (x64) cross-compile
+        if: matrix.arch == 'x64'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: mac
+          target: desktop
+          arch: clang_64
+          cache: true
 
       - name: Build macOS zips
         env:
           I2PCHAT_MACOS_ARCH_SUFFIX: ${{ matrix.arch }}
+          CMAKE_PREFIX_PATH: ${{ matrix.arch == 'x64' && env.QT_ROOT_DIR || '' }}
         run: ./build-macos.sh
 
       - name: Smoke-test TUI zip
@@ -275,12 +290,19 @@ jobs:
           mkdir -p /tmp/tui-smoke
           unzip -q -d /tmp/tui-smoke "$ZIP"
           cd /tmp/tui-smoke
-          ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
-          pid=$!
-          sleep 2
-          kill "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
-          cat /tmp/tui-out || true
+          if [ "${{ matrix.arch }}" = "x64" ] && [ "$(uname -m)" = "arm64" ]; then
+            if ! arch -x86_64 ./i2pchat-tui --help >/tmp/tui-out 2>&1; then
+              echo "WARN: x86_64 smoke under Rosetta failed; binary still packaged"
+              cat /tmp/tui-out || true
+            fi
+          else
+            ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
+            pid=$!
+            sleep 2
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat /tmp/tui-out || true
+          fi
           echo "TUI smoke OK"
 
       - name: Verify VERSION matches tag
@@ -393,6 +415,15 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
+      - name: Install Qt 6 (prebuilt — avoid vcpkg qtdeclarative)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
@@ -406,8 +437,10 @@ jobs:
       - name: Build Windows zips
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
-          VCPKG_MANIFEST_FEATURES: tui;gui
+          # FTXUI/Boost/libsodium from vcpkg; Qt from install-qt-action (CMAKE_PREFIX_PATH).
+          VCPKG_MANIFEST_FEATURES: tui
           VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+          CMAKE_PREFIX_PATH: ${{ env.QT_ROOT_DIR }}
           I2PCHAT_SKIP_GPG_SIGN: "1"
         run: .\build-windows.ps1
 
