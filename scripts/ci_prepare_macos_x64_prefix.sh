@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PREFIX="${1:-${PWD}/.cache/macos-x64-prefix}"
-QT_VERSION="${I2PCHAT_AQT_QT_VERSION:-6.8.4}"
+QT_VERSION="${I2PCHAT_AQT_QT_VERSION:-6.8.3}"
 QT_ROOT="${I2PCHAT_AQT_QT_ROOT:-${PWD}/.cache/aqt-qt}"
 ARCH_FLAGS=(-arch x86_64)
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
@@ -39,23 +39,30 @@ if [ -z "${QT_PREFIX}" ] || [ ! -d "${QT_PREFIX}" ]; then
   exit 1
 fi
 
-# Belt-and-suspenders for QTBUG-137687 if an older Qt tree is reused.
-WRAP_OPENGL="$(find "${QT_PREFIX}" -path '*/cmake/Qt6/FindWrapOpenGL.cmake' 2>/dev/null | head -1 || true)"
-if [ -n "${WRAP_OPENGL}" ] && grep -q 'framework AGL' "${WRAP_OPENGL}" 2>/dev/null; then
-  echo "==> Patching FindWrapOpenGL.cmake (drop AGL fallback)"
-  python3 - "${WRAP_OPENGL}" <<'PY'
+# QTBUG-137687: strip AGL from Qt 6.8.3 CMake packages (Xcode 26 removed AGL).
+python3 - "${QT_PREFIX}" <<'PY'
 from pathlib import Path
 import sys
-path = Path(sys.argv[1])
-text = path.read_text()
-old = 'set(__opengl_agl_fw_path "-framework AGL")'
-if old in text:
-    path.write_text(text.replace(old, 'set(__opengl_agl_fw_path "")'))
-    print(f"patched {path}")
-else:
-    print(f"no AGL fallback string in {path}")
+root = Path(sys.argv[1])
+changed = 0
+for path in root.rglob("*.cmake"):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        continue
+    new = text
+    new = new.replace('set(__opengl_agl_fw_path "-framework AGL")', 'set(__opengl_agl_fw_path "")')
+    new = new.replace("-framework AGL;", "")
+    new = new.replace(";-framework AGL", "")
+    new = new.replace("-framework AGL", "")
+    new = new.replace("-framework;AGL;", "")
+    new = new.replace(";-framework;AGL", "")
+    if new != text:
+        path.write_text(new, encoding="utf-8")
+        changed += 1
+        print(f"patched {path.relative_to(root)}")
+print(f"AGL scrub: {changed} cmake file(s) updated under {root}")
 PY
-fi
 
 SODIUM_MARKER="${PREFIX}/lib/libsodium.a"
 if [ ! -f "${SODIUM_MARKER}" ] && [ ! -f "${PREFIX}/lib/libsodium.dylib" ]; then
