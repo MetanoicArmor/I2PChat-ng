@@ -69,11 +69,43 @@ if [ ! -f "${SODIUM_MARKER}" ] && [ ! -f "${PREFIX}/lib/libsodium.dylib" ]; then
   echo "==> Building libsodium (x86_64)"
   SODIUM_VER="1.0.20"
   SRC="/tmp/libsodium-${SODIUM_VER}"
-  rm -rf "${SRC}"
-  curl -fsSL "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VER}.tar.gz" \
-    | tar -xz -C /tmp
+  TGZ="/tmp/libsodium-${SODIUM_VER}.tar.gz"
+  rm -rf "${SRC}" "${TGZ}"
+  download_sodium() {
+    local url
+    for url in \
+      "https://github.com/jedisct1/libsodium/releases/download/${SODIUM_VER}-RELEASE/libsodium-${SODIUM_VER}.tar.gz" \
+      "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VER}.tar.gz" \
+      "https://github.com/jedisct1/libsodium/archive/refs/tags/${SODIUM_VER}-RELEASE.tar.gz"
+    do
+      echo "  try ${url}"
+      if curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 20 -o "${TGZ}" "${url}"; then
+        return 0
+      fi
+    done
+    return 1
+  }
+  if ! download_sodium; then
+    echo "ERROR: could not download libsodium ${SODIUM_VER}" >&2
+    exit 1
+  fi
+  mkdir -p "${SRC}"
+  tar -xzf "${TGZ}" -C /tmp
+  # GitHub archive extracts to libsodium-1.0.20-RELEASE/; release tarball to libsodium-1.0.20/.
+  if [ ! -d "${SRC}" ]; then
+    if [ -d "/tmp/libsodium-${SODIUM_VER}-RELEASE" ]; then
+      mv "/tmp/libsodium-${SODIUM_VER}-RELEASE" "${SRC}"
+    else
+      echo "ERROR: unexpected libsodium extract layout" >&2
+      ls -la /tmp/libsodium* >&2 || true
+      exit 1
+    fi
+  fi
   (
     cd "${SRC}"
+    if [ ! -f ./configure ]; then
+      ./autogen.sh
+    fi
     ./configure --prefix="${PREFIX}" --disable-shared --enable-static \
       CC="clang ${ARCH_FLAGS[*]}" \
       CFLAGS="-O2 ${ARCH_FLAGS[*]} -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}" \
