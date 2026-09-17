@@ -107,6 +107,13 @@ endif()
 set(I2PCHAT_BOOST_VIA_FETCHCONTENT OFF)
 if(NOT TARGET Boost::headers)
   message(STATUS "Boost ≥1.86 not found; fetching boost-1.86.0 (asio::cancel_after)")
+  # Cross-building macOS Intel on Apple Silicon: Boost.Context selects ASM from
+  # CMAKE_SYSTEM_PROCESSOR. Align it with CMAKE_OSX_ARCHITECTURES before fetch.
+  if(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    set(CMAKE_SYSTEM_PROCESSOR x86_64 CACHE STRING "Target processor for Boost.Context" FORCE)
+  elseif(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+    set(CMAKE_SYSTEM_PROCESSOR arm64 CACHE STRING "Target processor for Boost.Context" FORCE)
+  endif()
   set(BOOST_INCLUDE_LIBRARIES asio)
   set(BOOST_ENABLE_CMAKE ON)
   FetchContent_Declare(Boost

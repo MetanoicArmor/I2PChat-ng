@@ -59,16 +59,30 @@ if [ "$(uname -s)" = "Linux" ]; then
 elif [ "$(uname -s)" = "Darwin" ]; then
   if [ -n "${CMAKE_OSX_ARCHITECTURES:-}" ]; then
     set -- "$@" -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+    # Boost.Context picks ASM by CMAKE_SYSTEM_PROCESSOR (host). When
+    # cross-building Intel on Apple Silicon, force the target CPU so it
+    # does not assemble arm64 .S with -arch x86_64.
+    case "${CMAKE_OSX_ARCHITECTURES}" in
+      x86_64)
+        set -- "$@" -DCMAKE_SYSTEM_PROCESSOR=x86_64
+        ;;
+      arm64)
+        set -- "$@" -DCMAKE_SYSTEM_PROCESSOR=arm64
+        ;;
+    esac
   fi
   QT_LIB=""
   if command -v brew >/dev/null 2>&1; then
-    QT_LIB="$(brew --prefix qt 2>/dev/null || true)/lib"
-    QTBASE_LIB="$(brew --prefix qtbase 2>/dev/null || true)/lib"
-    rpath="${QT_LIB}"
-    if [ -d "${QTBASE_LIB}" ] && [ "${QTBASE_LIB}" != "${QT_LIB}" ]; then
-      rpath="${rpath};${QTBASE_LIB}"
+    # Prefer CMAKE_PREFIX_PATH (aqt/x64 prefix) over arm64 Homebrew Qt.
+    if [ -z "${CMAKE_PREFIX_PATH:-}" ]; then
+      QT_LIB="$(brew --prefix qt 2>/dev/null || true)/lib"
+      QTBASE_LIB="$(brew --prefix qtbase 2>/dev/null || true)/lib"
+      rpath="${QT_LIB}"
+      if [ -d "${QTBASE_LIB}" ] && [ "${QTBASE_LIB}" != "${QT_LIB}" ]; then
+        rpath="${rpath};${QTBASE_LIB}"
+      fi
+      set -- "$@" -DCMAKE_BUILD_RPATH="${rpath}"
     fi
-    set -- "$@" -DCMAKE_BUILD_RPATH="${rpath}"
   fi
   set -- "$@" -DCMAKE_INSTALL_RPATH="@executable_path/../Frameworks"
 fi
