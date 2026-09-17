@@ -9,6 +9,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -56,6 +57,11 @@ public:
     FakeSamRouter& operator=(const FakeSamRouter&) = delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    /// When true, STREAM CONNECT always fails with CANT_REACH_PEER. Lets a test
+    /// take a peer "offline" without tearing down its ChatService (so BlindBox
+    /// poll still works on the same instance).
+    void set_refuse_connects(bool refuse) { refuse_connects_.store(refuse); }
 
     /// Every command line the router received, in order.
     [[nodiscard]] std::vector<std::string> commands() const {
@@ -257,10 +263,11 @@ private:
                 break;
             }
         }
-        if (!target || target->waiting_accepts.empty()) {
+        if (refuse_connects_.load() || !target || target->waiting_accepts.empty()) {
             // No listener parked in ACCEPT: the router reports the peer as
             // unreachable, exactly as it would for a destination with no
-            // lease set.
+            // lease set. refuse_connects_ forces the same outcome while a
+            // ChatService is still running (offline BlindBox tests).
             co_await write(*caller, "STREAM STATUS RESULT=CANT_REACH_PEER\n");
             co_return;
         }
@@ -306,6 +313,7 @@ private:
     std::uint16_t port_ = 0;
     std::thread thread_;
     bool stopped_ = false;
+    std::atomic<bool> refuse_connects_{false};
     /// Touched only from the router's own thread.
     std::map<std::string, std::shared_ptr<Session>> sessions_;
     mutable std::mutex mutex_;

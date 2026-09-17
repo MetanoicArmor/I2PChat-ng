@@ -263,18 +263,29 @@ asio::awaitable<void> ChatService::start() {
 
     bool tunnels_ready = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    warmup_timer_ = std::make_unique<asio::steady_timer>(executor_);
     while (!stopping_ && std::chrono::steady_clock::now() < deadline) {
+        // Hold a local ref: stop() may reset sam_ while this coroutine is still
+        // running, and a bare member dereference would then segfault.
+        const std::shared_ptr<sam::SamSession> sam = sam_;
+        if (!sam) {
+            break;
+        }
         try {
-            (void)co_await sam_->naming_lookup(identity_.local_addr + ".b32.i2p");
+            (void)co_await sam->naming_lookup(identity_.local_addr + ".b32.i2p");
             tunnels_ready = true;
             break;
         } catch (const std::exception&) {
         }
-        asio::steady_timer timer(executor_);
-        timer.expires_after(std::chrono::seconds(3));
+        if (stopping_ || !warmup_timer_) {
+            break;
+        }
+        warmup_timer_->expires_after(std::chrono::seconds(3));
         boost::system::error_code wait_error;
-        co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+        co_await warmup_timer_->async_wait(
+            asio::redirect_error(asio::use_awaitable, wait_error));
     }
+    warmup_timer_.reset();
     if (stopping_) {
         co_return;
     }
@@ -294,6 +305,9 @@ asio::awaitable<void> ChatService::stop() {
     }
     stopping_ = true;
     running_ = false;
+    if (warmup_timer_) {
+        warmup_timer_->cancel();
+    }
     sessions_.set_transport_state(session::TransportState::ShuttingDown, "stop");
 
     for (auto& [addr, peer] : peers_) {
@@ -423,10 +437,14 @@ void ChatService::attach_link(Peer& peer, std::shared_ptr<PeerLink> link) {
 
 asio::awaitable<void> ChatService::accept_loop() {
     while (running_) {
+        const std::shared_ptr<sam::SamSession> sam = sam_;
+        if (!sam) {
+            co_return;
+        }
         sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
         bool accepted = false;
         try {
-            stream = co_await sam_->accept_stream();
+            stream = co_await sam->accept_stream();
             accepted = true;
         } catch (const std::exception& error) {
             if (running_) {

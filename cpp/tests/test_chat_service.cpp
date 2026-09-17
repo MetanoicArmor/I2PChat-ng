@@ -276,10 +276,24 @@ TEST_CASE("an offline message is queued on a replica and collected later") {
 
     // The offline channel needs a root, and a root is agreed over the live
     // channel — which is the whole point of connecting once while both are up.
+    // Accept loops park STREAM ACCEPT asynchronously; retry briefly if the
+    // first dial races ahead of the peer's accept.
     bool connected = false;
-    asio::co_spawn(context, alice.service->connect_peer(bob.local_addr),
-                   [&](std::exception_ptr, bool ok) { connected = ok; });
-    REQUIRE(run_until(context, [&] { return connected; }));
+    for (int attempt = 0; attempt < 10 && !connected; ++attempt) {
+        bool done = false;
+        bool ok = false;
+        asio::co_spawn(context, alice.service->connect_peer(bob.local_addr),
+                       [&](std::exception_ptr, bool result) {
+                           ok = result;
+                           done = true;
+                       });
+        REQUIRE(run_until(context, [&] { return done; }));
+        connected = ok;
+        if (!connected) {
+            run_until(context, [] { return false; }, std::chrono::milliseconds(20));
+        }
+    }
+    REQUIRE(connected);
     REQUIRE(run_until(context, [&] { return bob.service->live(alice.local_addr); }));
 
     // Wait for the root exchange to settle before taking the link down.
@@ -302,6 +316,11 @@ TEST_CASE("an offline message is queued on a replica and collected later") {
     alice.service->disconnect_peer(bob.local_addr);
     REQUIRE(run_until(context, [&] { return !alice.service->live(bob.local_addr); }));
 
+    // send_text auto-reconnects while the peer still accepts. Refuse CONNECT so
+    // the live path cannot succeed and BlindBox is exercised; keep bob running
+    // so the same instance can poll the replica.
+    router.set_refuse_connects(true);
+
     std::vector<std::uint64_t> ids;
     bool sent = false;
     asio::co_spawn(context, alice.service->send_text(bob.local_addr, "offline hello"),
@@ -310,7 +329,7 @@ TEST_CASE("an offline message is queued on a replica and collected later") {
                        ids = std::move(result);
                        sent = true;
                    });
-    REQUIRE(run_until(context, [&] { return sent; }));
+    REQUIRE(run_until(context, [&] { return sent; }, std::chrono::seconds(20)));
     INFO("alice errors: " << alice.joined_errors());
     REQUIRE(ids.size() == 1);
     const runtime::DeliveryReport* report = alice.delivery(ids.front());
@@ -352,6 +371,10 @@ TEST_CASE("an offline message with no replicas configured fails loudly") {
     Client bob(context, router.port(), "bob");
     start_both(context, alice, bob);
 
+    // send_text tries a live connect first. Refuse CONNECT so that fails and
+    // the offline path reports the missing replicas.
+    router.set_refuse_connects(true);
+
     std::vector<std::uint64_t> ids{1};
     bool sent = false;
     asio::co_spawn(context, alice.service->send_text(bob.local_addr, "into the void"),
@@ -359,7 +382,7 @@ TEST_CASE("an offline message with no replicas configured fails loudly") {
                        ids = std::move(result);
                        sent = true;
                    });
-    REQUIRE(run_until(context, [&] { return sent; }));
+    REQUIRE(run_until(context, [&] { return sent; }, std::chrono::seconds(20)));
     CHECK(ids.empty());
     CHECK_FALSE(alice.errors.empty());
 }
@@ -380,17 +403,29 @@ TEST_CASE("a profile written by one run is reopened by the next") {
 
         runtime::ChatEvents events;
         bool ready = false;
+        bool start_finished = false;
         events.on_local_address = [&](const std::string& addr) {
             first_addr = addr;
             ready = true;
         };
-        runtime::ChatService service(context.get_executor(), config, events);
-        asio::co_spawn(context, service.start(), asio::detached);
+        auto service = std::make_shared<runtime::ChatService>(context.get_executor(),
+                                                              config, events);
+        asio::co_spawn(
+            context,
+            [service, &start_finished]() -> asio::awaitable<void> {
+                co_await service->start();
+                start_finished = true;
+            },
+            asio::detached);
         REQUIRE(run_until(context, [&] { return ready; }));
 
         bool stopped = false;
-        asio::co_spawn(context, service.stop(), [&](std::exception_ptr) { stopped = true; });
+        asio::co_spawn(context, service->stop(),
+                       [&](std::exception_ptr) { stopped = true; });
         REQUIRE(run_until(context, [&] { return stopped; }));
+        // start() may still be unwinding after stop cancels its warmup timer;
+        // keep the service alive until that coroutine returns.
+        REQUIRE(run_until(context, [&] { return start_finished; }));
     }
 
     runtime::ChatServiceConfig config;

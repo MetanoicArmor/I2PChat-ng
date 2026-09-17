@@ -496,6 +496,7 @@ void ChatWindow::build_ui() {
     theme_button_->setFixedSize(30, 30);
     theme_button_->setCursor(Qt::PointingHandCursor);
     connect(theme_button_, &QToolButton::clicked, this, &ChatWindow::show_theme_menu);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     if (qApp->styleHints() != nullptr) {
         connect(qApp->styleHints(), &QStyleHints::colorSchemeChanged, this, [this] {
             if (theme_pref_ == QStringLiteral("auto")) {
@@ -503,6 +504,7 @@ void ChatWindow::build_ui() {
             }
         });
     }
+#endif
     auto* status_row_w = new QWidget(this);
     auto* status_row = new QHBoxLayout(status_row_w);
     status_row->setContentsMargins(0, 0, 0, 0);
@@ -987,9 +989,11 @@ bool ChatWindow::resolved_dark() const {
     if (theme_pref_ == QStringLiteral("dark")) {
         return true;
     }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     if (qApp->styleHints() != nullptr) {
         return qApp->styleHints()->colorScheme() == Qt::ColorScheme::Dark;
     }
+#endif
     return options_.dark;
 }
 

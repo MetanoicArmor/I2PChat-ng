@@ -2,6 +2,7 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -293,6 +294,8 @@ private:
     std::uint64_t next_msg_id_ = 1;
     bool running_ = false;
     bool stopping_ = false;
+    /// Cancelled by stop() so start()'s tunnel-warmup wait does not outlive us.
+    std::unique_ptr<asio::steady_timer> warmup_timer_;
     std::unique_ptr<groups::GroupCoordinator> group_coordinator_;
     std::string last_group_bb_msg_id_;
 };

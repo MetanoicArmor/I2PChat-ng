@@ -104,6 +104,7 @@ endif()
 if(NOT TARGET Boost::headers)
   find_package(Boost 1.86 QUIET)
 endif()
+set(I2PCHAT_BOOST_VIA_FETCHCONTENT OFF)
 if(NOT TARGET Boost::headers)
   message(STATUS "Boost ≥1.86 not found; fetching boost-1.86.0 (asio::cancel_after)")
   set(BOOST_INCLUDE_LIBRARIES asio)
@@ -112,6 +113,7 @@ if(NOT TARGET Boost::headers)
     URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
   )
   FetchContent_MakeAvailable(Boost)
+  set(I2PCHAT_BOOST_VIA_FETCHCONTENT ON)
   if(NOT TARGET Boost::headers AND TARGET Boost::asio)
     add_library(Boost::headers ALIAS Boost::asio)
   endif()
@@ -121,13 +123,37 @@ if(NOT TARGET Boost::headers)
 endif()
 
 # Third-party headers do not survive our warning set, and their noise would bury
-# warnings about our own code. Boost usually lives in a default search path, so
-# marking its include directory SYSTEM has no effect; Clang can classify by
-# header prefix instead, which does work.
+# warnings about our own code. System Boost usually lives on a default search
+# path so marking it SYSTEM has no effect; Clang can classify by header prefix.
+# FetchContent Boost is an ordinary -I tree, so GCC needs INTERFACE SYSTEM
+# includes (it has no --system-header-prefix).
 target_compile_options(i2pchat_project_options INTERFACE
   $<$<CXX_COMPILER_ID:Clang,AppleClang>:
     --system-header-prefix=boost/;--system-header-prefix=nlohmann/>
 )
+if(I2PCHAT_BOOST_VIA_FETCHCONTENT)
+  # Modular Boost attaches a tree of per-library include dirs as -I. Mark every
+  # boost_* target SYSTEM so GCC -Werror does not fire inside Asio headers.
+  get_property(_i2pchat_boost_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_i2pchat_boost_tgt IN LISTS _i2pchat_boost_targets)
+    if(NOT _i2pchat_boost_tgt MATCHES "^boost_")
+      continue()
+    endif()
+    get_target_property(_i2pchat_boost_type ${_i2pchat_boost_tgt} TYPE)
+    if(NOT _i2pchat_boost_type MATCHES "INTERFACE|STATIC|SHARED|OBJECT|UNKNOWN")
+      continue()
+    endif()
+    get_target_property(_i2pchat_boost_incs ${_i2pchat_boost_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_i2pchat_boost_incs AND NOT _i2pchat_boost_incs STREQUAL "_i2pchat_boost_incs-NOTFOUND")
+      set_property(TARGET ${_i2pchat_boost_tgt}
+        PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_i2pchat_boost_incs}")
+    endif()
+  endforeach()
+  unset(_i2pchat_boost_targets)
+  unset(_i2pchat_boost_tgt)
+  unset(_i2pchat_boost_type)
+  unset(_i2pchat_boost_incs)
+endif()
 
 add_subdirectory(core)
 if(NOT I2PCHAT_ANDROID)
