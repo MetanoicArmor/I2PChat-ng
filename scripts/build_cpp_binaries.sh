@@ -59,15 +59,20 @@ if [ "$(uname -s)" = "Linux" ]; then
 elif [ "$(uname -s)" = "Darwin" ]; then
   if [ -n "${CMAKE_OSX_ARCHITECTURES:-}" ]; then
     set -- "$@" -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-    # Boost.Context picks ASM by CMAKE_SYSTEM_PROCESSOR (host). When
-    # cross-building Intel on Apple Silicon, force the target CPU so it
-    # does not assemble arm64 .S with -arch x86_64.
+    # Boost.Context ignores a late CMAKE_SYSTEM_PROCESSOR on Darwin hosts;
+    # pass BOOST_CONTEXT_* so it assembles the matching .S under -arch.
     case "${CMAKE_OSX_ARCHITECTURES}" in
       x86_64)
-        set -- "$@" -DCMAKE_SYSTEM_PROCESSOR=x86_64
+        set -- "$@" \
+          -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+          -DBOOST_CONTEXT_ARCHITECTURE=x86_64 \
+          -DBOOST_CONTEXT_ABI=sysv
         ;;
       arm64)
-        set -- "$@" -DCMAKE_SYSTEM_PROCESSOR=arm64
+        set -- "$@" \
+          -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+          -DBOOST_CONTEXT_ARCHITECTURE=arm64 \
+          -DBOOST_CONTEXT_ABI=aapcs
         ;;
     esac
   fi
