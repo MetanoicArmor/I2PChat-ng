@@ -10,7 +10,9 @@
 
 ## Артефакт на GitHub Release
 
-Сборка **`i2pchat_<версия>_x86_64.rpm`** в CI не запускается; используйте скрипт [`build-rpm-from-release.sh`](build-rpm-from-release.sh) локально или в контейнере Fedora (см. ниже), либо COPR.
+CI workflow **Release Linux packages** (`.github/workflows/release-linux-pkgs.yml`) собирает
+**`i2pchat_<версия>_x86_64.rpm`** из `I2PChat-linux-x86_64-v*.zip` (контейнер `fedora:42`) и
+загружает его на тот же GitHub Release вместе с `.deb`. Локально / COPR — скрипт ниже.
 
 ## Перед сборкой (вручную / COPR)
 

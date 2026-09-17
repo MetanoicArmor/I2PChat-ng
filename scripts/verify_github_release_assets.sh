@@ -91,6 +91,7 @@ if [[ "${SKIP_DEB}" -eq 0 ]]; then
   need "i2pchat_${VER}_arm64.deb"
   need "i2pchat-tui_${VER}_amd64.deb"
   need "i2pchat-tui_${VER}_arm64.deb"
+  need "i2pchat_${VER}_x86_64.rpm"
 fi
 
 HAVE_COUNT="$(wc -l < "${HAVE_FILE}" | tr -d ' ')"
