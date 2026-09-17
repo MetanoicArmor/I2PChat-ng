@@ -199,9 +199,9 @@ jobs:
           - os: macos-latest
             arch: arm64
             sums: SHA256SUMS.macos-arm64
-          # Intel builds need a real x86_64 runner; Homebrew no longer installs
-          # under Rosetta on Apple Silicon ("only supported on Apple Silicon").
-          - os: macos-13
+          # Homebrew is arm64-only on macos-latest; build Intel with aqt Qt +
+          # x86_64 libsodium/FTXUI (macos-13 runners are often stuck queued).
+          - os: macos-latest
             arch: x64
             sums: SHA256SUMS.macos-x64
     runs-on: ${{ matrix.os }}
@@ -263,10 +263,33 @@ jobs:
           fi
 
       - name: Install Homebrew dependencies
-        run: brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            brew install cmake ninja zip autoconf automake libtool
+          else
+            brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
+          fi
+
+      - name: Prepare x86_64 Qt + libsodium + FTXUI
+        if: matrix.arch == 'x64'
+        run: bash scripts/ci_prepare_macos_x64_prefix.sh "${PWD}/.cache/macos-x64-prefix"
 
       - name: Build macOS zips
-        run: ./build-macos.sh
+        run: |
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            # shellcheck disable=SC1091
+            source .cache/macos-x64-prefix/ci-env.sh
+            export CMAKE_PREFIX_PATH
+            export CMAKE_OSX_ARCHITECTURES=x86_64
+            export I2PCHAT_MACOS_ARCH_SUFFIX=x64
+            # Avoid picking up arm64 Homebrew libs.
+            export PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig"
+            export CMAKE_FIND_FRAMEWORK=LAST
+            export CMAKE_IGNORE_PATH="/opt/homebrew;/opt/homebrew/lib;/opt/homebrew/include"
+            ./build-macos.sh
+          else
+            ./build-macos.sh
+          fi
 
       - name: Smoke-test TUI zip
         run: |
@@ -275,12 +298,17 @@ jobs:
           mkdir -p /tmp/tui-smoke
           unzip -q -d /tmp/tui-smoke "$ZIP"
           cd /tmp/tui-smoke
-          ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
-          pid=$!
-          sleep 2
-          kill "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
-          cat /tmp/tui-out || true
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            arch -x86_64 ./i2pchat-tui --help >/tmp/tui-out 2>&1 || true
+            cat /tmp/tui-out || true
+          else
+            ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
+            pid=$!
+            sleep 2
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat /tmp/tui-out || true
+          fi
           echo "TUI smoke OK"
 
       - name: Verify VERSION matches tag
