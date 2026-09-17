@@ -153,6 +153,10 @@ if(I2PCHAT_BOOST_VIA_FETCHCONTENT)
   unset(_i2pchat_boost_tgt)
   unset(_i2pchat_boost_type)
   unset(_i2pchat_boost_incs)
+  if(DEFINED boost_SOURCE_DIR)
+    target_include_directories(i2pchat_project_options SYSTEM INTERFACE
+      "${boost_SOURCE_DIR}")
+  endif()
 endif()
 
 add_subdirectory(core)
