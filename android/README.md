@@ -19,7 +19,7 @@ Minimum SDK 26. Application id: `org.i2pchat.android`.
 
 The core talks SAM on loopback, same as desktop.
 
-- **Bundled i2pd (default):** PurpleI2P **2.61.0** JNI `libi2pd.so` from the official APK, started **in-process in a separate `:i2pd` service** so a daemon crash does not kill the UI. Open waits for SAM on `127.0.0.1:17656`. That library is still **4 KiB–linked**, so the manifest keeps `android:pageSizeCompat` for 16 KiB devices (Android may show a one-time compatibility dialog — only `libi2pd.so` is affected; `libi2pchat_jni.so` is built with NDK r28 / 16 KiB ELF alignment). Refresh libs with `./android/scripts/fetch-i2pd.sh`.
+- **Bundled i2pd (default):** PurpleI2P **2.61.0** JNI `libi2pd.so`, rebuilt with **NDK r28** for **16 KiB** ELF alignment (`./android/scripts/build-i2pd-16k.sh`), started **in-process in a separate `:i2pd` service**. Open waits for SAM on `127.0.0.1:17656`. Chat native code is also NDK r28 / 16 KiB.
 - **External SAM:** switch to system router in Settings → I2P router (`127.0.0.1:7656`).
 
 I2P on a phone cannot hide in the background; the persistent notification is required so tunnels are not killed.

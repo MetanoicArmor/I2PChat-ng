@@ -107,7 +107,7 @@ class I2pdForegroundService : Service() {
             started.set(false)
             val error =
                 "Cannot load libi2pd.so: ${ex.message}. " +
-                    "On 16 KB page devices reinstall a current APK (pageSizeCompat) or use external SAM."
+                    "Reinstall a current APK or use external SAM in Router settings."
             publish(error, alive = false)
             notify(error)
             return

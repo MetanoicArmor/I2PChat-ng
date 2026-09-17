@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -241,9 +242,16 @@ fun OpenFileWarningDialog(
 
 @Composable
 fun SessionNoticeRow(msg: MessageUi) {
+    val context = LocalContext.current
     val system = msg.kind == "system" || msg.kind == "info"
     val success = msg.kind == "success"
     val error = msg.kind == "error"
+    val onlinePrefix = "Online! My Address:"
+    val copyableAddress = if (success && msg.text.startsWith(onlinePrefix)) {
+        msg.text.removePrefix(onlinePrefix).trim()
+    } else {
+        ""
+    }
     if (system) {
         Text(
             msg.text,
@@ -265,9 +273,26 @@ fun SessionNoticeRow(msg: MessageUi) {
                     else -> MaterialTheme.colorScheme.onSurface
                 },
             ),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .then(
+                    if (copyableAddress.isNotBlank()) {
+                        Modifier.clickable {
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard.setPrimaryClip(ClipData.newPlainText("i2p", copyableAddress))
+                            Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
-            Text(msg.text, modifier = Modifier.padding(10.dp), fontWeight = if (success) FontWeight.SemiBold else FontWeight.Normal)
+            Text(
+                msg.text,
+                modifier = Modifier.padding(10.dp),
+                fontWeight = if (success) FontWeight.SemiBold else FontWeight.Normal,
+            )
         }
     }
 }

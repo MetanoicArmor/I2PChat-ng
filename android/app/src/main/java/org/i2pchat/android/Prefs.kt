@@ -80,7 +80,7 @@ data class RouterPrefs(
 }
 
 data class UiPrefs(
-    val theme: String = "system",
+    val theme: String = "dark",
     val historyMaxMessages: Int = 1000,
     val historyRetentionDays: Int = 0,
 ) {
@@ -93,7 +93,7 @@ data class UiPrefs(
             return try {
                 val raw = JSONObject(path.readText())
                 UiPrefs(
-                    theme = raw.optString("theme", "system"),
+                    theme = raw.optString("theme", "dark"),
                     historyMaxMessages = raw.optInt("history_max_messages", 1000),
                     historyRetentionDays = raw.optInt("history_retention_days", 0),
                 )

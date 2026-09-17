@@ -110,7 +110,7 @@ data class ChatUiState(
     val drafts: Map<String, String> = emptyMap(),
     val tofu: TofuPrompt? = null,
     val error: String = "",
-    val theme: String = "system",
+    val theme: String = "dark",
     val router: RouterPrefs = RouterPrefs(),
     val uiPrefs: UiPrefs = UiPrefs(),
     val blindboxReady: Boolean = false,
