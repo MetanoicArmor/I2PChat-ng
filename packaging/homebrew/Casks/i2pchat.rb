@@ -24,6 +24,6 @@ cask "i2pchat" do
   depends_on macos: ">= :big_sur"
 
   caveats <<~EOS
-    Textual TUI only: install the separate cask `i2pchat-tui`, or use I2PChat.app/Contents/MacOS/I2PChat-tui inside this bundle.
+    FTXUI TUI only: install the separate cask `i2pchat-tui`, or use I2PChat.app/Contents/MacOS/I2PChat-tui inside this bundle.
   EOS
 end
