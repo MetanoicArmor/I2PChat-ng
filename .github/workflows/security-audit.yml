@@ -2,7 +2,7 @@ name: Security Dependency Audit
 
 on:
   push:
-    branches: [ python, c++ ]
+    branches: [ python ]
   pull_request:
   schedule:
     - cron: "0 6 * * 1"

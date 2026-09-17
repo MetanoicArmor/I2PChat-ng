@@ -2,7 +2,7 @@ name: Test Gate
 
 on:
   push:
-    branches: [ python, c++ ]
+    branches: [ python ]
   pull_request:
   workflow_dispatch:
 
