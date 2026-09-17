@@ -31,7 +31,7 @@ Usage:
   ./build-android.sh [--debug|--release] [--install]
 
   --debug     installable debug APK (default)
-  --release   release APK (unsigned unless a keystore is configured)
+  --release   release APK (signed: upload keystore via I2PCHAT_ANDROID_* env, else Android debug keystore)
   --install   adb install -r the built APK
 
 Needs JDK 17+, Android SDK (ANDROID_HOME or ANDROID_SDK_ROOT), NDK and CMake.
@@ -167,6 +167,30 @@ fi
 # Do NOT post-process libi2pd.so with align-elf-16k.py: bumping p_align without a
 # real 16 KiB relink leaves RX/RW segments on the same 16 KiB page, and on Android
 # 15+ that disables pageSizeCompat while still failing dlopen.
+
+ensure_debug_keystore() {
+  local ks="${HOME}/.android/debug.keystore"
+  mkdir -p "${HOME}/.android"
+  if [ -f "${ks}" ]; then
+    return 0
+  fi
+  if ! command -v keytool >/dev/null 2>&1; then
+    echo "ERROR: keytool not found; cannot create debug.keystore for release signing" >&2
+    exit 1
+  fi
+  echo "==> Creating ${ks} (release signing fallback)"
+  keytool -genkeypair -v \
+    -keystore "${ks}" \
+    -storepass android \
+    -alias androiddebugkey \
+    -keypass android \
+    -keyalg RSA -keysize 2048 -validity 10000 \
+    -dname "CN=Android Debug,O=Android,C=US"
+}
+
+if [ "${BUILD_TYPE}" = "release" ] && [ -z "${I2PCHAT_ANDROID_KEYSTORE:-}" ]; then
+  ensure_debug_keystore
+fi
 
 echo "==> Building I2PChat Android ${RELEASE_VERSION} (${BUILD_TYPE})"
 echo "    SDK ${SDK_DIR}"

@@ -31,9 +31,43 @@ android {
         }
     }
 
+    // Release APKs must be signed or PackageManager rejects them
+    // (INSTALL_PARSE_FAILED_NO_CERTIFICATES). Prefer a real upload keystore via
+    // env when cutting Play/production builds; otherwise fall back to the
+    // Android debug keystore so GitHub Release APKs remain sideloadable.
+    val releaseStoreFile = System.getenv("I2PCHAT_ANDROID_KEYSTORE")
+    val releaseStorePassword = System.getenv("I2PCHAT_ANDROID_KEYSTORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("I2PCHAT_ANDROID_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("I2PCHAT_ANDROID_KEY_PASSWORD")
+    val hasReleaseKeystore =
+        !releaseStoreFile.isNullOrBlank() &&
+            !releaseStorePassword.isNullOrBlank() &&
+            !releaseKeyAlias.isNullOrBlank() &&
+            !releaseKeyPassword.isNullOrBlank() &&
+            file(releaseStoreFile).isFile
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseKeystore) {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            } else {
+                // Same defaults as the Android Studio debug keystore.
+                val debugStore = file("${System.getProperty("user.home")}/.android/debug.keystore")
+                storeFile = debugStore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

@@ -25,7 +25,7 @@ From the **repository root** (needs JDK 17+, `ANDROID_HOME` / SDK, NDK):
 
 ```bash
 ./build-android.sh --debug              # default — signed with the debug keystore
-./build-android.sh --release            # release APK (unsigned unless a keystore is configured)
+./build-android.sh --release            # release APK (upload keystore via I2PCHAT_ANDROID_* env, else debug keystore)
 ./build-android.sh --debug --install    # build + adb install -r
 ```
 
