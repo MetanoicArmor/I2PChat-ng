@@ -199,12 +199,13 @@ jobs:
           - os: macos-latest
             arch: arm64
             sums: SHA256SUMS.macos-arm64
-          - os: macos-latest
+          # Intel builds need a real x86_64 runner; Homebrew no longer installs
+          # under Rosetta on Apple Silicon ("only supported on Apple Silicon").
+          - os: macos-13
             arch: x64
             sums: SHA256SUMS.macos-x64
-            # Apple Silicon runner: build Intel slice under Rosetta (not CMAKE cross).
-            rosetta: true
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     steps:
       - name: Resolve tag and checkout ref
         id: meta
@@ -262,27 +263,10 @@ jobs:
           fi
 
       - name: Install Homebrew dependencies
-        run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            softwareupdate --install-rosetta --agree-to-license || true
-            if [ ! -x /usr/local/bin/brew ]; then
-              echo "==> Installing Intel Homebrew under Rosetta"
-              NONINTERACTIVE=1 arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            fi
-            arch -x86_64 /usr/local/bin/brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
-          else
-            brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
-          fi
+        run: brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
 
       - name: Build macOS zips
-        run: |
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            export PATH="/usr/local/bin:$PATH"
-            # Run the whole packaging script as x86_64 so uname -m / brew / Qt match.
-            arch -x86_64 env PATH="/usr/local/bin:$PATH" ./build-macos.sh
-          else
-            ./build-macos.sh
-          fi
+        run: ./build-macos.sh
 
       - name: Smoke-test TUI zip
         run: |
@@ -291,17 +275,12 @@ jobs:
           mkdir -p /tmp/tui-smoke
           unzip -q -d /tmp/tui-smoke "$ZIP"
           cd /tmp/tui-smoke
-          if [ "${{ matrix.arch }}" = "x64" ]; then
-            arch -x86_64 ./i2pchat-tui --help >/tmp/tui-out 2>&1 || true
-            cat /tmp/tui-out || true
-          else
-            ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
-            pid=$!
-            sleep 2
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            cat /tmp/tui-out || true
-          fi
+          ./i2pchat-tui --help >/tmp/tui-out 2>&1 &
+          pid=$!
+          sleep 2
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          cat /tmp/tui-out || true
           echo "TUI smoke OK"
 
       - name: Verify VERSION matches tag
