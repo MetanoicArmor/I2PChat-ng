@@ -16,13 +16,31 @@ if [ -z "${RELEASE_VERSION}" ]; then
   exit 1
 fi
 
-ARCH=$(uname -m)
-I2PD_DARWIN_VENDOR_SUB="darwin-arm64"
-case "$ARCH" in
-  x86_64) ARCH_SUFFIX="x64" ; I2PD_DARWIN_VENDOR_SUB="darwin-x64" ;;
-  arm64)  ARCH_SUFFIX="arm64" ;;
-  *)      ARCH_SUFFIX="$ARCH" ;;
-esac
+if [ -n "${I2PCHAT_MACOS_ARCH_SUFFIX:-}" ]; then
+  ARCH_SUFFIX="${I2PCHAT_MACOS_ARCH_SUFFIX}"
+  case "${ARCH_SUFFIX}" in
+    x64)
+      I2PD_DARWIN_VENDOR_SUB="darwin-x64"
+      export CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES:-x86_64}"
+      ;;
+    arm64)
+      I2PD_DARWIN_VENDOR_SUB="darwin-arm64"
+      export CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES:-arm64}"
+      ;;
+    *)
+      echo "ERROR: unsupported I2PCHAT_MACOS_ARCH_SUFFIX=${ARCH_SUFFIX}" >&2
+      exit 1
+      ;;
+  esac
+else
+  ARCH=$(uname -m)
+  I2PD_DARWIN_VENDOR_SUB="darwin-arm64"
+  case "$ARCH" in
+    x86_64) ARCH_SUFFIX="x64" ; I2PD_DARWIN_VENDOR_SUB="darwin-x64" ;;
+    arm64)  ARCH_SUFFIX="arm64" ;;
+    *)      ARCH_SUFFIX="$ARCH" ;;
+  esac
+fi
 
 echo "==> Building C++ client for architecture: ${ARCH_SUFFIX}"
 if ! command -v cmake >/dev/null 2>&1; then

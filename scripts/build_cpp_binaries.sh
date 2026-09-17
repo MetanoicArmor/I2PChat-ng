@@ -54,6 +54,9 @@ fi
 if [ "$(uname -s)" = "Linux" ]; then
   set -- "$@" -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib'
 elif [ "$(uname -s)" = "Darwin" ]; then
+  if [ -n "${CMAKE_OSX_ARCHITECTURES:-}" ]; then
+    set -- "$@" -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+  fi
   QT_LIB=""
   if command -v brew >/dev/null 2>&1; then
     QT_LIB="$(brew --prefix qt 2>/dev/null || true)/lib"

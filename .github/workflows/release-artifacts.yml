@@ -199,7 +199,7 @@ jobs:
           - os: macos-latest
             arch: arm64
             sums: SHA256SUMS.macos-arm64
-          - os: macos-13
+          - os: macos-latest
             arch: x64
             sums: SHA256SUMS.macos-x64
     runs-on: ${{ matrix.os }}
@@ -264,6 +264,8 @@ jobs:
           brew install cmake ninja libsodium boost nlohmann-json ftxui qt zip
 
       - name: Build macOS zips
+        env:
+          I2PCHAT_MACOS_ARCH_SUFFIX: ${{ matrix.arch }}
         run: ./build-macos.sh
 
       - name: Smoke-test TUI zip
