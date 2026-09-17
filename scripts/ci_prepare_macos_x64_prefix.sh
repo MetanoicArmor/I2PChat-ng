@@ -78,11 +78,11 @@ if [ ! -d "${FTXUI_MARKER}" ]; then
   cmake --install "${BUILD}"
 fi
 
-# nlohmann_json + Boost come from CMake FetchContent when system packages are absent.
+# Use ':' so `source ci-env.sh` does not treat ';' as a shell command separator.
 {
-  echo "CMAKE_PREFIX_PATH=${PREFIX};${QT_PREFIX}"
-  echo "QT_PREFIX=${QT_PREFIX}"
-  echo "DEPS_PREFIX=${PREFIX}"
+  echo "export CMAKE_PREFIX_PATH=\"${PREFIX}:${QT_PREFIX}\""
+  echo "export QT_PREFIX=\"${QT_PREFIX}\""
+  echo "export DEPS_PREFIX=\"${PREFIX}\""
 } > "${PREFIX}/ci-env.sh"
 echo "==> macOS x64 prefix ready: ${PREFIX}"
 echo "==> Qt: ${QT_PREFIX}"
