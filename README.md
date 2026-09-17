@@ -5,15 +5,16 @@
 <h1 align="center">I2PChat</h1>
 
 <p align="center">
-  <a href="https://github.com/MetanoicArmor/I2PChat/releases/latest"><img src="https://img.shields.io/github/v/release/MetanoicArmor/I2PChat?label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/MetanoicArmor/I2PChat" alt="License"></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python"></a>
+  <a href="https://github.com/MetanoicArmor/I2PChat-ng/releases/latest"><img src="https://img.shields.io/github/v/release/MetanoicArmor/I2PChat-ng?label=release" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MetanoicArmor/I2PChat-ng" alt="License"></a>
+  <a href="cpp/CMakeLists.txt"><img src="https://img.shields.io/badge/C%2B%2B-20-00599C.svg" alt="C++20"></a>
+  <a href="android/README.md"><img src="https://img.shields.io/badge/Android-APK-3DDC84.svg" alt="Android"></a>
   <a href="https://i2pd.website"><img src="https://img.shields.io/badge/I2P-SAM%20API-purple.svg" alt="I2P"></a>
 </p>
 
 <p align="center">
   <b>Experimental peer‑to‑peer chat client for the <a href="https://i2pd.website">I2P</a> anonymity network.</b><br>
-  Cross‑platform <b>PyQt6 GUI</b> and a separate <b>terminal client</b> (often labeled <b>TUI</b> — <i>terminal user interface</i>: the same chat in a console via Textual, no Qt windows) on one shared asynchronous core.<br>
+  Cross‑platform <b>Qt 6 GUI</b>, <b>FTXUI TUI</b>, and <b>Android</b> (Kotlin + Compose) on one shared <b>C++20</b> core (<code>libi2pchat_core</code>).<br>
   Prebuilt releases usually ship a <b>bundled <code>i2pd</code></b>; you can switch to a system router in the app (see manuals).
 </p>
 
@@ -46,11 +47,11 @@
 
 ### ✨ Features
 
-- **End‑to‑end communication over I2P SAM** (internal `i2pchat.sam` layer)
+- **End‑to‑end communication over I2P SAM** (in-tree SAM client in `libi2pchat_core`)
 - **E2E encryption** — handshake, key signing and verification
 - **TOFU** — peer key pinning on first contact
 - **Multi-peer profiles** — switch between **Saved peers** freely; incoming connections are accepted only from addresses present in the contact book (empty book ⇒ no inbound whitelist matches)
-- **PyQt6 GUI** with light and dark themes (macOS-style, consistent and predictable on all platforms)
+- **Qt 6 GUI** with light and dark themes (desktop)
 - **File transfer** and **image sending** (Send picture: PNG, JPEG, WebP) between peers
 - **Profiles (.dat)** — multiple profiles, load and import; each profile’s data lives under **`profiles/<name>/`** in the app data directory (if older **flat** `*.dat` files still sit in the data root, they are **migrated on startup** into that layout — see **§ profile paths** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md))
 - **System notifications** — tray toasts for new messages
@@ -59,8 +60,8 @@
 - **Optional encrypted chat history** — per-peer local history (toggle **Chat history: ON/OFF** in the **⋯** menu); encrypted at rest with keys derived from your profile identity (see **§4.11** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md))
 - **Contact book (Saved peers)** — left sidebar list backed by **`profiles/<name>/<name>.contacts.json`**: quick switch between saved `.b32.i2p` peers, optional display name/note, unread hints, resize/collapse, and a context menu (edit, trust details, remove). See **§3.1** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md).
 - **Text groups** — multi-member conversations over the same vNext stream as 1:1 chat; offline delivery fans out per member via **pairwise** BlindBox (see the manuals for prerequisites and **§** on group BlindBox behavior)
-- **Terminal client (TUI)** — *terminal user interface*: full chat in a text shell (desktop C++ FTXUI / historical Textual); shipped as **`*-tui-*`** release zips and **`i2pchat-tui`** packages (Homebrew, apt, AUR)
-- **Android** — Kotlin + Jetpack Compose over the same C++ core; APK via [`./build-android.sh`](build-android.sh) ([details](android/README.md))
+- **Terminal client (TUI)** — FTXUI console UI; shipped as **`*-tui-*`** release zips and **`i2pchat-tui`** packages (Homebrew, apt, AUR, winget)
+- **Android** — Kotlin + Jetpack Compose over the same C++ core; release APK on [GitHub Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest) or build with [`./build-android.sh`](build-android.sh) ([details](android/README.md))
 - Cross‑platform build scripts (Linux, macOS, Windows, Android)
 
 #### 📖 Manuals
@@ -70,142 +71,58 @@
 
 ### 🧠 Core architecture
 
-The runtime is built around one shared async engine — `I2PChatCore` — plus **`SessionManager`** (per-peer transport lifecycle and outbound policy since v1.2.6) and **parallel live streams** (`LivePeerSession` rows in **`_live_sessions[peer_id]`**), with **`GroupManager`** for text groups. Thin UI adapters sit on top; protocol / crypto / BlindBox below.
+I2PChat is a **C++20** project: shared **`libi2pchat_core`**, desktop **Qt 6 GUI**, **FTXUI TUI**, and **Android** (JNI + Compose). Historical Python sources may still exist for interop tests; shipping builds and CI are C++.
 
-**Toolchain:** Python dependencies are managed with **[uv](https://docs.astral.sh/uv/)** ([`pyproject.toml`](pyproject.toml), [`uv.lock`](uv.lock)). **I2P SAM** (router control connection, sessions, streams, naming lookups) is implemented in-tree as **`i2pchat.sam`** — not the PyPI **`i2plib`** package; the old vendored `i2plib` tree was removed.
+| Layer | Role |
+|-------|------|
+| `cpp/apps/gui` | Qt 6 desktop UI |
+| `cpp/apps/tui` | FTXUI terminal UI |
+| `cpp/apps/cli` | Headless / tooling entry |
+| `libi2pchat_core` | SAM, crypto, vNext framing, BlindBox, sessions, groups |
+| `android/` | Kotlin UI + JNI over the same core |
 
 ```mermaid
 flowchart TB
-    subgraph Entry["UI / entrypoints"]
-        run["python -m i2pchat.gui
-python -m i2pchat.tui
-i2pchat/run_gui.py"]
-        qt["PyQt6 GUI
-i2pchat/gui/main_qt.py
-ChatWindow + qasync event loop"]
-        tui["Textual TUI
-i2pchat/gui/chat_python.py"]
-        present["Presentation helpers
-i2pchat/presentation/*
-status / drafts / replies / unread / groups / notification policy"]
-        guiStore["GUI-side persistence
-chat_history.py
-contact_book.py
-group_store.py
-profile_backup.py"]
-        run --> qt
-        qt --> present
-        qt --> guiStore
-        tui -->|"commands + callbacks"| core
-        qt -->|"commands + callbacks"| core
+    subgraph UI["User interfaces"]
+        qt["Qt 6 GUI<br/>cpp/apps/gui"]
+        tui["FTXUI TUI<br/>cpp/apps/tui"]
+        and["Android Compose<br/>android/"]
     end
 
-    subgraph CoreRuntime["Shared async core"]
-        core["i2pchat/core/i2p_chat_core.py
-I2PChatCore
-• profile/session bootstrap
-• accept/connect orchestration
-• _live_sessions[peer_id] → LivePeerSession
-• secure handshake + TOFU pinning
-• per-peer send/receive loops
-• ACK tracking + delivery telemetry
-• text / file / image + text groups
-• BlindBox root exchange
-• delegates transport lifecycle → SessionManager"]
-        sessionMgr["i2pchat/core/session_manager.py
-SessionManager
-per-peer transport state
-outbound policy · streams · reconnect"]
-        groupMgr["i2pchat/groups/manager.py
-GroupManager
-live + BlindBox fan-out"]
-        retry["Retry helpers
-send_retry_policy.py
-transfer_retry.py"]
-        core --> sessionMgr
-        core --> groupMgr
-        core --> retry
+    subgraph Core["libi2pchat_core"]
+        session["Session / peer transport"]
+        protocol["vNext codec + delivery"]
+        crypto["X25519 / Ed25519 / SecretBox"]
+        blindbox["BlindBox client"]
+        sam["SAM client"]
     end
 
-    subgraph ProtocolSecurity["Protocol + security"]
-        codec["Framing codec
-protocol/protocol_codec.py
-vNext header / flags / msg_id / len"]
-        delivery["Delivery state model
-protocol/message_delivery.py
-sending / queued / delivered / failed"]
-        crypto["i2pchat/crypto.py
-X25519 + Ed25519
-HKDF
-SecretBox + HMAC"]
+    subgraph External["External"]
+        router["I2P router (i2pd / Java I2P)"]
+        peers["Remote peers"]
+        boxes["BlindBox replicas"]
     end
 
-    subgraph BlindBox["Offline delivery subsystem"]
-        bbclient["blindbox_client.py
-quorum PUT / GET
-SAM or direct TCP"]
-        bbkeys["blindbox_key_schedule.py
-lookup / blob / state keys"]
-        bbblob["blindbox_blob.py
-encrypted padded offline blob"]
-        bbstate["storage/blindbox_state.py
-send_index / recv window / consumed set"]
-        bblocal["blindbox_local_replica.py
-optional local BlindBox"]
-    end
-
-    subgraph Transport["Network / external boundary"]
-        samLayer["i2pchat.sam (internal)
-SESSION / STREAM / NAMING
-no PyPI i2plib"]
-        sam["I2P router
-SAM API"]
-        peer["Remote peers
-N concurrent SAM streams
-one secure session per peer id"]
-        boxes["BlindBox replicas
-I2P or loopback endpoints"]
-    end
-
-    subgraph ProfileState["Profile / local identity"]
-        profile["profiles/<name>/ per profile
-<name>.dat + keyring
-contacts.json Saved peers
-trust store
-signing seed"]
-    end
-
-    profile -->|"load / save identity,
-trust pins, contacts"| core
-    core -->|"encode / decode frames"| codec
-    core -->|"derive UI delivery semantics"| delivery
-    core -->|"handshake, encryption,
-MAC, replay checks"| crypto
-    core -->|"queue offline text,
-root rotation, polling"| bbclient
-    core -->|"derive per-message keys"| bbkeys
-    bbkeys --> bbblob
-    core -->|"persist offline counters
-and root metadata"| bbstate
-    core -.->|"optional local fallback"| bblocal
-    bbclient -->|"stores / fetches blobs"| bbblob
-    bbclient <-->|"SAM streams or TCP"| samLayer
-    samLayer <--> sam
-    sam <--> peer
-    bbclient <--> boxes
-    core -->|"status / message / file /
-delivery callbacks"| qt
+    qt --> Core
+    tui --> Core
+    and --> Core
+    session --> protocol
+    session --> crypto
+    session --> blindbox
+    session --> sam
+    sam <--> router
+    router <--> peers
+    blindbox <--> boxes
 ```
 
 Runtime in practice:
 
-1. **Startup**: `main_qt.py` runs **profile directory migration** when needed (flat `*.dat` in the data root → `profiles/<name>/`) before the profile picker, then creates `ChatWindow`; `start_core()` calls `I2PChatCore.init_session()`, which loads or creates the profile identity, opens the long-lived SAM session, warms up tunnels, and starts `accept_loop()` / `tunnel_watcher()`.
-2. **Transport lifecycle (`SessionManager`, since v1.2.6)**: per-peer transport state (connecting / handshaking / secure / stale / failed), outbound send policy (`LIVE_ONLY`, `PREFER_LIVE_FALLBACK_BLINDBOX`, `QUEUE_THEN_RETRY_LIVE`, `BLINDBOX_ONLY`), stream registry, reconnect metadata, and inflight ACK hooks live in **`SessionManager`**. Parallel **live** traffic is keyed by **`peer_id`** in **`_live_sessions`** (`LivePeerSession`: `conn`, crypto, ACK tables, receive loop). Legacy `self.conn` may still reflect the active UI peer; **routing and ACKs are peer-scoped**, not “single global connection”. Delivery telemetry and UI read this so **Send** vs **Send offline** stay correct after handshake.
-3. **Live chat path**: `connect_to_peer()` / `accept_loop()` opens or updates **one** I2P stream per **peer**; `I2PChatCore` runs the handshake, TOFU pinning, and subkeys, then encrypted vNext frames via `ProtocolCodec` + `crypto`. Multiple peers can be **connected at once** (bounded by `max_concurrent_live_sessions`); the UI **selection** (`current_peer_addr`) does not define which peer receives a send — the **target peer** for that operation does.
-4. **Text groups**: **`GroupManager`** sends group envelopes over the same vNext stream as 1:1 chat; offline text fans out **per member** via pairwise BlindBox. State: `i2pchat/storage/group_store.py` (see [MANUAL_EN](docs/MANUAL_EN.md) / [PROTOCOL](docs/PROTOCOL.md)).
-5. **Delivery tracking**: each outgoing text / file / image gets a `MSG_ID` and ACK context; `message_delivery.py` turns low-level outcomes into UI states (`sending`, `queued`, `delivered`, `failed`).
-6. **Offline path (BlindBox)**: when no live secure session is available, `send_text()` can route through BlindBox — derive deterministic lookup/blob keys, encrypt a padded blob, PUT it to one or more BlindBox replicas, and later poll / decrypt GET results back into the chat stream.
-7. **UI responsibility split**: `I2PChatCore` stays UI-agnostic and emits callbacks only; the Qt layer renders chat, status and notifications, while GUI-side storage modules persist chat history, contacts, group state, drafts and backup/export data.
+1. **Startup**: GUI / TUI / Android create a core session, load or create the profile identity, open the long-lived SAM session, warm tunnels, and start accept / tunnel watch loops.
+2. **Transport**: per-peer state (connecting / handshaking / secure / stale / failed), outbound policy, stream registry, and reconnect live in the session layer. Parallel live traffic is keyed by peer id.
+3. **Live chat**: one I2P stream per peer after handshake and TOFU; encrypted vNext frames thereafter. Multiple peers can be connected at once.
+4. **Text groups**: group envelopes over the same vNext stream; offline text fans out per member via BlindBox.
+5. **Offline (BlindBox)**: when no live secure session is available, text can be queued as padded encrypted blobs on BlindBox replicas and delivered when the peer returns.
+6. **UI split**: the core stays UI-agnostic; Qt / FTXUI / Compose render chat and status.
 
 ### 🔌 Protocol overview
 
@@ -330,7 +247,7 @@ Without vcpkg, install libsodium/Boost/nlohmann-json/Qt/FTXUI yourself and pass 
 
 **BlindBox daemon:** `i2pchat-blindbox-daemon`. systemd / fail2ban: [`cpp/apps/blindbox-daemon/packaging/`](cpp/apps/blindbox-daemon/packaging/). Public replicas behind I2P may keep replica auth empty; raw TCP should still use a token. See **§4.9** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md).
 
-The Python tree (`i2pchat/`, `uv`, PyInstaller) remains for interop tests and until cutover; it is not required to build or run the C++ clients.
+Legacy Python sources (if present) are only for interop / golden-vector tests; they are **not** required to build or run shipping clients.
 
 ### 🔧  Cross-platform release builds
 
@@ -447,7 +364,7 @@ To reduce traffic-shape leakage, encrypted payloads use a padding profile:
 You can override the profile with:
 
 ```bash
-I2PCHAT_PADDING_PROFILE=off python -m i2pchat.gui
+I2PCHAT_PADDING_PROFILE=off ./I2PChat   # or I2PChat-tui / Android env
 ```
 
 Trade-off: stronger padding reduces length correlation but increases bandwidth.
@@ -506,28 +423,28 @@ bc1qfenneg8pt7g42f94uww3l3d7gtw6rl9dd3uslg
 
 ### 📥 Prebuilt Downloads
 
-**[Latest release](https://github.com/MetanoicArmor/I2PChat/releases/latest)** — bundles match **`v` + [`VERSION`](VERSION)** in this repo (**v1.5.0** in the table below; **update these rows when you tag a new release** so `latest/download/…` filenames stay valid). No Python on the target machine for these zips.
+**[Latest release](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest)** — C++ desktop (Qt GUI + FTXUI TUI), Linux `.deb`/`.rpm`, and **Android APK**. Bundles match **`v` + [`VERSION`](VERSION)** (**v1.5.0** in the table; update filenames when you tag). No Python runtime needed.
 
 Full zip layouts, **winget**, **`.deb`**, **Flatpak** notes → [**docs/INSTALL.md**](docs/INSTALL.md).
 
 | Variant | Download | Launch |
 |---------|----------|--------|
-| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — GUI** | [I2PChat-windows-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-windows-x64-v1.5.0.zip) | Unzip → run `I2PChat.exe` |
-| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — TUI only** | [I2PChat-windows-tui-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-windows-tui-x64-v1.5.0.zip) | `I2PChat-tui.exe` in the extracted tree |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (arm64)** | [I2PChat-macOS-arm64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-arm64-v1.5.0.zip) | Unzip → open **`I2PChat-macOS-arm64-bundle/I2PChat.app`** (see **INSTALL.md**) |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (arm64)** | [I2PChat-macOS-arm64-tui-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-arm64-tui-v1.5.0.zip) | Run **`./i2pchat-tui`** from the extracted folder |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (Intel x64)** | [I2PChat-macOS-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-x64-v1.5.0.zip) | Unzip → open **`I2PChat-macOS-x64-bundle/I2PChat.app`** (see **INSTALL.md**) |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (Intel x64)** | [I2PChat-macOS-x64-tui-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-x64-tui-v1.5.0.zip) | Run **`./i2pchat-tui`** from the extracted folder |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-v1.5.0.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-v1.5.0.zip) | Same — AppImage inside the zip |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-tui-v1.5.0.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-tui-v1.5.0.zip) | After unzip: **`./i2pchat-tui`** |
+| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — GUI** | [I2PChat-windows-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-windows-x64-v1.5.0.zip) | Unzip → run `I2PChat.exe` |
+| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — TUI only** | [I2PChat-windows-tui-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-windows-tui-x64-v1.5.0.zip) | `I2PChat-tui.exe` in the extracted tree |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (arm64)** | [I2PChat-macOS-arm64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-arm64-v1.5.0.zip) | Unzip → open **`I2PChat-macOS-arm64-bundle/I2PChat.app`** (see **INSTALL.md**) |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (arm64)** | [I2PChat-macOS-arm64-tui-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-arm64-tui-v1.5.0.zip) | Run **`./i2pchat-tui`** from the extracted folder |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (Intel x64)** | [I2PChat-macOS-x64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-x64-v1.5.0.zip) | Unzip → open **`I2PChat-macOS-x64-bundle/I2PChat.app`** (see **INSTALL.md**) |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (Intel x64)** | [I2PChat-macOS-x64-tui-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-x64-tui-v1.5.0.zip) | Run **`./i2pchat-tui`** from the extracted folder |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-v1.5.0.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-v1.5.0.zip) | Same — AppImage inside the zip |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-tui-v1.5.0.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-tui-v1.5.0.zip) | After unzip: **`./i2pchat-tui`** |
 | **Android — APK** | [I2PChat-android-v1.5.0.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.0.apk) (or build with `./build-android.sh`) | Install via `adb install -r …` or the system package installer. |
 
 > **Router backend:** On a **fresh install** (no `router_prefs.json` yet), I2PChat defaults to a **system** `i2pd` **SAM** endpoint (typically `127.0.0.1:7656`). Switch to the **bundled** sidecar when your build includes it via **More actions → I2P router…** (shortcut **Cmd/Ctrl+R**); the choice is persisted. The same dialog opens the router data/log paths and can restart the bundled router.
 
 ### 📦 Package managers
 
-<img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows (x64) — [winget](https://learn.microsoft.com/windows/package-manager/winget/)** (community manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs); ships the **`*-winget-*`** zip **without** embedded `i2pd`. For a bundled router, use the full **`*-windows-x64-v*.zip`** from [Releases](https://github.com/MetanoicArmor/I2PChat/releases).)
+<img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows (x64) — [winget](https://learn.microsoft.com/windows/package-manager/winget/)** (community manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs); ships the **`*-winget-*`** zip **without** embedded `i2pd`. For a bundled router, use the full **`*-windows-x64-v*.zip`** from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases).)
 
 ```powershell
 winget install MetanoicArmor.I2PChat       # GUI
@@ -553,9 +470,9 @@ yay -S i2pchat-bin       # GUI — AppImage from release
 yay -S i2pchat-tui-bin   # TUI only
 ```
 
-> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) (`yay -S i2pchat-git`) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). It may still install and run as *that* app, but it is **not** **MetanoicArmor/I2PChat** (Python / PyQt6 / Textual TUI). For this project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or clone this repo and run **`python -m i2pchat.gui`** / **`python -m i2pchat.tui`**.
+> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). For **this** project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or build the C++ clients from [`cpp/`](cpp/).
 
-<img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat/releases)** (works without any mirror):
+<img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases)** (works without any mirror):
 
 ```bash
 # after downloading e.g. i2pchat_1.5.0_amd64.deb
@@ -585,7 +502,7 @@ Legacy one-line:
 
 ### ℹ️ About
 
-I2PChat is a cross‑platform chat client for the [I2P](https://i2pd.website) anonymity network over **SAM** — **C++ Qt GUI** and **TUI**, plus an **Android** client on the same core (historical **PyQt6** tree remains on the `python` branch).
+I2PChat is a cross‑platform chat client for the [I2P](https://i2pd.website) anonymity network over **SAM** — **C++ Qt 6 GUI**, **FTXUI TUI**, and **Android** on one shared core.
 
 ### Audit / Аудит
 

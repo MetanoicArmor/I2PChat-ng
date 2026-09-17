@@ -70,13 +70,13 @@ docker run --rm -it \
   ./build-linux.sh
 ```
 
-### Python (noble x86_64 image)
+### Build toolchain (noble x86_64 image)
 
-The image uses **deadsnakes** stable + **nightly** PPAs: **Python 3.14** is not in the stable PPA for noble yet, so **`ppa:deadsnakes/nightly`** supplies `python3.14`. If packaging changes, adjust the Dockerfile while keeping **noble** as the base to retain glibc 2.39.
+The image installs a **C++20** toolchain, **CMake**, **Qt 6**, **FTXUI**, libsodium, Boost, and AppImage tooling. Keep **noble** as the base to retain glibc 2.39 unless you intentionally retarget.
 
 ## aarch64 (arm64) — Ubuntu 24.04
 
-**`linux-build-ubuntu2404-arm64.Dockerfile`** — Ubuntu **24.04** on **linux/arm64** with Python **3.14** (deadsnakes), Qt/AppImage dependencies.
+**`linux-build-ubuntu2404-arm64.Dockerfile`** — Ubuntu **24.04** on **linux/arm64** with the same C++ / Qt / AppImage dependencies as x86_64.
 
 ## aarch64 (arm64) — Ubuntu 26.04
 
@@ -94,7 +94,7 @@ From the **repository root**:
 ./packaging/docker/build-linux-aarch64.sh
 ```
 
-The script builds the image and runs **`./build-linux.sh`** end-to-end. Репозиторий смонтирован в `/src`. В **корне репо** появляются **два zip**: **`I2PChat-linux-aarch64-v*.zip`** (GUI) и **`…-tui-…`**. По умолчанию GUI zip — **portable**: в **корне архива** лежат бинарники **`I2PChat`**, **`I2PChat-tui`**, каталоги **`_internal/`**, при наличии **`vendor/`** (как PyInstaller onedir). **AppImage** всё равно собирается в **`dist/`** и копируется в корень репо как **`I2PChat.AppImage`**. Чтобы GUI zip как в GitHub Releases (один `.AppImage` внутри): **`I2PCHAT_LINUX_GUI_ZIP_MODE=appimage ./packaging/docker/build-linux-aarch64.sh`**.
+The script builds the image and runs **`./build-linux.sh`** end-to-end. Репозиторий смонтирован в `/src`. В **корне репо** появляются **два zip**: **`I2PChat-linux-aarch64-v*.zip`** (GUI) и **`…-tui-…`**. По умолчанию GUI zip — **portable**: в **корне архива** лежат бинарники **`I2PChat`**, **`I2PChat-tui`**, каталоги **`lib/`** / **`vendor/`** при наличии. **AppImage** всё равно собирается в **`dist/`** и копируется в корень репо как **`I2PChat.AppImage`**. Чтобы GUI zip как в GitHub Releases (один `.AppImage` внутри): **`I2PCHAT_LINUX_GUI_ZIP_MODE=appimage ./packaging/docker/build-linux-aarch64.sh`**.
 
 ## Prerequisites
 

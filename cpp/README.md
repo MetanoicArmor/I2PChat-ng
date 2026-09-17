@@ -1,12 +1,14 @@
 # I2PChat — C++ client
 
-A C++20 rewrite of I2PChat, developed alongside the Python implementation until
-it reaches parity. It is wire-compatible with released Python 1.4.x clients and
-reads the same on-disk profiles, contacts, history and BlindBox state.
+This is the **shipping** I2PChat client (**C++20**): shared `libi2pchat_core`,
+Qt 6 GUI, FTXUI TUI, plus the Android JNI layer. Prebuilt downloads:
+[GitHub Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest)
+(including **Android APK**).
 
-The compatibility contract is written down in
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) and enforced by golden vectors
-generated from the Python implementation.
+It remains wire-compatible with older Python 1.4.x peers and reads the same
+on-disk profiles, contacts, history and BlindBox state. The compatibility
+contract is in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); golden vectors
+may still be generated from a legacy Python tree when present.
 
 ## Layout
 

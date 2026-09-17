@@ -1,29 +1,31 @@
 # Packaging the C++ client
 
-Python packaging (`packaging/` at the repo root) stays as-is until cutover.
-This directory describes how the C++ binaries reuse that machinery.
+Root [`packaging/`](../../packaging/) is the downstream channel for **shipping
+C++** binaries (Homebrew, winget, AUR, `.deb` / apt, RPM, Flatpak). Artifact
+names match what users already expect on
+[GitHub Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest).
 
-## What is reused unchanged
+## What is reused
 
-- `scripts/ensure_bundled_i2pd.sh` and the staged i2pd trees
+- `scripts/ensure_bundled_i2pd.sh` and staged i2pd trees
 - AppDir layout and pinned `appimagetool` SHA
-- `SHA256SUMS` + GPG detached signatures, same artifact names with a `-cpp`
-  suffix during the beta period (`i2pchat-1.4.1-linux-x64-cpp.AppImage`)
-- Downstream consumers (apt, AUR, winget, Homebrew, Flatpak, Fedora): only
-  checksums change
+- `SHA256SUMS` (+ optional `.asc`) next to release assets
+- Downstream consumers: only version + checksums change when you cut a release
 
-## What is replaced
+## Build → artifact map
 
-| Python | C++ |
+| Script | Outputs |
 |---|---|
-| PyInstaller `.spec`, uv | CMake install of `i2pchat-gui`, `i2pchat-tui`, `i2pchat-blindbox-daemon` |
-| Debian `python3-i2pchat` | `i2pchat` depending on `libqt6widgets6`, `libsodium23`, `libboost-system` |
-| `flake.nix` pythonEnv | a derivation that builds `cpp/` with nixpkgs boost/qt/libsodium |
+| `./build-linux.sh` | `I2PChat-linux-<arch>-v*.zip` (AppImage), `*-tui-*` |
+| `./build-macos.sh` | `I2PChat-macOS-<arch>-v*.zip`, `*-tui-*` |
+| `./build-windows.ps1` | full + `*-winget-*` zips (winget omits bundled i2pd) |
+| `./build-android.sh` | `I2PChat-android-v*.apk` |
+| `release-linux-pkgs.yml` | `i2pchat_*.deb`, `i2pchat-tui_*.deb`, `i2pchat_*.rpm` |
+
+CMake install targets: `i2pchat-gui` → `I2PChat`, `i2pchat-tui` → `I2PChat-tui`,
+plus `i2pchat-blindbox-daemon` when enabled.
 
 ## macOS signing
-
-The Python app was unsigned. The C++ `.app` is signed with hardened runtime
-and notarized:
 
 ```bash
 codesign --force --options runtime --deep --sign "Developer ID Application: …" \
@@ -32,30 +34,17 @@ xcrun notarytool submit I2PChat.dmg --wait --keychain-profile i2pchat
 xcrun stapler staple I2PChat.dmg
 ```
 
-The Keychain wrap-key ACL is bound to this signature. A first launch after
-replacing the Python binary will prompt; the `.dat.wrap` sidecar remains the
-fallback so a user is never locked out.
+Release CI also ad-hoc signs nested Qt helpers before the main binary when
+using aqt-provided Qt.
 
-## Debian source sketch
+## Debian / RPM from zip
 
-`control`:
+Prefer [`packaging/debian/`](../../packaging/debian/) and
+[`packaging/fedora/`](../../packaging/fedora/) scripts that wrap the published
+Linux zip — same path CI uses. Building a source `.deb` from `cpp/` with
+system Qt/libsodium is optional for distro packaging experiments.
 
-```
-Package: i2pchat
-Depends: libqt6widgets6, libsodium23, libboost-system1.83.0
-Recommends: i2pd
-```
+## See also
 
-`i2pchat-tui` is a separate binary package without Qt, so a headless host can
-install just the terminal client and the BlindBox daemon.
-
-## Local release build
-
-```bash
-cmake --preset vcpkg-release
-cmake --build --preset vcpkg-release
-cmake --install build/vcpkg-release --prefix dist/
-```
-
-Then feed `dist/` to the existing AppImage / dmg / zip scripts, swapping the
-PyInstaller payload for these three binaries.
+- [`../README.md`](../README.md) — build from source
+- [`../../packaging/README.md`](../../packaging/README.md) — channel status

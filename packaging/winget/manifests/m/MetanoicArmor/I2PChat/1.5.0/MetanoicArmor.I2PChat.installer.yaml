@@ -1,0 +1,24 @@
+PackageIdentifier: MetanoicArmor.I2PChat
+PackageVersion: 1.5.0
+InstallerLocale: en-US
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.17763.0
+InstallModes:
+  - interactive
+  - silent
+# GUI winget: *-winget-* zip has no embedded i2pd (SHA from release SHA256SUMS.windows-x64 v1.5.0).
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v1.5.0/I2PChat-windows-x64-winget-v1.5.0.zip
+    InstallerSha256: d83f306d072ab1b0faf3b2d4620cde0671ff5a7ff33953de8c15827fb21a3753
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: I2PChat/I2PChat.exe
+        PortableCommandAlias: i2pchat
+      - RelativeFilePath: I2PChat/I2PChat-tui.exe
+        PortableCommandAlias: i2pchat-tui
+    ReleaseDate: 2026-09-17
+ManifestType: installer
+ManifestVersion: 1.6.0

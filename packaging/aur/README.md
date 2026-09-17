@@ -1,6 +1,6 @@
 # AUR: i2pchat-bin / i2pchat-tui-bin
 
-В AUR есть пакет **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat** используйте **`i2pchat-bin`** и **`i2pchat-tui-bin`** ниже (или сборку из исходников).
+В AUR есть пакет **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat-ng** (C++ Qt 6 / FTXUI) используйте **`i2pchat-bin`** и **`i2pchat-tui-bin`** ниже (или сборку из [`cpp/`](../../cpp/)).
 
 - [`i2pchat-bin/`](i2pchat-bin/) — GUI: официальный **AppImage**. В одном PKGBUILD два контура: **`source_x86_64`** (`I2PChat-linux-x86_64-v*.zip`) и **`source_aarch64`** (`I2PChat-linux-aarch64-v*.zip`). На **ARM64** (Raspberry Pi, Asahi и т.д.) `makepkg`/`yay` берут aarch64-архив с GitHub Releases — **отдельного пакета на AUR не нужно**.
 - [`i2pchat-tui-bin/`](i2pchat-tui-bin/) — только TUI: **`I2PChat-linux-*-tui-v*.zip`** (x86_64 и aarch64), установка в `/opt/i2pchat-tui`, команда **`i2pchat-tui`**.
