@@ -261,9 +261,9 @@ jobs:
 
       - name: Install Homebrew dependencies
         run: |
-          brew install cmake ninja libsodium boost nlohmann-json ftxui zip
+          brew install cmake ninja zip
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            brew install qt
+            brew install libsodium boost nlohmann-json ftxui qt
           fi
 
       # Homebrew Qt on macos-latest is arm64-only; Intel zip needs x86_64/universal Qt.
@@ -277,10 +277,30 @@ jobs:
           arch: clang_64
           cache: true
 
+      - name: Bootstrap vcpkg (x64-osx deps)
+        if: matrix.arch == 'x64'
+        run: |
+          baseline="$(python3 -c "import json; print(json.load(open('cpp/vcpkg.json'))['builtin-baseline'])")"
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg checkout "$baseline"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Enable GitHub Actions cache for vcpkg (macOS x64)
+        if: matrix.arch == 'x64'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
       - name: Build macOS zips
         env:
           I2PCHAT_MACOS_ARCH_SUFFIX: ${{ matrix.arch }}
           CMAKE_PREFIX_PATH: ${{ matrix.arch == 'x64' && env.QT_ROOT_DIR || '' }}
+          VCPKG_ROOT: ${{ matrix.arch == 'x64' && format('{0}/vcpkg', github.workspace) || '' }}
+          VCPKG_TARGET_TRIPLET: ${{ matrix.arch == 'x64' && 'x64-osx' || '' }}
+          VCPKG_MANIFEST_FEATURES: ${{ matrix.arch == 'x64' && 'tui' || '' }}
+          VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
         run: ./build-macos.sh
 
       - name: Smoke-test TUI zip

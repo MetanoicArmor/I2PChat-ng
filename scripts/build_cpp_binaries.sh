@@ -40,6 +40,9 @@ elif [ -n "${VCPKG_ROOT:-}" ] && [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.
   TOOLCHAIN=(-DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
   export VCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES:-tui;gui}"
 fi
+if [ -n "${VCPKG_TARGET_TRIPLET:-}" ]; then
+  TOOLCHAIN+=(-DVCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET}")
+fi
 
 echo "==> CMake configure (${BUILD_DIR})"
 set -- cmake -S "${CPP_SRC}" -B "${BUILD_DIR}" \
