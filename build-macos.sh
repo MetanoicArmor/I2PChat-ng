@@ -150,24 +150,60 @@ PLIST
 
 MACDEPLOYQT=""
 QT_LIBPATHS=()
-if command -v brew >/dev/null 2>&1; then
-  QT_PREFIX="$(brew --prefix qt 2>/dev/null || true)"
-  QTBASE_PREFIX="$(brew --prefix qtbase 2>/dev/null || true)"
+# Prefer explicit QT_PREFIX (aqt / CI) over Homebrew — x64 builds use aqt Qt.
+resolve_qt_prefix() {
+  local p
+  if [ -n "${QT_PREFIX:-}" ] && [ -d "${QT_PREFIX}" ]; then
+    printf '%s' "${QT_PREFIX}"
+    return 0
+  fi
+  if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+    local IFS=':'
+    # Also accept CMake-style ';' separators.
+    for p in ${CMAKE_PREFIX_PATH//;/:}; do
+      [ -n "$p" ] || continue
+      if [ -x "${p}/bin/macdeployqt" ] || [ -d "${p}/lib/QtCore.framework" ] || [ -d "${p}/lib/cmake/Qt6" ]; then
+        printf '%s' "$p"
+        return 0
+      fi
+    done
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    p="$(brew --prefix qt 2>/dev/null || true)"
+    if [ -n "$p" ] && [ -d "$p" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+QT_PREFIX="$(resolve_qt_prefix || true)"
+if [ -n "${QT_PREFIX}" ]; then
   if [ -x "${QT_PREFIX}/bin/macdeployqt" ]; then
     MACDEPLOYQT="${QT_PREFIX}/bin/macdeployqt"
   fi
   if [ -d "${QT_PREFIX}/lib" ]; then
     QT_LIBPATHS+=(-libpath="${QT_PREFIX}/lib")
   fi
+fi
+if command -v brew >/dev/null 2>&1; then
+  QTBASE_PREFIX="$(brew --prefix qtbase 2>/dev/null || true)"
   if [ -d "${QTBASE_PREFIX}/lib" ] && [ "${QTBASE_PREFIX}" != "${QT_PREFIX}" ]; then
     QT_LIBPATHS+=(-libpath="${QTBASE_PREFIX}/lib")
+  fi
+  if [ -z "${MACDEPLOYQT}" ]; then
+    BREW_QT="$(brew --prefix qt 2>/dev/null || true)"
+    if [ -x "${BREW_QT}/bin/macdeployqt" ]; then
+      MACDEPLOYQT="${BREW_QT}/bin/macdeployqt"
+    fi
   fi
 fi
 if [ -z "${MACDEPLOYQT}" ] && command -v macdeployqt >/dev/null 2>&1; then
   MACDEPLOYQT="$(command -v macdeployqt)"
 fi
 if [ -n "${MACDEPLOYQT}" ]; then
-  echo "==> macdeployqt"
+  echo "==> macdeployqt (${MACDEPLOYQT})"
   # Homebrew Qt 6 plugins resolve @rpath against the .app's sibling lib/
   # (dist/I2PChat.app → dist/lib). -libpath is ignored for that lookup.
   DIST_LIB_LINK=""
@@ -186,11 +222,12 @@ if [ -n "${MACDEPLOYQT}" ]; then
   fi
   if [ ! -d "dist/${APP_NAME}.app/Contents/Frameworks/QtCore.framework" ]; then
     echo "ERROR: macdeployqt did not copy QtCore.framework (rpath/libpath)." >&2
-    echo "       Pass Homebrew Qt via: brew --prefix qt  → ${QT_PREFIX:-unset}" >&2
+    echo "       Qt prefix: ${QT_PREFIX:-unset}" >&2
     exit 1
   fi
 else
-  echo "WARN: macdeployqt not found; the .app will need a system Qt 6 install to run." >&2
+  echo "ERROR: macdeployqt not found (set QT_PREFIX or install Qt with macdeployqt)." >&2
+  exit 1
 fi
 
 echo "==> Rewrite Homebrew install names to bundled Frameworks"
