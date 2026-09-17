@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.5.0** | [RELEASE_1.5.0.md](RELEASE_1.5.0.md) — C++ default client, Android APK, 16 KiB libi2pd (no pageSizeCompat); wire-compatible with 1.4.x |
 | **1.4.1** | [RELEASE_1.4.1.md](RELEASE_1.4.1.md) — sealed contacts/drafts, opaque group invites, groups in sidebar on identity load, bundled i2pd 2.61.0 |
 | **1.4.0** | [RELEASE_1.4.0.md](RELEASE_1.4.0.md) — handshake v4 (`FINISHED`), TOFU OOB fingerprints, live acceptor Send, system SAM fallback; **protocol-incompatible with 1.3.x** |
 | **1.3.3** | [RELEASE_1.3.3.md](RELEASE_1.3.3.md) — security hardening: authenticated group senders, signed Group BlindBox v3, downgrade protection, loopback-only bundled SAM, cryptography update; **copyable group invites** (`op=join`) |

@@ -33,10 +33,6 @@ Bundled `libi2pd.so` for **arm64-v8a** and **x86_64** must exist under `app/src/
 ./android/scripts/build-i2pd-16k.sh
 ```
 
-## CI / release APK
-
-GitHub Actions workflow [**Release artifacts**](../.github/workflows/release-artifacts.yml) builds desktop zips **and** Android (`I2PChat-android-v*.apk` + `SHA256SUMS.android`) on tag `vX.Y.Z` or via workflow_dispatch. See the [root README](../README.md#-android) for the full artifact table.
-
 ## I2P router
 
 The core talks SAM on loopback, same as desktop.
