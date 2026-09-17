@@ -156,6 +156,9 @@ struct Engine {
         if (local == nullptr) {
             return;
         }
+        if (local->ExceptionCheck()) {
+            local->ExceptionClear();
+        }
         jstring ja = utf8_to_jstring(local, a);
         call_void(name, "(Ljava/lang/String;)V", ja);
         local->DeleteLocalRef(ja);
@@ -263,7 +266,16 @@ std::string catch_message(const std::exception_ptr& ptr) {
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_engine.vm = vm;
     i2pchat::storage::keyring::backend::set_java_vm(vm);
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+        i2pchat::storage::keyring::backend::init_jni(env);
+    }
     return JNI_VERSION_1_6;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeInitKeyring(JNIEnv* env, jclass) {
+    i2pchat::storage::keyring::backend::init_jni(env);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -349,6 +361,7 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         config.sam.port = static_cast<std::uint16_t>(port);
         config.retention.max_messages = static_cast<std::size_t>(std::max(0, max_messages));
         config.retention.max_age_days = static_cast<unsigned>(std::max(0, max_age_days));
+        config.trust_auto_accept_first_sighting = true;
         fs::create_directories(config.app_root / "profiles" / config.profile);
 
         ChatEvents events;

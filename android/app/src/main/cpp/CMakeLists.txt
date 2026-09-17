@@ -113,5 +113,8 @@ target_link_libraries(i2pchat_jni PRIVATE
   log
 )
 
-target_link_options(i2pchat_jni PRIVATE "-Wl,-z,max-page-size=16384")
+target_link_options(i2pchat_jni PRIVATE
+  "-Wl,-z,max-page-size=16384"
+  "-Wl,-z,common-page-size=16384"
+)
 target_compile_definitions(i2pchat_jni PRIVATE BOOST_ASIO_NO_DEPRECATED)

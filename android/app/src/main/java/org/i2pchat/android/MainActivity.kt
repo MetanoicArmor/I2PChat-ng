@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -193,7 +194,8 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             Spacer(Modifier.height(8.dp))
             Text(
                 "Use random_address for a one-time session. TOFU pins are not stored in that mode. " +
-                    "I2P on a phone keeps a foreground service running and uses battery.",
+                    "I2P on a phone keeps a foreground service running and uses battery. " +
+                    "Bundled i2pd starts in the background when this screen opens; first SAM can take 1–2 minutes.",
             )
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
@@ -627,6 +629,19 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
             OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text("Control HTTP") }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(12.dp))
             Button(onClick = { bridge.saveRouter(prefs) }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            if (prefs.usingBundled) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { bridge.restartBundledRouter() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Restart bundled i2pd")
+                }
+                Text(
+                    "Use this if Open fails with SAM not ready or a previous i2pd did not shut down.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

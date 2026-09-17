@@ -1531,6 +1531,15 @@ void ChatWindow::start_core_session() {
             schedule_refresh_contacts();
         });
     };
+    events.on_delivery = [this](const runtime::DeliveryReport& report) {
+        QMetaObject::invokeMethod(this, [this, report] {
+            if (!service_ || report.peer != selected_ || !active_group_id_.empty()) {
+                return;
+            }
+            reload_selected();
+            refresh_status();
+        });
+    };
     events.on_local_address = [this](const std::string& addr) {
         QMetaObject::invokeMethod(this, [this, addr] {
             setWindowTitle(QString("I2PChat @ %1").arg(QString::fromStdString(options_.profile)));

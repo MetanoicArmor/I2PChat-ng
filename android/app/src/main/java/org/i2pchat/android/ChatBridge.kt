@@ -163,12 +163,83 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun warmRouter() {
         val router = RouterPrefs.load(appRoot)
         if (!router.usingBundled) return
-        I2pdForegroundService.start(
-            getApplication(),
-            appRoot,
-            true,
-            "Starting bundled i2pd…",
-        )
+        monitorRouterWarmup()
+        if (samProbe(router.samHost, router.samPort)) {
+            I2pdForegroundService.start(
+                getApplication(),
+                appRoot,
+                true,
+                "SAM ready on ${router.samPort}",
+            )
+            return
+        }
+        if (I2pdForegroundService.isAlive(appRoot)) {
+            I2pdForegroundService.start(
+                getApplication(),
+                appRoot,
+                true,
+                I2pdForegroundService.readStatus(appRoot),
+            )
+        } else {
+            I2pdForegroundService.start(getApplication(), appRoot, true, "Starting bundled i2pd…")
+        }
+    }
+
+    private var routerMonitorJob: Job? = null
+
+    private fun monitorRouterWarmup() {
+        routerMonitorJob?.cancel()
+        routerMonitorJob = viewModelScope.launch(Dispatchers.IO) {
+            val router = RouterPrefs.load(appRoot)
+            if (!router.usingBundled) return@launch
+            val t0 = System.currentTimeMillis()
+            while (isActive && !_state.value.running && !_state.value.starting) {
+                if (samProbe(router.samHost, router.samPort)) {
+                    onMain {
+                        _state.update {
+                            it.copy(status = "SAM ready — tap Open (first run can take 1–2 min)")
+                        }
+                    }
+                    return@launch
+                }
+                val sec = (System.currentTimeMillis() - t0) / 1000
+                val msg = I2pdForegroundService.readStatus(appRoot)
+                onMain {
+                    _state.update {
+                        it.copy(
+                            status = if (msg.isNotBlank()) {
+                                "Waiting for SAM ${router.samPort}… ${sec}s — $msg"
+                            } else {
+                                "Starting bundled i2pd… ${sec}s"
+                            },
+                        )
+                    }
+                }
+                delay(400)
+            }
+        }
+    }
+
+    fun restartBundledRouter() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val router = RouterPrefs.load(appRoot)
+            if (!router.usingBundled) {
+                onMain { _state.update { it.copy(error = "Bundled router is disabled in settings") } }
+                return@launch
+            }
+            runCatching { NativeEngine.nativeStop() }
+            I2pdForegroundService.restartBundled(getApplication(), appRoot)
+            onMain {
+                _state.update {
+                    it.copy(
+                        running = false,
+                        starting = false,
+                        status = "Restarting bundled i2pd…",
+                        error = "",
+                    )
+                }
+            }
+        }
     }
 
     fun start(profile: String) {
@@ -194,52 +265,82 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     ),
                 )
             }
-            I2pdForegroundService.start(
-                getApplication(),
-                appRoot,
-                router.usingBundled,
-                if (router.usingBundled) "Starting bundled i2pd…" else "Using external SAM ${router.samHost}:${router.samPort}",
-            )
-            val timeout = if (router.usingBundled) 180_000 else 8_000
-            appendNotice("system", "Waiting for SAM ${router.samHost}:${router.samPort}…")
-            val ready = waitForSam(router.samHost, router.samPort, timeout) {
-                val msg = I2pdForegroundService.readStatus(appRoot)
-                if (msg.isNotBlank()) {
-                    _state.update { it.copy(status = "Waiting for SAM ${router.samHost}:${router.samPort}… $msg") }
+            routerMonitorJob?.cancel()
+            var ready = samProbe(router.samHost, router.samPort)
+            if (!ready) {
+                if (router.usingBundled) {
+                    if (!I2pdForegroundService.isAlive(appRoot)) {
+                        I2pdForegroundService.start(
+                            getApplication(),
+                            appRoot,
+                            true,
+                            "Starting bundled i2pd…",
+                        )
+                    }
+                } else {
+                    I2pdForegroundService.start(
+                        getApplication(),
+                        appRoot,
+                        false,
+                        "Using external SAM ${router.samHost}:${router.samPort}",
+                    )
                 }
+                appendNotice("system", "Waiting for SAM ${router.samHost}:${router.samPort}…")
+                val timeout = if (router.usingBundled) 90_000 else 8_000
+                ready = waitForSam(router.samHost, router.samPort, timeout) { elapsedSec ->
+                    val msg = I2pdForegroundService.readStatus(appRoot)
+                    _state.update {
+                        it.copy(
+                            status = buildString {
+                                append("Waiting for SAM ${router.samHost}:${router.samPort}… ${elapsedSec}s")
+                                if (msg.isNotBlank()) append(" — ").append(msg)
+                            },
+                        )
+                    }
+                }
+                if (!ready && router.usingBundled) {
+                    appendNotice("system", "SAM not ready — restarting bundled i2pd…")
+                    I2pdForegroundService.restartBundled(getApplication(), appRoot)
+                    ready = waitForSam(router.samHost, router.samPort, 75_000) { elapsedSec ->
+                        val msg = I2pdForegroundService.readStatus(appRoot)
+                        _state.update {
+                            it.copy(
+                                status = buildString {
+                                    append("Restarting i2pd, waiting for SAM… ${elapsedSec}s")
+                                    if (msg.isNotBlank()) append(" — ").append(msg)
+                                },
+                            )
+                        }
+                    }
+                }
+            } else {
+                appendNotice("system", "SAM already ready on ${router.samHost}:${router.samPort}")
             }
             if (!ready) {
                 val routerStatus = I2pdForegroundService.readStatus(appRoot)
-                _state.update {
-                    it.copy(
-                        starting = false,
-                        running = false,
-                        transport = "Failed",
-                        status = "Failed",
-                        error = "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus",
-                    )
-                }
+                failStart(
+                    "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus " +
+                        "Try Router settings → Restart bundled i2pd, or wait a minute and Open again.",
+                )
                 return@launch
             }
-            val result = JSONObject(
-                NativeEngine.nativeStart(
-                    appRoot.absolutePath,
-                    profile,
-                    router.samHost,
-                    router.samPort,
-                    ui.historyMaxMessages,
-                    ui.historyRetentionDays,
-                ),
-            )
+            val result = runCatching {
+                JSONObject(
+                    NativeEngine.nativeStart(
+                        appRoot.absolutePath,
+                        profile,
+                        router.samHost,
+                        router.samPort,
+                        ui.historyMaxMessages,
+                        ui.historyRetentionDays,
+                    ),
+                )
+            }.getOrElse { ex ->
+                failStart("Cannot start I2P session: ${ex.message}")
+                return@launch
+            }
             if (!result.optBoolean("ok", false)) {
-                _state.update {
-                    it.copy(
-                        starting = false,
-                        running = false,
-                        error = result.optString("error", "Failed to start"),
-                        status = "Failed",
-                    )
-                }
+                failStart(result.optString("error", "Failed to start"))
                 return@launch
             }
             val drafts = runCatching {
@@ -315,6 +416,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         _state.update { it.copy(compose = "") }
         persistDraft(id, "")
         viewModelScope.launch(Dispatchers.IO) {
+            if (!_state.value.selectedIsGroup) {
+                ensureLiveForSend(id)
+            }
             if (_state.value.selectedIsGroup) {
                 NativeEngine.nativeSendGroupText(id, text)
             } else {
@@ -325,11 +429,45 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    private fun peerLiveInSnapshot(addr: String): Boolean {
+        val snap = runCatching { JSONObject(NativeEngine.nativeSnapshot()) }.getOrNull() ?: return false
+        val arr = snap.optJSONArray("contacts") ?: return false
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.getString("addr") == addr) return o.optBoolean("live")
+        }
+        return false
+    }
+
+    /** Dial only when sending and not live; native side waits for inbound if tie-break says so. */
+    private suspend fun ensureLiveForSend(addr: String) {
+        if (peerLiveInSnapshot(addr)) return
+        onMain { appendNotice("system", "Подключаемся для отправки…") }
+        val ok = runCatching { NativeEngine.nativeConnectPeer(addr) }.getOrDefault(false)
+        if (!ok) return
+        val deadline = System.currentTimeMillis() + 45_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(250)
+            refreshSnapshot()
+            if (peerLiveInSnapshot(addr)) {
+                onMain { appendNotice("system", "Канал готов, отправляем сообщение.") }
+                return
+            }
+        }
+    }
+
     fun connectSelected() {
         val id = _state.value.selectedId
         if (id.isBlank() || _state.value.selectedIsGroup) return
         viewModelScope.launch(Dispatchers.IO) {
-            NativeEngine.nativeConnectPeer(id)
+            val ok = runCatching { NativeEngine.nativeConnectPeer(id) }
+                .getOrElse { ex ->
+                    onMain { _state.update { it.copy(error = "Connect failed: ${ex.message}") } }
+                    false
+                }
+            if (!ok) {
+                onMain { appendNotice("error", "Could not connect to $id") }
+            }
             refreshSnapshot()
         }
     }
@@ -593,27 +731,40 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    private fun samProbe(host: String, port: Int): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), 1_000)
+                socket.soTimeout = 2_000
+                socket.tcpNoDelay = true
+                val out = socket.getOutputStream()
+                out.write("HELLO VERSION MIN=3.1 MAX=3.3\n".toByteArray())
+                out.flush()
+                val buf = ByteArray(512)
+                val n = socket.getInputStream().read(buf)
+                n > 0 && String(buf, 0, n).contains("HELLO REPLY")
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun waitForSam(
         host: String,
         port: Int,
         timeoutMs: Int,
-        onTick: (() -> Unit)? = null,
+        onTick: ((elapsedSec: Int) -> Unit)? = null,
     ): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
+        val t0 = System.currentTimeMillis()
+        val deadline = t0 + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            try {
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(host, port), 400)
-                    socket.soTimeout = 800
-                    socket.getOutputStream().write("HELLO VERSION MIN=3.1 MAX=3.3\n".toByteArray())
-                    val buf = ByteArray(256)
-                    val n = socket.getInputStream().read(buf)
-                    if (n > 0 && String(buf, 0, n).contains("HELLO REPLY")) return true
-                }
-            } catch (_: Exception) {
+            if (samProbe(host, port)) {
+                return true
             }
-            onTick?.invoke()
-            Thread.sleep(250)
+            val elapsedSec = ((System.currentTimeMillis() - t0) / 1000).toInt()
+            onTick?.invoke(elapsedSec)
+            val sleepMs = if (elapsedSec < 45) 100L else 250L
+            Thread.sleep(sleepMs)
         }
         return false
     }
@@ -640,6 +791,21 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
     }
 
+    private fun failStart(message: String) {
+        onMain {
+            _state.update {
+                it.copy(
+                    starting = false,
+                    running = false,
+                    transport = "Failed",
+                    status = "Failed",
+                    error = message,
+                )
+            }
+            appendNotice("error", message)
+        }
+    }
+
     private fun appendNotice(kind: String, text: String) {
         val noticeKind = if (text.startsWith("Online! My Address:")) "success" else kind
         _state.update {
@@ -654,6 +820,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onSystem(message: String) = onMain {
         appendNotice("system", message)
+        if (message.startsWith("Disconnected from")) {
+            viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
+        }
     }
 
     override fun onError(message: String) = onMain {
@@ -733,6 +902,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onTrustPrompt(kind: String, peer: String, newKey: String, oldKey: String) = onMain {
         _state.update { it.copy(tofu = TofuPrompt(kind, peer, newKey, oldKey)) }
+        NotificationHelper.notifyTrustPrompt(getApplication(), peer)
+        appendNotice("system", "Нужно подтвердить ключ $peer для handshake")
     }
 
     override fun onStarted() = onMain {

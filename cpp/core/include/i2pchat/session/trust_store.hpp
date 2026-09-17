@@ -55,7 +55,8 @@ public:
     /// A key that contradicts an existing pin is never accepted silently: with
     /// no prompt handler installed the answer is Reject, because the safe
     /// default for an unexplained identity change is to refuse the session.
-    TrustDecision verify_or_pin(const std::string& peer_addr, ByteView signing_key);
+    TrustDecision verify_or_pin(const std::string& peer_addr, ByteView signing_key,
+                                bool auto_accept_first_sighting = false);
 
     void set_prompt_handler(TrustPromptHandler handler) {
         prompt_ = std::move(handler);

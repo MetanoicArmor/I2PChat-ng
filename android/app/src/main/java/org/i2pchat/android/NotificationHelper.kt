@@ -48,6 +48,27 @@ object NotificationHelper {
             .build()
     }
 
+    fun notifyTrustPrompt(context: Context, peer: String) {
+        val open = PendingIntent.getActivity(
+            context,
+            peer.hashCode() xor 0x7f,
+            Intent(context, MainActivity::class.java).putExtra("openPeer", peer),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_notify)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText("Подтвердите ключ собеседника: ${peer.take(18)}…")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(open)
+            .build()
+        try {
+            NotificationManagerCompat.from(context).notify((peer.hashCode() xor 0x7f), notification)
+        } catch (_: SecurityException) {
+        }
+    }
+
     fun notifyMessage(context: Context, peer: String, preview: String) {
         val open = PendingIntent.getActivity(
             context,

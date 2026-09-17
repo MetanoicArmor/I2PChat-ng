@@ -94,10 +94,55 @@ if [ ! -f "${ANDROID_DIR}/local.properties" ]; then
   echo "==> wrote android/local.properties"
 fi
 
-if ! command -v java >/dev/null 2>&1; then
-  echo "ERROR: Java 17+ is required (set JAVA_HOME)." >&2
+# macOS ships /usr/bin/java as a stub that prints "Unable to locate a Java Runtime"
+# without a JDK. Prefer an explicit JAVA_HOME, then Android Studio's JBR, then Homebrew.
+java_works() {
+  local bin="$1"
+  [ -x "${bin}" ] || return 1
+  "${bin}" -version >/dev/null 2>&1
+}
+
+resolve_java_home() {
+  local candidate
+  if [ -n "${JAVA_HOME:-}" ] && java_works "${JAVA_HOME}/bin/java"; then
+    printf '%s\n' "${JAVA_HOME}"
+    return 0
+  fi
+  for candidate in \
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+      "/Applications/Android Studio.app/Contents/jre/Contents/Home" \
+      "$(brew --prefix openjdk@17 2>/dev/null)/libexec/openjdk.jdk/Contents/Home" \
+      "$(brew --prefix openjdk@21 2>/dev/null)/libexec/openjdk.jdk/Contents/Home" \
+      "$(brew --prefix openjdk 2>/dev/null)/libexec/openjdk.jdk/Contents/Home" \
+      "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" \
+      "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
+      "/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+  do
+    if [ -n "${candidate}" ] && java_works "${candidate}/bin/java"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+    candidate="$(/usr/libexec/java_home -v 17+ 2>/dev/null || true)"
+    if [ -n "${candidate}" ] && java_works "${candidate}/bin/java"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+if ! JAVA_HOME="$(resolve_java_home)"; then
+  echo "ERROR: Java 17+ is required." >&2
+  echo "  Install a JDK, e.g.: brew install openjdk@17" >&2
+  echo "  or open Android Studio once, then re-run this script." >&2
+  echo "  Or set JAVA_HOME to a JDK home that contains bin/java." >&2
   exit 1
 fi
+export JAVA_HOME
+export PATH="${JAVA_HOME}/bin:${PATH}"
+echo "    JAVA_HOME ${JAVA_HOME}"
 
 NDK_DIR="$(first_existing_dir \
   "${ANDROID_NDK_HOME:-}" \

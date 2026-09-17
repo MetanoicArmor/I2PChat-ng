@@ -90,8 +90,8 @@ std::optional<TrustPin> TrustStore::pin_for(const std::string& peer_addr) const 
     return it->second;
 }
 
-TrustDecision TrustStore::verify_or_pin(const std::string& peer_addr,
-                                        ByteView signing_key) {
+TrustDecision TrustStore::verify_or_pin(const std::string& peer_addr, ByteView signing_key,
+                                        bool auto_accept_first_sighting) {
     if (peer_addr.empty() || signing_key.size() != crypto::kEd25519PublicSize) {
         return TrustDecision::Reject;
     }
@@ -101,8 +101,9 @@ TrustDecision TrustStore::verify_or_pin(const std::string& peer_addr,
     if (existing == pins_.end()) {
         // First sighting. Without a prompt handler the key is pinned silently,
         // which is the trust-on-first-use bargain the protocol is built on.
-        if (prompt_ && prompt_(TrustPrompt::FirstSighting, peer_addr, key_hex, "") !=
-                           TrustDecision::Accept) {
+        if (!auto_accept_first_sighting && prompt_ &&
+            prompt_(TrustPrompt::FirstSighting, peer_addr, key_hex, "") !=
+                TrustDecision::Accept) {
             return TrustDecision::Reject;
         }
         pins_[peer_addr] = TrustPin{key_hex, false};

@@ -68,6 +68,16 @@ std::string session_nickname(const std::string& profile) {
            encoding::hex_encode(ByteView(suffix));
 }
 
+bool live_link(const PeerLink* link, session::SessionManager& sessions,
+               std::string_view peer_addr) {
+    return link != nullptr && !link->closed() && link->secure() &&
+           sessions.live_ready(peer_addr);
+}
+
+bool superseded_stream_close(std::string_view reason) {
+    return reason == "replaced by a newer stream" || reason == "duplicate stream";
+}
+
 }  // namespace
 
 /// Everything the service keeps for one peer while the process runs.
@@ -337,7 +347,10 @@ PeerLinkConfig ChatService::link_config(const std::string& peer_addr,
     config.session.handshake.signing_public = identity_.signing_public;
     config.session.handshake.trust_verifier = [this](const std::string& addr,
                                                      ByteView signing_key) {
-        return trust_.verify_or_pin(addr, signing_key);
+        const bool saved_contact = contacts_.has_peer(addr);
+        const bool auto_first =
+            saved_contact || config_.trust_auto_accept_first_sighting;
+        return trust_.verify_or_pin(addr, signing_key, auto_first);
     };
     return config;
 }
@@ -394,6 +407,11 @@ void ChatService::wire_transfers(Peer& peer) {
 }
 
 void ChatService::attach_link(Peer& peer, std::shared_ptr<PeerLink> link) {
+    // Outbound connect attaches the link before the handshake finishes; when
+    // on_established runs it must not close and reattach the same stream.
+    if (peer.link == link) {
+        return;
+    }
     // Two sides dialling at once leaves two streams; the newer one wins, which
     // matches the reference implementation and avoids a split channel.
     if (peer.link && !peer.link->closed()) {
@@ -440,7 +458,7 @@ asio::awaitable<void> ChatService::accept_loop() {
             on_frame(link.peer_addr(), frame);
         };
         callbacks.on_closed = [this](PeerLink& link, const std::string& reason) {
-            on_link_closed(link.peer_addr(), reason);
+            on_link_closed(link.peer_addr(), reason, link.shared_from_this());
         };
 
         PeerLink::create(std::move(stream.socket), std::move(stream.prebuffered), config,
@@ -481,8 +499,46 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     }
 
     Peer& peer_entry = ensure_peer(peer_addr);
-    if (peer_entry.link && peer_entry.link->secure()) {
+    if (live_link(peer_entry.link.get(), sessions_, peer_addr)) {
         co_return true;
+    }
+    if (peer_entry.link != nullptr &&
+        (!peer_entry.link->secure() || peer_entry.link->closed() ||
+         !sessions_.live_ready(peer_addr))) {
+        peer_entry.link.reset();
+    }
+
+    if (peer_entry.connect_waiter && peer_entry.link && !peer_entry.link->closed() &&
+        !peer_entry.link->secure()) {
+        boost::system::error_code ignored;
+        co_await peer_entry.connect_waiter->async_wait(
+            asio::redirect_error(asio::use_awaitable, ignored));
+        Peer* pending = find_peer(peer_addr);
+        if (pending != nullptr && live_link(pending->link.get(), sessions_, peer_addr)) {
+            co_return true;
+        }
+        if (pending != nullptr && pending->connect_succeeded) {
+            co_return true;
+        }
+        co_return false;
+    }
+
+    // Same tie-break as the Python client: the lexicographically larger base32
+    // host accepts the peer's dial instead of racing a second outbound stream.
+    if (identity_.local_addr > peer_addr) {
+        const auto prefer_inbound_until =
+            std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < prefer_inbound_until) {
+            if (Peer* waiting = find_peer(peer_addr);
+                waiting != nullptr &&
+                live_link(waiting->link.get(), sessions_, peer_addr)) {
+                co_return true;
+            }
+            asio::steady_timer pause(executor_);
+            pause.expires_after(std::chrono::milliseconds(200));
+            boost::system::error_code ignored;
+            co_await pause.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+        }
     }
 
     sessions_.on_connecting(peer_addr);
@@ -509,7 +565,7 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
         on_frame(link.peer_addr(), frame);
     };
     callbacks.on_closed = [this](PeerLink& link, const std::string& reason) {
-        on_link_closed(link.peer_addr(), reason);
+        on_link_closed(link.peer_addr(), reason, link.shared_from_this());
     };
 
     auto link = PeerLink::create(std::move(stream.socket), std::move(stream.prebuffered),
@@ -526,6 +582,9 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     Peer* settled = find_peer(peer_addr);
     if (settled == nullptr || !settled->connect_succeeded) {
         sessions_.mark_live_failure(peer_addr, "handshake did not complete");
+        if (settled != nullptr && settled->link != nullptr && !settled->link->secure()) {
+            settled->link->close("handshake failed");
+        }
         co_return false;
     }
     settled->connect_waiter.reset();
@@ -547,11 +606,20 @@ void ChatService::on_established(PeerLink& link) {
     sessions_.mark_live_ok(addr);
 
     Peer& peer = ensure_peer(addr);
-    if (!peer.link) {
-        // An inbound link only learns its address from the identity preface, so
-        // this is where it gets registered.
-        peer.link = link.shared_from_this();
-        wire_transfers(peer);
+    const std::shared_ptr<PeerLink> established = link.shared_from_this();
+    if (peer.link == established) {
+        // Outbound dial already registered this stream in connect_peer().
+    } else if (!live_link(peer.link.get(), sessions_, addr)) {
+        attach_link(peer, established);
+    } else if (established->direction() == session::ConnectionDirection::Inbound &&
+               peer.link->direction() == session::ConnectionDirection::Outbound) {
+        // Remote sends on our acceptor stream; do not keep a parallel outbound dial.
+        attach_link(peer, established);
+    } else if (established->direction() == session::ConnectionDirection::Outbound &&
+               peer.link->direction() == session::ConnectionDirection::Inbound) {
+        established->close("duplicate stream");
+    } else {
+        attach_link(peer, established);
     }
     peer.connect_succeeded = true;
     if (peer.connect_waiter) {
@@ -585,8 +653,13 @@ void ChatService::offer_blindbox_root(const std::string& peer_addr) {
         next_msg_id());
 }
 
-void ChatService::on_link_closed(const std::string& peer_addr, const std::string& reason) {
+void ChatService::on_link_closed(const std::string& peer_addr, const std::string& reason,
+                                 std::shared_ptr<PeerLink> link) {
     if (peer_addr.empty()) {
+        return;
+    }
+    if (superseded_stream_close(reason)) {
+        // attach_link() or duplicate-stream pruning; session continues on the other stream.
         return;
     }
     sessions_.on_disconnected(peer_addr, reason);
@@ -595,6 +668,11 @@ void ChatService::on_link_closed(const std::string& peer_addr, const std::string
     if (entry == nullptr) {
         return;
     }
+    if (link && entry->link == link) {
+        entry->link.reset();
+    } else if (!link && entry->link && entry->link->closed()) {
+        entry->link.reset();
+    }
     if (entry->incoming) {
         entry->incoming->reset();
     }
@@ -602,6 +680,9 @@ void ChatService::on_link_closed(const std::string& peer_addr, const std::string
         entry->connect_waiter->cancel();
     }
     emit_system("Disconnected from " + peer_addr.substr(0, 16) + "…: " + reason);
+    if (events_.on_contacts_changed) {
+        events_.on_contacts_changed();
+    }
 }
 
 void ChatService::on_frame(const std::string& peer_addr, const PeerFrame& frame) {
@@ -661,10 +742,9 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
     Peer* peer = find_peer(peer_addr);
     switch (signal.kind) {
         case protocol::SignalKind::MsgAck:
-            if (sessions_.acknowledge_inflight(peer_addr, signal.message_id)) {
-                update_delivery(peer_addr, signal.message_id, DeliveryState::Delivered,
-                                "live", "peer-ack");
-            }
+            (void)sessions_.acknowledge_inflight(peer_addr, signal.message_id);
+            update_delivery(peer_addr, signal.message_id, DeliveryState::Delivered, "live",
+                            "peer-ack");
             return;
         case protocol::SignalKind::FileAck:
         case protocol::SignalKind::ImgAck:
@@ -736,6 +816,13 @@ asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string p
         co_return ids;
     }
 
+    {
+        Peer* target = find_peer(peer_addr);
+        if (target == nullptr || !live_link(target->link.get(), sessions_, peer_addr)) {
+            (void)co_await connect_peer(peer);
+        }
+    }
+
     const std::vector<std::string> chunks = protocol::split_long_chat_text(text);
     for (const std::string& chunk : chunks) {
         const std::uint64_t msg_id = next_msg_id();
@@ -747,8 +834,7 @@ asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string p
 
         Peer* target = find_peer(peer_addr);
         const bool live_path =
-            target != nullptr && target->link != nullptr && target->link->secure() &&
-            sessions_.live_ready(peer_addr);
+            target != nullptr && live_link(target->link.get(), sessions_, peer_addr);
         if (live_path) {
             entry.delivery_state = "sent";
             entry.delivery_route = "live";
@@ -828,7 +914,8 @@ asio::awaitable<bool> ChatService::send_offline(const std::string& peer_addr,
         co_return true;
     } catch (const std::exception& error) {
         update_delivery(peer_addr, msg_id, DeliveryState::Failed, "blindbox", error.what());
-        emit_error(std::string("BlindBox send failed: ") + error.what());
+        emit_error(std::string("BlindBox send failed: ") + error.what() +
+                   " — use Connect or wait for the peer to message you once for a live channel.");
         co_return false;
     }
 }
@@ -1121,6 +1208,9 @@ void ChatService::update_delivery(const std::string& peer_addr, std::uint64_t ms
                                   const std::string& reason) {
     const std::string id = std::to_string(msg_id);
     std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
     for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry) {
         if (entry->message_id.has_value() && *entry->message_id == id) {
             entry->delivery_state = std::string(delivery_state_name(state));
@@ -1181,12 +1271,15 @@ std::vector<storage::HistoryEntry> ChatService::history(std::string_view peer) c
 }
 
 bool ChatService::live(std::string_view peer) {
-    const std::string addr(peer);
+    std::string addr = sam::normalize_peer_address(std::string(peer));
+    if (addr.empty()) {
+        addr.assign(peer);
+    }
     const auto found = peers_.find(addr);
-    if (found == peers_.end() || !found->second->link || !found->second->link->secure()) {
+    if (found == peers_.end()) {
         return false;
     }
-    return sessions_.live_ready(addr);
+    return live_link(found->second->link.get(), sessions_, addr);
 }
 
 bool ChatService::peer_offline_ready(std::string_view peer) const {
@@ -1201,7 +1294,7 @@ bool ChatService::peer_offline_ready(std::string_view peer) const {
 std::vector<std::string> ChatService::connected_peers() const {
     std::vector<std::string> out;
     for (const auto& [addr, peer] : peers_) {
-        if (peer->link && peer->link->secure()) {
+        if (peer->link && !peer->link->closed() && peer->link->secure()) {
             out.push_back(addr);
         }
     }

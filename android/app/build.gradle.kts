@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "org.i2pchat.android"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "org.i2pchat.android"
@@ -60,13 +60,22 @@ android {
     packaging {
         jniLibs {
             keepDebugSymbols += "**/*.so"
-            useLegacyPackaging = true
+            // Uncompressed 16 KB-aligned libs. Legacy packaging compresses .so
+            // files and makes Android 15 treat the APK as not 16 KB compatible.
+            useLegacyPackaging = false
         }
     }
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    testImplementation(libs.junit)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.junit)
+    val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -80,4 +89,5 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.3")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

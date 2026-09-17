@@ -75,6 +75,8 @@ struct ChatServiceConfig {
     /// directly. Direct is right for a replica on the local machine only.
     bool blindbox_over_sam = true;
     std::chrono::seconds blindbox_poll_interval{25};
+    /// Pin unknown signing keys on first sighting without a blocking TOFU prompt.
+    bool trust_auto_accept_first_sighting = false;
 };
 
 /// What happened to one outgoing message.
@@ -232,7 +234,8 @@ private:
 
     void on_frame(const std::string& peer_addr, const PeerFrame& frame);
     void on_signal(const std::string& peer_addr, const protocol::Signal& signal);
-    void on_link_closed(const std::string& peer_addr, const std::string& reason);
+    void on_link_closed(const std::string& peer_addr, const std::string& reason,
+                        std::shared_ptr<PeerLink> link = {});
     void on_text(const std::string& peer_addr, const std::string& text,
                  std::uint64_t msg_id);
     bool ingest_group_transport(const std::string& peer_addr, const std::string& text);

@@ -75,6 +75,9 @@ std::string delivery_marker(std::string_view state) {
     if (state == "sent") {
         return "·";
     }
+    if (state == "sending") {
+        return "…";
+    }
     return {};
 }
 

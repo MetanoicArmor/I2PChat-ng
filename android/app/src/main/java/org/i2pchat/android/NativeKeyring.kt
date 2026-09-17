@@ -19,6 +19,9 @@ object NativeKeyring {
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
+        if (NativeEngine.available) {
+            runCatching { NativeEngine.nativeInitKeyring() }
+        }
     }
 
     @JvmStatic

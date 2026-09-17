@@ -27,6 +27,7 @@ object NativeEngine {
         fun onStartFailed(message: String)
     }
 
+    @JvmStatic external fun nativeInitKeyring()
     @JvmStatic external fun nativeSetListener(listener: Listener?)
     @JvmStatic external fun nativeListProfiles(appRoot: String): String
     @JvmStatic external fun nativePrepareRouter(

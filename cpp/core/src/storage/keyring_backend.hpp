@@ -21,6 +21,8 @@ namespace i2pchat::storage::keyring::backend {
 #if defined(__ANDROID__)
 /// Called from JNI_OnLoad so wrap-key lookups can reach Android Keystore.
 void set_java_vm(void* vm);
+/// Cache NativeKeyring jclass/method IDs (FindClass fails from native worker threads).
+void init_jni(void* jni_env);
 #endif
 
 }  // namespace i2pchat::storage::keyring::backend

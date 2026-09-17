@@ -19,7 +19,7 @@ Minimum SDK 26. Application id: `org.i2pchat.android`.
 
 The core talks SAM on loopback, same as desktop.
 
-- **Bundled i2pd (default):** PurpleI2P **2.61.0** JNI `libi2pd.so` from the official APK, started **in-process** (the CLI binary segfaults on 16 KB emulator pages). Open waits for SAM on `127.0.0.1:17656`.
+- **Bundled i2pd (default):** PurpleI2P **2.61.0** JNI `libi2pd.so` from the official APK, started **in-process in a separate `:i2pd` service** so a daemon crash does not kill the UI. Open waits for SAM on `127.0.0.1:17656`. On **16 KB page** emulators/devices the manifest enables `android:pageSizeCompat` so this 4 KB–linked library can load until PurpleI2P ships a fully 16 KB–aligned build. Android may show a one-time **“App Compatibility / 16 KB”** system dialog: only `libi2pd.so` is genuinely 4 KB–aligned; tap **OK** (or **Don’t show again**) and continue — `libi2pchat_jni.so` is built with 16 KB ELF alignment.
 - **External SAM:** switch to system router in Settings → I2P router (`127.0.0.1:7656`).
 
 I2P on a phone cannot hide in the background; the persistent notification is required so tunnels are not killed.
