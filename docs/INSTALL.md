@@ -81,6 +81,8 @@ Legacy `sources.list` line:
 
 <img src="icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **`.rpm` (Fedora):** on the same [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest) page as **`i2pchat_<version>_x86_64.rpm`**, or build via [`packaging/fedora/README.md`](../packaging/fedora/README.md).
 
+<img src="icons/icons8-android-48.png" alt="Android" width="28" height="28" align="middle" />
+
 ## Android
 
 Download **`I2PChat-android-v<version>.apk`** from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest), or build with [`./build-android.sh`](../build-android.sh). Details: [`android/README.md`](../android/README.md).

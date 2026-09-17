@@ -40,7 +40,7 @@
 - [📸 Screenshots](#-screenshots)
 - [🛠 Building and running from source (C++)](#-building-and-running-from-source-c)
 - [Cross‑platform release builds](#-cross-platform-release-builds)
-- [🤖 Android](#-android)
+- [Android](#android)
 - [📄 License](#-license)
 - [☕ Developer Support](#-developer-support)
 - [🚀 Quick Start](#-quick-start) — downloads, package managers, **INSTALL.md**
@@ -305,7 +305,7 @@ This:
 
 The GUI zip is self-contained after `windeployqt` + vcpkg DLLs; machines do not need MSVC or Python.
 
-### 🤖 Android
+### <img src="docs/icons/icons8-android-48.png" alt="Android" width="28" height="28" align="middle" /> Android
 
 Native phone client: **Kotlin + Jetpack Compose** over the same C++ `libi2pchat_core` / `ChatService`. Application id `org.i2pchat.android`, min SDK 26. Details: [`android/README.md`](android/README.md).
 
@@ -438,7 +438,7 @@ Full zip layouts, **winget**, **`.deb`**, **Flatpak** notes → [**docs/INSTALL.
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-v1.5.0.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.5.0.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-v1.5.0.zip) | Same — AppImage inside the zip |
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-tui-v1.5.0.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-tui-v1.5.0.zip) | After unzip: **`./i2pchat-tui`** |
-| **Android — APK** | [I2PChat-android-v1.5.0.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.0.apk) (or build with `./build-android.sh`) | Install via `adb install -r …` or the system package installer. |
+| <img src="docs/icons/icons8-android-48.png" alt="Android" width="28" height="28" align="middle" /> **Android — APK** | [I2PChat-android-v1.5.0.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.0.apk) (or build with `./build-android.sh`) | Install via `adb install -r …` or the system package installer. |
 
 > **Router backend:** On a **fresh install** (no `router_prefs.json` yet), I2PChat defaults to a **system** `i2pd` **SAM** endpoint (typically `127.0.0.1:7656`). Switch to the **bundled** sidecar when your build includes it via **More actions → I2P router…** (shortcut **Cmd/Ctrl+R**); the choice is persisted. The same dialog opens the router data/log paths and can restart the bundled router.
 
