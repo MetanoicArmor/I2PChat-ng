@@ -1,6 +1,8 @@
 # Refresh bundled Android i2pd JNI libs + certificates from PurpleI2P APKs.
 # Usage: powershell -File android/scripts/fetch-i2pd.ps1
-
+# Prefer: ./android/scripts/fetch-i2pd.sh on macOS/Linux.
+#
+# Do not run align-elf-16k.py on these libs — see android/README.md.
 param(
     [string]$Version = "2.61.0"
 )

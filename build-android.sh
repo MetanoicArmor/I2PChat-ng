@@ -160,9 +160,13 @@ fi
 I2PD_ARM="${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libi2pd.so"
 I2PD_X64="${ANDROID_DIR}/app/src/main/jniLibs/x86_64/libi2pd.so"
 if [ ! -f "${I2PD_ARM}" ] || [ ! -f "${I2PD_X64}" ]; then
-  echo "ERROR: bundled libi2pd.so is missing. Run android/scripts/fetch-i2pd.ps1" >&2
+  echo "ERROR: bundled libi2pd.so is missing. Run ./android/scripts/fetch-i2pd.sh" >&2
   exit 1
 fi
+
+# Do NOT post-process libi2pd.so with align-elf-16k.py: bumping p_align without a
+# real 16 KiB relink leaves RX/RW segments on the same 16 KiB page, and on Android
+# 15+ that disables pageSizeCompat while still failing dlopen.
 
 echo "==> Building I2PChat Android ${RELEASE_VERSION} (${BUILD_TYPE})"
 echo "    SDK ${SDK_DIR}"

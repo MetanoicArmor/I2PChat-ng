@@ -7,6 +7,8 @@ plugins {
 android {
     namespace = "org.i2pchat.android"
     compileSdk = 37
+    // NDK r28+ defaults arm64/x86_64 shared libs to 16 KiB ELF alignment.
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "org.i2pchat.android"
