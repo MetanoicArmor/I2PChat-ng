@@ -1,8 +1,15 @@
-# Official C++ release zips / AppImage on GitHub-hosted runners (no Docker).
+# Official C++ release artifacts on GitHub-hosted runners (no Docker).
 # Linux: Ubuntu 24.04 amd64 + arm64. macOS: Apple Silicon + Intel. Windows: x64.
+# Android: release APK (arm64 + x86_64), unsigned unless signing secrets are set.
+#
+# Same zip set as historical PyQt6 releases, plus Android.
+# Debian packages still come from "Release Linux packages" after zips land.
 name: Release artifacts
 
 on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       tag:
@@ -10,7 +17,7 @@ on:
         required: true
         type: string
       source_ref:
-        description: "Ref to build from: main, v1.2.3, or empty (= same as tag)."
+        description: "Ref to build from: c++, v1.2.3, or empty (= same as tag)."
         required: false
         type: string
         default: ""
@@ -46,10 +53,11 @@ jobs:
       - name: Resolve tag and checkout ref
         id: meta
         env:
-          TAG: ${{ github.event.inputs.tag }}
-          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SOURCE_REF: ${{ github.event.inputs.source_ref || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD_INPUT: ${{ github.event.inputs.upload }}
         run: |
-          # checkout has not run yet — inline the same logic as scripts/ci_resolve_release_tag.sh
           trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
           to_ver() {
             local x
@@ -73,23 +81,28 @@ jobs:
             if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then SRC="v${TMP}"; else SRC="$SRC_RAW"; fi
           fi
           echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$UPLOAD_INPUT" = "false" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.meta.outputs.checkout_ref }}
 
-      - name: Use main packaging when C++ tree is missing
+      - name: Use c++ packaging when C++ tree is missing
         run: |
           VER="${{ steps.meta.outputs.ver }}"
           if [ -f cpp/CMakeLists.txt ] && [ -f build-linux.sh ]; then
             exit 0
           fi
-          echo "C++ packaging missing — fetching origin/main"
-          git fetch --depth=1 origin main
+          echo "C++ packaging missing — fetching origin/c++"
+          git fetch --depth=1 origin c++
           git checkout -f FETCH_HEAD
           FILE_VER="$(tr -d '\r\n' < VERSION)"
           if [ "$FILE_VER" != "$VER" ]; then
-            echo "ERROR: origin/main VERSION is '$FILE_VER' but release is '$VER'." >&2
+            echo "ERROR: origin/c++ VERSION is '$FILE_VER' but release is '$VER'." >&2
             exit 1
           fi
 
@@ -124,12 +137,8 @@ jobs:
             exit 1
           fi
 
-      - name: Upload Linux assets to release
-        if: ${{ github.event.inputs.upload == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage Linux assets
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           VER="${{ steps.meta.outputs.ver }}"
           ARCH="${{ matrix.arch }}"
           SUMS="${{ matrix.sums }}"
@@ -145,7 +154,38 @@ jobs:
           if [ "$SUMS" != "SHA256SUMS" ]; then
             cp SHA256SUMS "$SUMS"
           fi
-          gh release upload "$TAG" "$ZIP_GUI" "$ZIP_TUI" "$SUMS" \
+          mkdir -p dist-upload
+          cp "$ZIP_GUI" "$ZIP_TUI" "$SUMS" dist-upload/
+
+      - name: Upload Linux workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist-upload/*
+          if-no-files-found: error
+
+      - name: Ensure GitHub Release exists
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "I2PChat ${TAG}" \
+            --notes "C++ release ${TAG}. Desktop + Android artifacts from Release artifacts workflow." \
+            --draft
+
+      - name: Upload Linux assets to release
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh release upload "$TAG" dist-upload/* \
             --repo "${{ github.repository }}" --clobber
 
   macos:
@@ -164,8 +204,10 @@ jobs:
       - name: Resolve tag and checkout ref
         id: meta
         env:
-          TAG: ${{ github.event.inputs.tag }}
-          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SOURCE_REF: ${{ github.event.inputs.source_ref || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD_INPUT: ${{ github.event.inputs.upload }}
         run: |
           trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
           to_ver() {
@@ -190,22 +232,27 @@ jobs:
             if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then SRC="v${TMP}"; else SRC="$SRC_RAW"; fi
           fi
           echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$UPLOAD_INPUT" = "false" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.meta.outputs.checkout_ref }}
 
-      - name: Use main packaging when C++ tree is missing
+      - name: Use c++ packaging when C++ tree is missing
         run: |
           VER="${{ steps.meta.outputs.ver }}"
           if [ -f cpp/CMakeLists.txt ] && [ -f build-macos.sh ]; then
             exit 0
           fi
-          git fetch --depth=1 origin main
+          git fetch --depth=1 origin c++
           git checkout -f FETCH_HEAD
           FILE_VER="$(tr -d '\r\n' < VERSION)"
           if [ "$FILE_VER" != "$VER" ]; then
-            echo "ERROR: origin/main VERSION is '$FILE_VER' but release is '$VER'." >&2
+            echo "ERROR: origin/c++ VERSION is '$FILE_VER' but release is '$VER'." >&2
             exit 1
           fi
 
@@ -240,12 +287,8 @@ jobs:
             exit 1
           fi
 
-      - name: Upload macOS assets to release
-        if: ${{ github.event.inputs.upload == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage macOS assets
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           VER="${{ steps.meta.outputs.ver }}"
           ARCH="${{ matrix.arch }}"
           SUMS="${{ matrix.sums }}"
@@ -259,7 +302,38 @@ jobs:
             fi
           done
           cp SHA256SUMS "$SUMS"
-          gh release upload "$TAG" "$ZIP_GUI" "$ZIP_TUI" "$SUMS" \
+          mkdir -p dist-upload
+          cp "$ZIP_GUI" "$ZIP_TUI" "$SUMS" dist-upload/
+
+      - name: Upload macOS workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist-upload/*
+          if-no-files-found: error
+
+      - name: Ensure GitHub Release exists
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "I2PChat ${TAG}" \
+            --notes "C++ release ${TAG}. Desktop + Android artifacts from Release artifacts workflow." \
+            --draft
+
+      - name: Upload macOS assets to release
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh release upload "$TAG" dist-upload/* \
             --repo "${{ github.repository }}" --clobber
 
   windows:
@@ -268,11 +342,13 @@ jobs:
       - name: Resolve tag and checkout ref
         id: meta
         env:
-          TAG: ${{ github.event.inputs.tag }}
-          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SOURCE_REF: ${{ github.event.inputs.source_ref || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD_INPUT: ${{ github.event.inputs.upload }}
         shell: bash
         run: |
-          trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+          trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' ; }
           to_ver() {
             local x
             x="$(trim "$1")"
@@ -295,6 +371,11 @@ jobs:
             if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then SRC="v${TMP}"; else SRC="$SRC_RAW"; fi
           fi
           echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$UPLOAD_INPUT" = "false" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -342,20 +423,17 @@ jobs:
             exit 1
           fi
 
-      - name: Upload Windows assets to release
-        if: ${{ github.event.inputs.upload == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage Windows assets
         shell: bash
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           VER="${{ steps.meta.outputs.ver }}"
+          mkdir -p dist-upload
           cp dist/I2PChat-windows-x64-v"${VER}".zip \
              dist/I2PChat-windows-tui-x64-v"${VER}".zip \
              dist/I2PChat-windows-x64-winget-v"${VER}".zip \
              dist/I2PChat-windows-tui-x64-winget-v"${VER}".zip \
-             .
-          cp SHA256SUMS SHA256SUMS.windows-x64
+             dist-upload/
+          cp SHA256SUMS dist-upload/SHA256SUMS.windows-x64
           for f in \
             "I2PChat-windows-x64-v${VER}.zip" \
             "I2PChat-windows-tui-x64-v${VER}.zip" \
@@ -363,16 +441,215 @@ jobs:
             "I2PChat-windows-tui-x64-winget-v${VER}.zip" \
             SHA256SUMS.windows-x64
           do
-            if [ ! -f "$f" ]; then
+            if [ ! -f "dist-upload/$f" ]; then
               echo "ERROR: missing $f" >&2
-              ls -la dist >&2 || true
+              ls -la dist dist-upload >&2 || true
               exit 1
             fi
           done
-          gh release upload "$TAG" \
-            "I2PChat-windows-x64-v${VER}.zip" \
-            "I2PChat-windows-tui-x64-v${VER}.zip" \
-            "I2PChat-windows-x64-winget-v${VER}.zip" \
-            "I2PChat-windows-tui-x64-winget-v${VER}.zip" \
-            SHA256SUMS.windows-x64 \
+
+      - name: Upload Windows workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist-upload/*
+          if-no-files-found: error
+
+      - name: Ensure GitHub Release exists
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "I2PChat ${TAG}" \
+            --notes "C++ release ${TAG}. Desktop + Android artifacts from Release artifacts workflow." \
+            --draft
+
+      - name: Upload Windows assets to release
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh release upload "$TAG" dist-upload/* \
+            --repo "${{ github.repository }}" --clobber
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Resolve tag and checkout ref
+        id: meta
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          SOURCE_REF: ${{ github.event.inputs.source_ref || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPLOAD_INPUT: ${{ github.event.inputs.upload }}
+        run: |
+          trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+          to_ver() {
+            local x
+            x="$(trim "$1")"
+            x="${x#v}"
+            x="${x#.}"
+            echo "$x"
+          }
+          R="$(to_ver "$TAG")"
+          if [ -z "$R" ]; then echo "ERROR: empty tag" >&2; exit 1; fi
+          if ! echo "$R" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tag must be semver X.Y.Z, got: $TAG" >&2
+            exit 1
+          fi
+          echo "tag=v${R}" >> "$GITHUB_OUTPUT"
+          echo "ver=${R}" >> "$GITHUB_OUTPUT"
+          SRC_RAW="$(trim "$SOURCE_REF")"
+          if [ -z "$SRC_RAW" ]; then SRC="v${R}"
+          else
+            TMP="$(to_ver "$SRC_RAW")"
+            if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then SRC="v${TMP}"; else SRC="$SRC_RAW"; fi
+          fi
+          echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$UPLOAD_INPUT" = "false" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.checkout_ref }}
+
+      - name: Use c++ tree when Android packaging is missing
+        run: |
+          VER="${{ steps.meta.outputs.ver }}"
+          if [ -f build-android.sh ] && [ -d android/app ]; then
+            exit 0
+          fi
+          echo "Android packaging missing — fetching origin/c++"
+          git fetch --depth=1 origin c++
+          git checkout -f FETCH_HEAD
+          FILE_VER="$(tr -d '\r\n' < VERSION)"
+          if [ "$FILE_VER" != "$VER" ]; then
+            echo "ERROR: origin/c++ VERSION is '$FILE_VER' but release is '$VER'." >&2
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages + NDK r28
+        env:
+          NDK_VERSION: "28.2.13676358"
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: android-gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-gradle-${{ runner.os }}-
+
+      - name: Cache Android native deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/.cxx
+            android/app/build
+          key: android-native-${{ runner.os }}-${{ hashFiles('android/app/src/main/cpp/**', 'cpp/CMakeLists.txt', 'cpp/core/**', 'VERSION') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
+
+      - name: Verify bundled libi2pd.so
+        run: |
+          test -f android/app/src/main/jniLibs/arm64-v8a/libi2pd.so
+          test -f android/app/src/main/jniLibs/x86_64/libi2pd.so
+
+      - name: Build Android release APK
+        run: ./build-android.sh --release
+
+      - name: Verify VERSION matches tag
+        run: |
+          VER="${{ steps.meta.outputs.ver }}"
+          FILE_VER="$(tr -d '\r\n' < VERSION)"
+          if [ "$FILE_VER" != "$VER" ]; then
+            echo "ERROR: VERSION file is '$FILE_VER' but tag implies '$VER'" >&2
+            exit 1
+          fi
+
+      - name: Stage Android assets
+        run: |
+          VER="${{ steps.meta.outputs.ver }}"
+          SRC="dist/I2PChat-android-v${VER}-release.apk"
+          if [ ! -f "$SRC" ]; then
+            echo "ERROR: missing $SRC" >&2
+            ls -la dist >&2 || true
+            exit 1
+          fi
+          mkdir -p dist-upload
+          cp "$SRC" "dist-upload/I2PChat-android-v${VER}.apk"
+          if [ -f "${SRC}.sha256" ]; then
+            # rewrite checksum file to the release asset name
+            HASH="$(awk '{print $1}' "${SRC}.sha256")"
+            printf '%s  I2PChat-android-v%s.apk\n' "$HASH" "$VER" > "dist-upload/SHA256SUMS.android"
+          else
+            sha256sum "dist-upload/I2PChat-android-v${VER}.apk" | awk '{print $1"  "$2}' \
+              | sed "s|dist-upload/||" > dist-upload/SHA256SUMS.android
+          fi
+
+      - name: Upload Android workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist-upload/*
+          if-no-files-found: error
+
+      - name: Ensure GitHub Release exists
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "I2PChat ${TAG}" \
+            --notes "C++ release ${TAG}. Desktop + Android artifacts from Release artifacts workflow." \
+            --draft
+
+      - name: Upload Android assets to release
+        if: ${{ steps.meta.outputs.upload == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          gh release upload "$TAG" dist-upload/* \
             --repo "${{ github.repository }}" --clobber

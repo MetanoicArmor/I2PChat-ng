@@ -1,10 +1,10 @@
 # I2PChat for Android
 
-Native phone client: **Kotlin + Jetpack Compose** UI over the existing C++ `libi2pchat_core` / `ChatService`. Open the `android/` folder in Android Studio.
+Native phone client: **Kotlin + Jetpack Compose** UI over the existing C++ `libi2pchat_core` / `ChatService`. Open the `android/` folder in Android Studio, or build from the repo root with `./build-android.sh`.
 
-## First build
+## First build (Android Studio)
 
-1. Install Android Studio, NDK, and CMake (SDK Manager → SDK Tools).
+1. Install Android Studio, **NDK r28** (`28.2.13676358`), and CMake (SDK Manager → SDK Tools).
 2. File → Open → `android/`.
 3. Let Gradle sync. The first native configure **downloads Boost, nlohmann/json and libsodium 1.0.20** via CMake FetchContent (slow, needs network). If CMake configure previously failed, delete `app/.cxx` and sync again.
 4. Run on a **phone (arm64)** or a **x86_64 emulator** (Device Manager → system image **x86_64**, not armeabi-v7a).
@@ -13,7 +13,29 @@ The first Run on the emulator compiles native code for **x86_64**. That download
 
 If install fails with `INSTALL_FAILED_NO_MATCHING_ABIS`, the AVD is not x86_64/arm64 — create a new virtual device with an **x86_64** Google APIs image.
 
-Minimum SDK 26. Application id: `org.i2pchat.android`.
+Minimum SDK 26. Application id: `org.i2pchat.android`. Default UI theme: **dark**.
+
+## CLI build (`./build-android.sh`)
+
+From the **repository root** (needs JDK 17+, `ANDROID_HOME` / SDK, NDK):
+
+```bash
+./build-android.sh --debug              # default — signed with the debug keystore
+./build-android.sh --release            # release APK (unsigned unless a keystore is configured)
+./build-android.sh --debug --install    # build + adb install -r
+```
+
+Output: `dist/I2PChat-android-v<VERSION>-<debug|release>.apk` and a matching `.sha256` sidecar.
+
+Bundled `libi2pd.so` for **arm64-v8a** and **x86_64** must exist under `app/src/main/jniLibs/` (checked into the tree). To rebuild them for 16 KiB pages:
+
+```bash
+./android/scripts/build-i2pd-16k.sh
+```
+
+## CI / release APK
+
+GitHub Actions workflow [**Release artifacts**](../.github/workflows/release-artifacts.yml) builds desktop zips **and** Android (`I2PChat-android-v*.apk` + `SHA256SUMS.android`) on tag `vX.Y.Z` or via workflow_dispatch. See the [root README](../README.md#-android) for the full artifact table.
 
 ## I2P router
 
@@ -26,6 +48,6 @@ I2P on a phone cannot hide in the background; the persistent notification is req
 
 ## What is implemented
 
-Profile picker, contacts, 1:1 chat, TOFU, groups (create / join / invite / topology JSON), files and images via the system picker, emoji, BlindBox poll and replica list, router settings, backups, light/dark/system theme, notifications, compose drafts, history retention.
+Profile picker, contacts, 1:1 chat, TOFU, groups (create / join / invite / topology JSON), files and images via the system picker, emoji, BlindBox poll and replica list, router settings, backups, light/dark/system theme (default **dark**), notifications, compose drafts, history retention. Tap the green **Online! My Address** banner to copy your destination.
 
 Profiles live under `files/i2pchat/profiles/<name>/` in the same layout as desktop, so a desktop backup bundle can be imported.

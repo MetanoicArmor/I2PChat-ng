@@ -37,8 +37,9 @@
 - [🔌 Protocol overview](#-protocol-overview)
 - [📬 BlindBox in short](#-blindbox-in-short)
 - [📸 Screenshots](#-screenshots)
-- [🛠 Running from source](#-running-from-source)
-- [Cross‑platform builds](#cross-platform-builds)
+- [🛠 Building and running from source (C++)](#-building-and-running-from-source-c)
+- [Cross‑platform release builds](#-cross-platform-release-builds)
+- [🤖 Android](#-android)
 - [📄 License](#-license)
 - [☕ Developer Support](#-developer-support)
 - [🚀 Quick Start](#-quick-start) — downloads, package managers, **INSTALL.md**
@@ -58,8 +59,9 @@
 - **Optional encrypted chat history** — per-peer local history (toggle **Chat history: ON/OFF** in the **⋯** menu); encrypted at rest with keys derived from your profile identity (see **§4.11** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md))
 - **Contact book (Saved peers)** — left sidebar list backed by **`profiles/<name>/<name>.contacts.json`**: quick switch between saved `.b32.i2p` peers, optional display name/note, unread hints, resize/collapse, and a context menu (edit, trust details, remove). See **§3.1** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md).
 - **Text groups** — multi-member conversations over the same vNext stream as 1:1 chat; offline delivery fans out per member via **pairwise** BlindBox (see the manuals for prerequisites and **§** on group BlindBox behavior)
-- **Terminal client (TUI)** — *terminal user interface*: full chat in a text shell (Textual, `i2pchat/gui/chat_python.py`); shipped as **`*-tui-*`** release zips and **`i2pchat-tui`** packages (Homebrew, apt, AUR), or **`python -m i2pchat.tui`** from source
-- Cross‑platform build scripts (Linux, macOS, Windows)
+- **Terminal client (TUI)** — *terminal user interface*: full chat in a text shell (desktop C++ FTXUI / historical Textual); shipped as **`*-tui-*`** release zips and **`i2pchat-tui`** packages (Homebrew, apt, AUR)
+- **Android** — Kotlin + Jetpack Compose over the same C++ core; APK from [`./build-android.sh`](build-android.sh) or GitHub Actions ([details](android/README.md))
+- Cross‑platform build scripts (Linux, macOS, Windows, Android)
 
 #### 📖 Manuals
 
@@ -386,6 +388,36 @@ This:
 
 The GUI zip is self-contained after `windeployqt` + vcpkg DLLs; machines do not need MSVC or Python.
 
+#### GitHub Actions (all release artifacts)
+
+Workflow [**.github/workflows/release-artifacts.yml`](.github/workflows/release-artifacts.yml) (**Release artifacts**) builds the same desktop set as historical PyQt6 releases **plus Android**:
+
+| Job | Artifacts |
+|-----|-----------|
+| Linux x86_64 / aarch64 | `I2PChat-linux-*-v*.zip`, `*-tui-*`, `SHA256SUMS` / `SHA256SUMS.linux-aarch64` |
+| macOS arm64 / x64 | `I2PChat-macOS-*-v*.zip`, `*-tui-*`, per-arch `SHA256SUMS.macos-*` |
+| Windows x64 | GUI + TUI zips and `*-winget-*`, `SHA256SUMS.windows-x64` |
+| Android | `I2PChat-android-v*.apk`, `SHA256SUMS.android` |
+
+Triggers: **push of tag `vX.Y.Z`**, or **Actions → Release artifacts → Run workflow** (`tag`, optional `source_ref` defaulting to that tag, `upload` to attach to the GitHub Release). Assets are also kept as workflow artifacts. Debian **`.deb`** packages are still produced by [**Release Linux packages**](.github/workflows/release-linux-pkgs.yml) after the Linux zips land on the release.
+
+### 🤖 Android
+
+Native phone client: **Kotlin + Jetpack Compose** over the same C++ `libi2pchat_core` / `ChatService`. Application id `org.i2pchat.android`, min SDK 26. Details: [`android/README.md`](android/README.md).
+
+```bash
+./build-android.sh --debug            # installable debug APK (default)
+./build-android.sh --release          # release APK (unsigned unless a keystore is configured)
+./build-android.sh --debug --install  # adb install -r after build
+```
+
+- Needs **JDK 17+**, **Android SDK**, **NDK r28** (`28.2.13676358`), and **CMake** (Android Studio SDK Manager or CI `sdkmanager`).
+- Bundled **`libi2pd.so`** (arm64 + x86_64) lives under `android/app/src/main/jniLibs/` (rebuild with [`./android/scripts/build-i2pd-16k.sh`](android/scripts/build-i2pd-16k.sh) if needed).
+- Output: **`dist/I2PChat-android-v<version>-<debug|release>.apk`** (+ `.sha256`). CI publishes **`I2PChat-android-v<version>.apk`** on the GitHub Release.
+- Day-to-day: open **`android/`** in Android Studio; use an **arm64** device or **x86_64** emulator.
+
+Default theme is **dark**. Tap the green **Online! My Address** notice to copy your destination to the clipboard.
+
 ### Verify release artifacts
 
 Release build scripts generate:
@@ -502,6 +534,7 @@ Full zip layouts, **winget**, **`.deb`**, **Flatpak** notes → [**docs/INSTALL.
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-v1.4.1.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-v1.4.1.zip) | Same — AppImage inside the zip |
 | <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-tui-v1.4.1.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-tui-v1.4.1.zip) | After unzip: **`./i2pchat-tui`** |
+| **Android — APK** | `I2PChat-android-v*.apk` on [Releases](https://github.com/MetanoicArmor/I2PChat/releases) (from **Release artifacts** CI / `./build-android.sh`) | Install via `adb install -r …` or the system package installer. Release APKs may be unsigned until a signing keystore is configured — use a debug build for local sideload. |
 
 > **Router backend:** On a **fresh install** (no `router_prefs.json` yet), I2PChat defaults to a **system** `i2pd` **SAM** endpoint (typically `127.0.0.1:7656`). Switch to the **bundled** sidecar when your build includes it via **More actions → I2P router…** (shortcut **Cmd/Ctrl+R**); the choice is persisted. The same dialog opens the router data/log paths and can restart the bundled router.
 
@@ -565,7 +598,7 @@ Legacy one-line:
 
 ### ℹ️ About
 
-I2PChat is a cross‑platform chat client for the [I2P](https://i2pd.website) anonymity network over **SAM** — **PyQt6 GUI** with light/dark themes **and** an optional **terminal (TUI)** build on the same core.
+I2PChat is a cross‑platform chat client for the [I2P](https://i2pd.website) anonymity network over **SAM** — **C++ Qt GUI** and **TUI**, plus an **Android** client on the same core (historical **PyQt6** tree remains on the `python` branch).
 
 ### Audit / Аудит
 
