@@ -260,6 +260,10 @@ private:
     void update_delivery(const std::string& peer_addr, std::uint64_t msg_id,
                          DeliveryState state, const std::string& route,
                          const std::string& reason = {});
+    /// Match `[image]/[file] …/name` history rows when ACK carries a filename only.
+    void update_delivery_by_media_name(const std::string& peer_addr, const std::string& name,
+                                       DeliveryState state, const std::string& route,
+                                       const std::string& reason = {});
     void remember_contact(const std::string& peer_addr, const std::string& preview);
     void emit_system(const std::string& message) const;
     void emit_error(const std::string& message) const;

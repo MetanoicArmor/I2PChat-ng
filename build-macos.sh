@@ -113,7 +113,7 @@ cat > "dist/${APP_NAME}.app/Contents/Info.plist" <<PLIST
 	<key>CFBundleExecutable</key>
 	<string>I2PChat</string>
 	<key>CFBundleIconFile</key>
-	<string>I2PChat.icns</string>
+	<string>I2PChat</string>
 	<key>CFBundleIdentifier</key>
 	<string>net.i2pchat.I2PChat</string>
 	<key>CFBundleName</key>

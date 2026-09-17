@@ -45,7 +45,45 @@ data class MessageUi(
     val sender: String = "",
     val delivery: String = "",
     val messageId: String = "",
-)
+    /** Absolute local path when `text` is `[image] …`; empty for plain messages. */
+    val imagePath: String = "",
+    /** Absolute local path when `text` is `[file] …`. */
+    val filePath: String = "",
+) {
+    val fileCaption: String
+        get() = when {
+            imagePath.isNotBlank() -> File(imagePath).name
+            filePath.isNotBlank() -> File(filePath).name
+            text.startsWith("[file] ") -> File(text.removePrefix("[file] ").trim()).name
+            else -> ""
+        }
+}
+
+private fun resolveMediaPath(text: String, prefix: String, appRoot: File, subdirs: List<String>): String {
+    if (!text.startsWith(prefix)) return ""
+    val raw = text.removePrefix(prefix).trim()
+    if (raw.isBlank()) return ""
+    val direct = File(raw)
+    if (direct.isFile) return direct.absolutePath
+    val name = direct.name
+    if (name.isBlank()) return ""
+    File(appRoot, "profiles").listFiles()?.forEach { profile ->
+        subdirs.forEach { sub ->
+            val candidate = File(profile, "$sub/$name")
+            if (candidate.isFile) return candidate.absolutePath
+        }
+    }
+    return ""
+}
+
+/** Resolve `[image] path` to an existing local file when possible. */
+fun resolveChatImagePath(text: String, appRoot: File): String =
+    resolveMediaPath(text, "[image] ", appRoot, listOf("images", "data/images"))
+
+/** Resolve `[file] path` under downloads. */
+fun resolveChatFilePath(text: String, appRoot: File): String =
+    resolveMediaPath(text, "[file] ", appRoot, listOf("downloads", "data/downloads", "files"))
+
 
 data class TofuPrompt(
     val kind: String,
@@ -495,6 +533,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             val copied = copyUri(uri) ?: return@launch
             NativeEngine.nativeSendFile(id, copied.absolutePath, image)
+            loadHistory()
+            refreshSnapshot()
         }
     }
 
@@ -640,14 +680,17 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             val messages = buildList {
                 for (i in 0 until rows.length()) {
                     val o = rows.getJSONObject(i)
+                    val text = o.optString("text")
                     add(
                         MessageUi(
                             kind = o.optString("kind"),
-                            text = o.optString("text"),
+                            text = text,
                             ts = o.optString("ts").ifBlank { o.optString("createdAt") },
                             sender = o.optString("senderId"),
                             delivery = o.optString("deliveryState"),
                             messageId = o.optString("messageId").ifBlank { o.optString("msgId") },
+                            imagePath = resolveChatImagePath(text, appRoot),
+                            filePath = resolveChatFilePath(text, appRoot),
                         ),
                     )
                 }
@@ -867,10 +910,21 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onFileReceived(peer: String, path: String) = onMain {
         NotificationHelper.notifyMessage(getApplication(), peer, "File received: ${File(path).name}")
+        if (peer == _state.value.selectedId) loadHistory()
     }
 
     override fun onImageReceived(peer: String, path: String) = onMain {
         NotificationHelper.notifyMessage(getApplication(), peer, "Image received")
+        if (peer == _state.value.selectedId) loadHistory()
+        else {
+            _state.update {
+                it.copy(
+                    contacts = it.contacts.map { c ->
+                        if (c.addr == peer) c.copy(unread = c.unread + 1, lastPreview = "📷 Image") else c
+                    },
+                )
+            }
+        }
     }
 
     override fun onImageText(peer: String, text: String) = onMain {

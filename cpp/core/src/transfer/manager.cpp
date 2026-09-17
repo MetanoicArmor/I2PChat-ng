@@ -313,14 +313,14 @@ void IncomingTransfers::finish_file() {
     const std::uint64_t message_id = file_->message_id;
     file_.reset();
 
+    // ACK first so history/UI callbacks cannot delay it past the next keepalive
+    // and create a sequence gap on the wire.
+    send(Frame{'S', protocol::signal_body(protocol::build_file_ack(name, message_id))});
     report(Progress{name, path, size, size, Direction::Incoming, false,
                     Outcome::Completed});
     if (callbacks_.on_file_received) {
         callbacks_.on_file_received(path);
     }
-    // The ACK quotes the base name so it matches what the sender offered, not
-    // the collision-resolved name it was saved under.
-    send(Frame{'S', protocol::signal_body(protocol::build_file_ack(name, message_id))});
 }
 
 void IncomingTransfers::fail_file(const std::string& message, bool remove_partial) {
@@ -449,12 +449,12 @@ void IncomingTransfers::finish_image() {
     const std::uint64_t message_id = image_->message_id;
     image_.reset();
 
+    send(Frame{'S', protocol::signal_body(protocol::build_image_ack(name, message_id))});
     report(Progress{name, target, size, size, Direction::Incoming, true,
                     Outcome::Completed});
     if (callbacks_.on_image_received) {
         callbacks_.on_image_received(target);
     }
-    send(Frame{'S', protocol::signal_body(protocol::build_image_ack(name, message_id))});
 }
 
 void IncomingTransfers::fail_image(const std::string& message) {

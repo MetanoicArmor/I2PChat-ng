@@ -4,6 +4,7 @@
 #include "emoji_picker.hpp"
 #include "group_topology_map.hpp"
 #include "popup_chrome.hpp"
+#include "profile_select_dialog.hpp"
 #include "rounded_scrollbar.hpp"
 #include "router_settings_dialog.hpp"
 
@@ -116,6 +117,10 @@ namespace i2pchat::gui {
 namespace asio = boost::asio;
 
 namespace {
+
+QString native_shortcut(const QString& portable_sequence) {
+    return QKeySequence(portable_sequence).toString(QKeySequence::NativeText);
+}
 
 QString friendly_error(const std::string& raw) {
     const QString text = QString::fromStdString(raw);
@@ -855,6 +860,7 @@ void ChatWindow::build_ui() {
         new QShortcut(QKeySequence(keys), this, slot);
     };
     bind_shortcut(QStringLiteral("Ctrl+O"), [this] { load_profile_dat(); });
+    bind_shortcut(QStringLiteral("Ctrl+S"), [this] { switch_profile(); });
     bind_shortcut(QStringLiteral("Ctrl+P"), [this] { choose_file(true); });
     bind_shortcut(QStringLiteral("Ctrl+F"), [this] { choose_file(false); });
     bind_shortcut(QStringLiteral("Ctrl+G"), [this] { new_group_hint(); });
@@ -884,6 +890,17 @@ void ChatWindow::build_ui() {
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray_ = new QSystemTrayIcon(this);
         QIcon tray_icon = windowIcon();
+#ifdef Q_OS_MACOS
+        // Prefer bundle .icns so tray matches Dock; never setWindowIcon on macOS
+        // (that would override Cmd+Tab / Dock with a low-res ICO).
+        if (tray_icon.isNull()) {
+            const QString icns = QCoreApplication::applicationDirPath() +
+                                 QStringLiteral("/../Resources/I2PChat.icns");
+            if (QFile::exists(icns)) {
+                tray_icon = QIcon(icns);
+            }
+        }
+#endif
         if (tray_icon.isNull()) {
             tray_icon = QIcon(QStringLiteral(":/i2pchat/icons/app.ico"));
         }
@@ -891,7 +908,9 @@ void ChatWindow::build_ui() {
             tray_icon = style()->standardIcon(QStyle::SP_ComputerIcon);
         }
         if (!tray_icon.isNull()) {
+#ifndef Q_OS_MACOS
             setWindowIcon(tray_icon);
+#endif
             tray_->setIcon(tray_icon);
         }
         tray_->setToolTip("I2PChat");
@@ -1227,53 +1246,59 @@ void ChatWindow::show_more_menu() {
     }
     more_popup_->clear_actions();
     more_popup_->set_night(options_.dark);
-    more_popup_->add_action(tr("Load profile (.dat)"), QStringLiteral("Ctrl+O"),
+    more_popup_->add_action(tr("Load profile (.dat)"), native_shortcut(QStringLiteral("Ctrl+O")),
                             [this] { load_profile_dat(); },
                             tr("Open a file dialog to load a profile from a .dat file."));
-    more_popup_->add_action(tr("Send picture"), QStringLiteral("Ctrl+P"),
+    more_popup_->add_action(tr("Switch profile"), native_shortcut(QStringLiteral("Ctrl+S")),
+                            [this] { switch_profile(); },
+                            tr("Open the profile picker and switch to another local profile."));
+    more_popup_->add_action(tr("Send picture"), native_shortcut(QStringLiteral("Ctrl+P")),
                             [this] { choose_file(true); },
                             tr("Send an image file to the connected peer; images appear inline."));
-    more_popup_->add_action(tr("Send file"), QStringLiteral("Ctrl+F"),
+    more_popup_->add_action(tr("Send file"), native_shortcut(QStringLiteral("Ctrl+F")),
                             [this] { choose_file(false); },
                             tr("Send any file to the connected peer via the file picker."));
-    more_popup_->add_action(tr("New text group…"), QStringLiteral("Ctrl+G"),
+    more_popup_->add_action(tr("New text group…"), native_shortcut(QStringLiteral("Ctrl+G")),
                             [this] { new_group_hint(); },
                             tr("Create a text-only group with a local title and member addresses."));
-    more_popup_->add_action(tr("Join group via invite…"), QStringLiteral("Ctrl+J"),
+    more_popup_->add_action(tr("Join group via invite…"), native_shortcut(QStringLiteral("Ctrl+J")),
                             [this] { join_group_hint(); },
                             tr("Paste a copied group invite string to join that text group."));
     if (!active_group_id_.empty()) {
-        more_popup_->add_action(tr("Copy group invite"), QStringLiteral("Ctrl+Shift+G"),
+        more_popup_->add_action(tr("Copy group invite"),
+                                native_shortcut(QStringLiteral("Ctrl+Shift+G")),
                                 [this] { copy_group_invite(); },
                                 tr("Copy a shareable invite string for this group to the clipboard."));
     }
-    more_popup_->add_action(tr("BlindBox diagnostics"), QStringLiteral("Ctrl+D"),
+    more_popup_->add_action(tr("BlindBox diagnostics"), native_shortcut(QStringLiteral("Ctrl+D")),
                             [this] { show_blindbox_diagnostics(); },
                             tr("Show offline-delivery status and edit BlindBox replica endpoints."));
-    more_popup_->add_action(tr("Export profile backup…"), QStringLiteral("Ctrl+E"),
+    more_popup_->add_action(tr("Export profile backup…"), native_shortcut(QStringLiteral("Ctrl+E")),
                             [this] { export_profile_backup(); },
                             tr("Export an encrypted backup of this profile."));
-    more_popup_->add_action(tr("Import profile backup…"), QStringLiteral("Ctrl+I"),
+    more_popup_->add_action(tr("Import profile backup…"), native_shortcut(QStringLiteral("Ctrl+I")),
                             [this] { import_profile_backup(); },
                             tr("Import an encrypted profile backup."));
-    more_popup_->add_action(tr("Export history backup…"), QStringLiteral("Ctrl+Shift+E"),
+    more_popup_->add_action(tr("Export history backup…"),
+                            native_shortcut(QStringLiteral("Ctrl+Shift+E")),
                             [this] { export_history_backup(); },
                             tr("Export an encrypted backup of chat history."));
-    more_popup_->add_action(tr("Import history backup…"), QStringLiteral("Ctrl+Shift+I"),
+    more_popup_->add_action(tr("Import history backup…"),
+                            native_shortcut(QStringLiteral("Ctrl+Shift+I")),
                             [this] { import_history_backup(); },
                             tr("Import an encrypted history backup."));
-    more_popup_->add_action(tr("Check for updates…"), QStringLiteral("Ctrl+U"),
+    more_popup_->add_action(tr("Check for updates…"), native_shortcut(QStringLiteral("Ctrl+U")),
                             [this] { check_for_updates(); },
                             tr("Look up the latest I2PChat release."));
-    more_popup_->add_action(tr("Open App dir"), QStringLiteral("Ctrl+Shift+A"),
+    more_popup_->add_action(tr("Open App dir"), native_shortcut(QStringLiteral("Ctrl+Shift+A")),
                             [this] { open_app_dir(); },
                             tr("Open the application data folder in the file manager."));
-    more_popup_->add_action(tr("I2P router…"), QStringLiteral("Ctrl+R"),
+    more_popup_->add_action(tr("I2P router…"), native_shortcut(QStringLiteral("Ctrl+R")),
                             [this] { router_settings(); },
                             tr("Choose bundled or system i2pd and SAM ports."));
     more_popup_->add_separator();
     more_popup_->add_action(tr("Forget pinned peer key"), {}, [this] { forget_pin(); });
-    more_popup_->add_action(tr("Copy my address"), QStringLiteral("Ctrl+Shift+C"),
+    more_popup_->add_action(tr("Copy my address"), native_shortcut(QStringLiteral("Ctrl+Shift+C")),
                             [this] { copy_address(); });
     more_popup_->add_separator();
     more_popup_->add_action(history_enabled_ ? tr("History: on") : tr("History: off"), {}, [this] {
@@ -1307,8 +1332,10 @@ void ChatWindow::show_more_menu() {
                                 composer_->setPlaceholderText(
                                     enter_sends_ ? tr("Message or /command…  Enter to send, "
                                                       "Shift+Enter for a new line")
-                                                 : tr("Message or /command…  Ctrl+Enter to send, "
-                                                      "Enter for a new line"));
+                                                 : tr("Message or /command…  %1 to send, "
+                                                      "Enter for a new line")
+                                                       .arg(native_shortcut(
+                                                           QStringLiteral("Ctrl+Return"))));
                             });
     more_popup_->add_separator();
     more_popup_->add_action(
@@ -1317,8 +1344,8 @@ void ChatWindow::show_more_menu() {
             QSettings().setValue(QStringLiteral("notifySound"), notify_sound_);
         });
     more_popup_->add_separator();
-    more_popup_->add_action(tr("Quit"), QStringLiteral("Ctrl+Q"), [this] { request_quit(); },
-                            tr("Close I2PChat completely."));
+    more_popup_->add_action(tr("Quit"), native_shortcut(QStringLiteral("Ctrl+Q")),
+                            [this] { request_quit(); }, tr("Close I2PChat completely."));
     more_popup_->show_below(more_button_);
 }
 
@@ -2594,6 +2621,22 @@ void ChatWindow::switch_to_profile(const std::string& name) {
     options_.profile = name;
     setWindowTitle(QString("I2PChat @ %1").arg(QString::fromStdString(name)));
     start_core();
+}
+
+void ChatWindow::switch_profile() {
+    ProfileSelectDialog dialog(options_.app_root, options_.dark, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const QString chosen = dialog.selected_profile();
+    if (chosen.isEmpty()) {
+        return;
+    }
+    const std::string name = chosen.toStdString();
+    if (name == options_.profile) {
+        return;
+    }
+    switch_to_profile(name);
 }
 
 std::optional<std::string> ChatWindow::compose_draft_key() const {

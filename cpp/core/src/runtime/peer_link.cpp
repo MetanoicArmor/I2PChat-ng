@@ -99,18 +99,26 @@ void PeerLink::enqueue(Bytes bytes) {
 }
 
 asio::awaitable<void> PeerLink::drain_outbox() {
-    while (!closed_ && !outbox_.empty()) {
-        const Bytes frame = std::move(outbox_.front());
-        outbox_.pop_front();
-        boost::system::error_code error;
-        co_await asio::async_write(socket_, asio::buffer(frame),
-                                   asio::redirect_error(asio::use_awaitable, error));
-        if (error) {
-            finish("write failed: " + error.message());
-            break;
+    // After co_await, another enqueue may have raced past writing_==true and left
+    // bytes sitting in the queue with nobody draining. Re-claim until idle.
+    for (;;) {
+        while (!closed_ && !outbox_.empty()) {
+            const Bytes frame = std::move(outbox_.front());
+            outbox_.pop_front();
+            boost::system::error_code error;
+            co_await asio::async_write(socket_, asio::buffer(frame),
+                                       asio::redirect_error(asio::use_awaitable, error));
+            if (error) {
+                finish("write failed: " + error.message());
+                co_return;
+            }
         }
+        writing_ = false;
+        if (closed_ || outbox_.empty()) {
+            co_return;
+        }
+        writing_ = true;
     }
-    writing_ = false;
 }
 
 bool PeerLink::apply(const session::SessionActions& actions) {

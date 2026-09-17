@@ -94,6 +94,7 @@ private slots:
     void copy_group_invite();
     void sidebar_context_menu(const QPoint& pos);
     void load_profile_dat();
+    void switch_profile();
     void show_blindbox_diagnostics();
     void show_blindbox_setup_examples(QWidget* parent);
     void export_profile_backup();

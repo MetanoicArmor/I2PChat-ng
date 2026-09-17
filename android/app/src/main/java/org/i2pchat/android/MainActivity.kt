@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,14 +21,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -66,7 +70,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -77,6 +84,12 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
+import java.io.File
 import org.i2pchat.android.ui.EmojiChars
 import org.i2pchat.android.ui.theme.I2PChatTheme
 
@@ -139,6 +152,91 @@ fun I2PChatRoot(bridge: ChatBridge) {
             TopologyScreen(bridge, nav, bridge.state.value.selectedId)
         }
     }
+}
+
+@Composable
+fun ChatImageThumb(path: String) {
+    val context = LocalContext.current
+    val bitmap = remember(path) {
+        runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            var sample = 1
+            val maxSide = 1280
+            while (
+                (bounds.outWidth / sample) > maxSide ||
+                (bounds.outHeight / sample) > maxSide
+            ) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
+        }.getOrNull()
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = File(path).name,
+            modifier = Modifier
+                .widthIn(max = 260.dp)
+                .heightIn(max = 320.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { openReceivedFile(context, path) },
+            contentScale = ContentScale.Fit,
+        )
+    } else {
+        Text(
+            "📷 ${File(path).name.ifBlank { path }}",
+            modifier = Modifier.clickable { openReceivedFile(context, path) },
+        )
+    }
+}
+
+fun openReceivedFile(context: android.content.Context, path: String) {
+    val file = File(path)
+    if (!file.isFile) return
+    val uri = runCatching {
+        FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    }.getOrElse { Uri.fromFile(file) }
+    val ext = file.extension.lowercase()
+    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        ?: when {
+            ext in listOf("jpg", "jpeg", "png", "gif", "webp", "heic") -> "image/*"
+            ext == "pdf" -> "application/pdf"
+            else -> "*/*"
+        }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mime)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, file.name))
+    }
+}
+
+@Composable
+fun OpenFileWarningDialog(
+    path: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val name = File(path).name
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Открыть файл?") },
+        text = {
+            Text(
+                "Файл «$name» получен от собеседника. Открывайте только если доверяете отправителю — вложенные файлы могут быть вредоносными.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Открыть") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
 }
 
 @Composable
@@ -384,6 +482,7 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var search by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
+    var pendingOpenPath by remember { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, false)
@@ -410,6 +509,16 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+        )
+    }
+    pendingOpenPath?.let { path ->
+        OpenFileWarningDialog(
+            path = path,
+            onConfirm = {
+                pendingOpenPath = null
+                openReceivedFile(context, path)
+            },
+            onDismiss = { pendingOpenPath = null },
         )
     }
     Scaffold(
@@ -484,9 +593,42 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                                     if (group && msg.sender.isNotBlank()) {
                                         Text(msg.sender.take(16), style = MaterialTheme.typography.labelSmall)
                                     }
-                                    Text(msg.text)
+                                    if (msg.imagePath.isNotBlank()) {
+                                        ChatImageThumb(msg.imagePath)
+                                        if (msg.fileCaption.isNotBlank()) {
+                                            Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    } else if (msg.filePath.isNotBlank() || msg.text.startsWith("[file] ")) {
+                                        val path = msg.filePath
+                                        Text(
+                                            "📎 ${msg.fileCaption.ifBlank { msg.text }}",
+                                            modifier = if (path.isNotBlank()) {
+                                                Modifier.clickable { pendingOpenPath = path }
+                                            } else {
+                                                Modifier
+                                            },
+                                        )
+                                        if (path.isNotBlank()) {
+                                            Text(
+                                                "Нажмите, чтобы открыть",
+                                                style = MaterialTheme.typography.labelSmall,
+                                            )
+                                        }
+                                    } else {
+                                        Text(msg.text)
+                                    }
                                     Text(
-                                        listOf(msg.ts.take(19), msg.delivery).filter { it.isNotBlank() }.joinToString(" · "),
+                                        listOf(
+                                            msg.ts.take(19),
+                                            when (msg.delivery) {
+                                                "delivered" -> "✓"
+                                                "sent" -> "·"
+                                                "queued" -> "⧗"
+                                                "failed" -> "✗"
+                                                "sending" -> "…"
+                                                else -> msg.delivery
+                                            },
+                                        ).filter { it.isNotBlank() }.joinToString(" · "),
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }

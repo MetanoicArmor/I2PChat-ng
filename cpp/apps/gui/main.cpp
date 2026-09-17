@@ -18,7 +18,12 @@ int main(int argc, char** argv) {
     app.setApplicationName("I2PChat");
     app.setOrganizationName("I2PChat");
     app.setApplicationVersion(I2PCHAT_VERSION);
+    // On macOS, setWindowIcon replaces the Dock / Cmd+Tab icon from the bundle
+    // .icns with whatever is in the QIcon. Our embedded ICO tops out at 256px and
+    // looks soft when upscaled — leave the high-res CFBundleIconFile alone.
+#ifndef Q_OS_MACOS
     app.setWindowIcon(QIcon(QStringLiteral(":/i2pchat/icons/app.ico")));
+#endif
     app.setQuitOnLastWindowClosed(true);
     // Same as Python: Fusion + Inter 10pt on Windows (system fonts render larger there).
     app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));

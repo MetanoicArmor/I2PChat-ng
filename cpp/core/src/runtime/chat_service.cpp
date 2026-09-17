@@ -523,24 +523,11 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
         co_return false;
     }
 
-    // Same tie-break as the Python client: the lexicographically larger base32
-    // host accepts the peer's dial instead of racing a second outbound stream.
-    if (identity_.local_addr > peer_addr) {
-        const auto prefer_inbound_until =
-            std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        while (std::chrono::steady_clock::now() < prefer_inbound_until) {
-            if (Peer* waiting = find_peer(peer_addr);
-                waiting != nullptr &&
-                live_link(waiting->link.get(), sessions_, peer_addr)) {
-                co_return true;
-            }
-            asio::steady_timer pause(executor_);
-            pause.expires_after(std::chrono::milliseconds(200));
-            boost::system::error_code ignored;
-            co_await pause.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
-        }
-    }
-
+    // Tie-break for simultaneous dials is handled in on_established (prefer inbound).
+    // Do not wait here — that delayed the first message by up to 15s when the peer
+    // was not dialling us.
+    emit_system("Connecting to " + peer_addr.substr(0, 16) +
+                "… (first contact may take 30–90s while I2P builds tunnels)");
     sessions_.on_connecting(peer_addr);
     sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
     try {
@@ -748,7 +735,15 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
             return;
         case protocol::SignalKind::FileAck:
         case protocol::SignalKind::ImgAck:
-            emit_system(signal.name + " delivered to " + peer_addr.substr(0, 16) + "…");
+            (void)sessions_.acknowledge_inflight(peer_addr, signal.message_id);
+            if (signal.message_id != 0) {
+                update_delivery(peer_addr, signal.message_id, DeliveryState::Delivered, "live",
+                                "peer-ack");
+            } else if (!signal.name.empty()) {
+                // Older peers may omit the id; match the latest outgoing media with that name.
+                update_delivery_by_media_name(peer_addr, signal.name, DeliveryState::Delivered,
+                                              "live", "peer-ack");
+            }
             return;
         case protocol::SignalKind::RejectFile:
             emit_system(peer_addr.substr(0, 16) + "… declined " + signal.name);
@@ -938,11 +933,25 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     }
 
     const std::uint64_t msg_id = next_msg_id();
+    storage::HistoryEntry entry;
+    entry.kind = "out";
+    entry.text = "[file] " + source.string();
+    entry.ts = storage::now_iso8601_utc();
+    entry.message_id = std::to_string(msg_id);
+    entry.delivery_state = "sent";
+    entry.delivery_route = "live";
+    append_history(peer_addr, entry);
+    sessions_.register_inflight(peer_addr, msg_id);
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+    }
+
     const transfer::Frame header = outgoing->header();
     target->link->send_text(header.type, header.body, msg_id);
     while (std::optional<transfer::Frame> next = outgoing->next()) {
         Peer* still = find_peer(peer_addr);
         if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
             emit_error("Connection dropped mid-transfer.");
             co_return false;
         }
@@ -960,11 +969,6 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     if (events_.on_transfer) {
         events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
     }
-    storage::HistoryEntry entry;
-    entry.kind = "out";
-    entry.text = "[file] " + source.string();
-    entry.ts = storage::now_iso8601_utc();
-    append_history(peer_addr, entry);
     co_return true;
 }
 
@@ -986,11 +990,25 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
     }
 
     const std::uint64_t msg_id = next_msg_id();
+    storage::HistoryEntry entry;
+    entry.kind = "out";
+    entry.text = "[image] " + source.string();
+    entry.ts = storage::now_iso8601_utc();
+    entry.message_id = std::to_string(msg_id);
+    entry.delivery_state = "sent";
+    entry.delivery_route = "live";
+    append_history(peer_addr, entry);
+    sessions_.register_inflight(peer_addr, msg_id);
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+    }
+
     const transfer::Frame header = outgoing->header();
     target->link->send_text(header.type, header.body, msg_id);
     while (std::optional<transfer::Frame> next = outgoing->next()) {
         Peer* still = find_peer(peer_addr);
         if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
             co_return false;
         }
         still->link->send_text(next->type, next->body, next_msg_id());
@@ -1002,11 +1020,6 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
     if (events_.on_transfer) {
         events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
     }
-    storage::HistoryEntry entry;
-    entry.kind = "out";
-    entry.text = "[image] " + source.string();
-    entry.ts = storage::now_iso8601_utc();
-    append_history(peer_addr, entry);
     co_return true;
 }
 
@@ -1229,6 +1242,56 @@ void ChatService::update_delivery(const std::string& peer_addr, std::uint64_t ms
     }
     if (events_.on_delivery) {
         events_.on_delivery(DeliveryReport{peer_addr, msg_id, state, route, reason});
+    }
+}
+
+void ChatService::update_delivery_by_media_name(const std::string& peer_addr,
+                                                const std::string& name,
+                                                DeliveryState state, const std::string& route,
+                                                const std::string& reason) {
+    if (name.empty()) {
+        return;
+    }
+    std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
+    std::uint64_t matched_id = 0;
+    for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry) {
+        if (entry->kind != "out" && entry->kind != "me") {
+            continue;
+        }
+        const bool media = entry->text.rfind("[image] ", 0) == 0 ||
+                           entry->text.rfind("[file] ", 0) == 0;
+        if (!media) {
+            continue;
+        }
+        const auto slash = entry->text.find_last_of("/\\");
+        const std::string basename =
+            slash == std::string::npos ? entry->text : entry->text.substr(slash + 1);
+        if (basename != name && entry->text.find(name) == std::string::npos) {
+            continue;
+        }
+        entry->delivery_state = std::string(delivery_state_name(state));
+        entry->delivery_route = route;
+        entry->delivery_reason = reason;
+        if (entry->message_id) {
+            try {
+                matched_id = std::stoull(*entry->message_id);
+            } catch (...) {
+            }
+        }
+        break;
+    }
+    if (config_.profile != kTransientProfile && !entries.empty()) {
+        try {
+            storage::save_history(paths_, peer_addr, entries,
+                                  ByteView(identity_.identity_key), config_.retention);
+        } catch (const std::exception&) {
+        }
+    }
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, matched_id, state, route, reason});
     }
 }
 
