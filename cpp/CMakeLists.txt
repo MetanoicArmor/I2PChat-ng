@@ -153,9 +153,15 @@ if(I2PCHAT_BOOST_VIA_FETCHCONTENT)
   unset(_i2pchat_boost_tgt)
   unset(_i2pchat_boost_type)
   unset(_i2pchat_boost_incs)
-  if(DEFINED boost_SOURCE_DIR)
-    target_include_directories(i2pchat_project_options SYSTEM INTERFACE
-      "${boost_SOURCE_DIR}")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(DEFINED boost_SOURCE_DIR)
+      # GCC does not honor INTERFACE SYSTEM on all modular Boost -I paths.
+      target_compile_options(i2pchat_project_options INTERFACE
+        "SHELL:-isystem ${boost_SOURCE_DIR}")
+    endif()
+    # Asio/date_time still pull headers via explicit -I from boost_* targets.
+    target_compile_options(i2pchat_project_options INTERFACE
+      -Wno-error=sign-conversion -Wno-error=conversion)
   endif()
 endif()
 
