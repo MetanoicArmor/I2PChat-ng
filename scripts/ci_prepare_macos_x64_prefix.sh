@@ -20,13 +20,14 @@ if ! command -v python3 >/dev/null; then
   exit 1
 fi
 
-python3 -m pip install --user -q 'aqtinstall>=3.1'
-export PATH="${HOME}/.local/bin:${PATH}"
+python3 -m venv /tmp/aqt-venv
+/tmp/aqt-venv/bin/pip install -q 'aqtinstall>=3.1'
+AQT=(/tmp/aqt-venv/bin/aqt)
 
 QT_PREFIX="${QT_ROOT}/${QT_VERSION}/macos"
 if [ ! -d "${QT_PREFIX}" ]; then
   echo "==> aqtinstall Qt ${QT_VERSION} (clang_64)"
-  aqt install-qt mac desktop "${QT_VERSION}" clang_64 -O "${QT_ROOT}"
+  "${AQT[@]}" install-qt mac desktop "${QT_VERSION}" clang_64 -O "${QT_ROOT}"
 fi
 if [ ! -d "${QT_PREFIX}" ]; then
   # Some aqt layouts use clang_64 as the leaf dir name.
