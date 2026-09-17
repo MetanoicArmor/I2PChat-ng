@@ -251,6 +251,7 @@ sign_macho() {
 sign_app_bundle() {
   local app="$1"
   local identity="${I2PCHAT_CODESIGN_IDENTITY:--}"
+  local main_bin="${app}/Contents/MacOS/${APP_NAME}"
   echo "==> codesign (${identity})"
   xattr -cr "${app}" 2>/dev/null || true
   local f
@@ -271,13 +272,29 @@ sign_app_bundle() {
       [ -n "${f}" ] || continue
       sign_macho "${identity}" "${f}"
     done < <(find "${app}/Contents/Frameworks" -name '*.framework' -print 2>/dev/null | awk '{ print length, $0 }' | sort -nr | awk '{ $1=""; sub(/^ /,""); print }')
+    # Re-sign framework binaries after .framework wrapper (install_name_tool invalidates).
+    while IFS= read -r f; do
+      [ -n "${f}" ] || continue
+      if file -b "${f}" | grep -q 'Mach-O'; then
+        sign_macho "${identity}" "${f}"
+      fi
+    done < <(find "${app}/Contents/Frameworks" -type f 2>/dev/null | sort)
   fi
-  while IFS= read -r f; do
-    [ -n "${f}" ] || continue
-    if file -b "${f}" | grep -q 'Mach-O'; then
-      sign_macho "${identity}" "${f}"
+  # Nested MacOS helpers must be signed before the main CFBundleExecutable;
+  # alphabetical sort would sign I2PChat before I2PChat-tui and fail with
+  # "code object is not signed at all / In subcomponent: …-tui".
+  if [ -d "${app}/Contents/MacOS" ]; then
+    while IFS= read -r f; do
+      [ -n "${f}" ] || continue
+      [ "${f}" = "${main_bin}" ] && continue
+      if file -b "${f}" | grep -q 'Mach-O'; then
+        sign_macho "${identity}" "${f}"
+      fi
+    done < <(find "${app}/Contents/MacOS" -type f 2>/dev/null | sort)
+    if [ -f "${main_bin}" ]; then
+      sign_macho "${identity}" "${main_bin}"
     fi
-  done < <(find "${app}/Contents" -type f ! -name '*.dylib' ! -name '*.so' 2>/dev/null | sort)
+  fi
   sign_macho "${identity}" "${app}"
 }
 
