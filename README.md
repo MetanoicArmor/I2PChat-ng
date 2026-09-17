@@ -267,7 +267,7 @@ The supported client is **C++20** under [`cpp/`](cpp/). It is wire-compatible wi
 Requirements (all platforms):
 
 - **CMake ≥ 3.24** and a C++20 compiler (GCC 12+, Clang 15+, Apple Clang, MSVC 2022)
-- **libsodium**, **Boost ≥ 1.81** (Asio), **nlohmann/json**
+- **libsodium**, **Boost ≥ 1.86** (Asio; `asio::cancel_after`), **nlohmann/json**
 - **FTXUI** (TUI), **Qt 6 Widgets** (GUI)
 - **Catch2 3** only if you build tests
 - a **system** [i2pd](https://i2pd.website) with **SAM** on port `7656`, or a **bundled** `i2pd` staged by the release scripts

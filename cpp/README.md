@@ -24,7 +24,7 @@ generated from the Python implementation.
 
 - CMake ≥ 3.24 and a C++20 compiler
 - libsodium
-- Boost ≥ 1.81 (Asio, Process)
+- Boost ≥ 1.86 (Asio; `asio::cancel_after`)
 - nlohmann/json ≥ 3.10
 - Catch2 3 (tests), FTXUI (TUI), Qt 6 (GUI)
 

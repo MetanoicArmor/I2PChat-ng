@@ -98,8 +98,26 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
   )
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
+# asio::cancel_after arrived in Boost 1.86. Ubuntu 24.04 ships 1.83, so fall
+# back to the same FetchContent path Android already uses when the system
+# package is too old.
 if(NOT TARGET Boost::headers)
-  find_package(Boost 1.81 REQUIRED)
+  find_package(Boost 1.86 QUIET)
+endif()
+if(NOT TARGET Boost::headers)
+  message(STATUS "Boost ≥1.86 not found; fetching boost-1.86.0 (asio::cancel_after)")
+  set(BOOST_INCLUDE_LIBRARIES asio)
+  set(BOOST_ENABLE_CMAKE ON)
+  FetchContent_Declare(Boost
+    URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
+  )
+  FetchContent_MakeAvailable(Boost)
+  if(NOT TARGET Boost::headers AND TARGET Boost::asio)
+    add_library(Boost::headers ALIAS Boost::asio)
+  endif()
+endif()
+if(NOT TARGET Boost::headers)
+  message(FATAL_ERROR "Boost ≥1.86 is required (asio::cancel_after)")
 endif()
 
 # Third-party headers do not survive our warning set, and their noise would bury

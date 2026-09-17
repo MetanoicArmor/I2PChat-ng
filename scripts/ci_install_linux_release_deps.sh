@@ -14,10 +14,16 @@ if apt-cache show libglib2.0-0t64 >/dev/null 2>&1; then
   GLIB_PKG=libglib2.0-0t64
 fi
 
+MINIUPNPC_PKG=libminiupnpc17
+if ! apt-cache show "${MINIUPNPC_PKG}" >/dev/null 2>&1; then
+  MINIUPNPC_PKG=libminiupnpc18
+fi
+
 sudo apt-get install -y --no-install-recommends \
   ca-certificates git cmake ninja-build g++ pkg-config zip wget \
   desktop-file-utils file patchelf "${FUSE_PKG}" \
   libsodium-dev libboost-all-dev nlohmann-json3-dev \
+  "${MINIUPNPC_PKG}" \
   qt6-base-dev qt6-base-dev-tools \
   libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3 \
   "${GLIB_PKG}" libfontconfig1 libfreetype6 libdrm2 \

@@ -35,7 +35,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build g++ libsodium-dev \
-            libboost-dev nlohmann-json3-dev catch2 pkg-config
+            nlohmann-json3-dev catch2 pkg-config
+          # System Boost on Ubuntu 24.04 is 1.83; asio::cancel_after needs ≥1.86.
+          # CMake FetchContent fallback in cpp/CMakeLists.txt supplies it.
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -45,8 +47,13 @@ jobs:
       - name: Bootstrap vcpkg (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
+        shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+          # Shallow tip-only clones cannot resolve cpp/vcpkg.json builtin-baseline.
+          $baseline = (Get-Content cpp/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if (-not $baseline) { throw "missing builtin-baseline in cpp/vcpkg.json" }
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg checkout $baseline
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Configure (Unix)

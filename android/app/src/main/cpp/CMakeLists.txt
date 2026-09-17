@@ -27,7 +27,7 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
 endif()
 
 if(NOT TARGET Boost::headers)
-  find_package(Boost 1.81 QUIET)
+  find_package(Boost 1.86 QUIET)
 endif()
 if(NOT TARGET Boost::headers)
   set(BOOST_INCLUDE_LIBRARIES asio)

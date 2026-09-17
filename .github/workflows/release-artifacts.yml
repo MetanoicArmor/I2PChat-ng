@@ -389,8 +389,13 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Bootstrap vcpkg
+        shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+          # Shallow tip-only clones cannot resolve cpp/vcpkg.json builtin-baseline.
+          $baseline = (Get-Content cpp/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if (-not $baseline) { throw "missing builtin-baseline in cpp/vcpkg.json" }
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg checkout $baseline
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Build Windows zips
@@ -549,6 +554,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Default still requests deprecated `tools`, which sdkmanager no longer serves.
+          packages: platform-tools
 
       - name: Install Android SDK packages + NDK r28
         env:
