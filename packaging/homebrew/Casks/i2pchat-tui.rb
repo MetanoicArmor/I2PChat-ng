@@ -16,7 +16,7 @@ cask "i2pchat-tui" do
   desc "Terminal UI (FTXUI) for I2PChat — no Qt GUI binary"
   homepage "https://github.com/MetanoicArmor/I2PChat-ng"
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   binary "i2pchat-tui"
   artifact "I2PChat", target: "#{HOMEBREW_PREFIX}/opt/i2pchat-tui/I2PChat"

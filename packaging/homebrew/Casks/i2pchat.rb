@@ -21,7 +21,7 @@ cask "i2pchat" do
   desc "Experimental peer-to-peer chat client for the I2P network"
   homepage "https://github.com/MetanoicArmor/I2PChat-ng"
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   caveats <<~EOS
     FTXUI TUI only: install the separate cask `i2pchat-tui`, or use I2PChat.app/Contents/MacOS/I2PChat-tui inside this bundle.
