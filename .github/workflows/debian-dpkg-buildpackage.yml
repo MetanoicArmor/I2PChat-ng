@@ -9,7 +9,7 @@ name: Debian dpkg-buildpackage
 
 on:
   push:
-    branches: [main]
+    branches: [python]
     paths:
       - "debian/**"
       - "packaging/debian/docker-dpkg-buildpackage.sh"

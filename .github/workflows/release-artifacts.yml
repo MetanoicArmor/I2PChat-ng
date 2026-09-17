@@ -44,7 +44,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             arch: x86_64
-            sums: SHA256SUMS
+            sums: SHA256SUMS.linux-x86_64
           - os: ubuntu-24.04-arm
             arch: aarch64
             sums: SHA256SUMS.linux-aarch64
@@ -156,6 +156,9 @@ jobs:
           fi
           mkdir -p dist-upload
           cp "$ZIP_GUI" "$ZIP_TUI" "$SUMS" dist-upload/
+          if [ "$ARCH" = "x86_64" ]; then
+            cp SHA256SUMS dist-upload/SHA256SUMS
+          fi
 
       - name: Upload Linux workflow artifacts
         uses: actions/upload-artifact@v4

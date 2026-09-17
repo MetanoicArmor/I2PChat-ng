@@ -92,6 +92,19 @@ safe_rm_rf() {
   done
 }
 
+is_system_ldd_lib() {
+  local base="$1"
+  case "$base" in
+    ld-linux*.so* | linux-vdso.so.* | libc.so* | libm.so* | libpthread.so* | libdl.so* | \
+    libresolv.so* | librt.so* | libstdc++.so* | libgcc_s.so*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 stage_elf_deps() {
   local bin="$1"
   local dest="$2"
@@ -99,15 +112,32 @@ stage_elf_deps() {
   if ! command -v ldd >/dev/null 2>&1; then
     return 0
   fi
-  ldd "${bin}" | awk '/=>/ { print $3 }' | while read -r lib; do
-    [ -n "${lib}" ] && [ -f "${lib}" ] || continue
-    case "${lib}" in
-      */ld-linux*.so* | */libc.so* | */libm.so* | */libpthread.so* | */libdl.so* | \
-      */libresolv.so* | */librt.so* | */libstdc++.so* | */libgcc_s.so*)
-        continue
-        ;;
-    esac
-    cp -a "${lib}" "${dest}/" 2>/dev/null || true
+  local -a pending=("$bin")
+  declare -A staged_abs=()
+  while [ "${#pending[@]}" -gt 0 ]; do
+    local current="${pending[0]}"
+    pending=("${pending[@]:1}")
+    [ -n "${current}" ] && [ -f "${current}" ] || continue
+    while read -r lib; do
+      [ -n "${lib}" ] && [ -e "${lib}" ] || continue
+      local soname base real realbase dest_real dest_soname
+      soname="$(basename "${lib}")"
+      is_system_ldd_lib "${soname}" && continue
+      real="$(readlink -f "${lib}" 2>/dev/null || echo "${lib}")"
+      [ -f "${real}" ] || continue
+      realbase="$(basename "${real}")"
+      dest_real="${dest}/${realbase}"
+      dest_soname="${dest}/${soname}"
+      if [ -z "${staged_abs["${real}"]+x}" ]; then
+        cp -L "${real}" "${dest_real}" 2>/dev/null || continue
+        chmod a+r "${dest_real}" 2>/dev/null || true
+        staged_abs["${real}"]=1
+        pending+=("${dest_real}")
+      fi
+      if [ "${soname}" != "${realbase}" ] && [ ! -e "${dest_soname}" ]; then
+        ln -sf "${realbase}" "${dest_soname}"
+      fi
+    done < <(ldd "${current}" 2>/dev/null | awk '/=>/ { print $3 }')
   done
 }
 
