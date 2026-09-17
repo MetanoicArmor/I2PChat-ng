@@ -664,3 +664,21 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           gh release upload "$TAG" dist-upload/* \
             --repo "${{ github.repository }}" --clobber
+
+  verify-desktop-assets:
+    needs: [linux, macos, windows, android]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.event.inputs.upload != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/verify_github_release_assets.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Verify GitHub Release desktop + Android assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          I2PCHAT_GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          bash scripts/verify_github_release_assets.sh --skip-deb --skip-gpg "${TAG}"
