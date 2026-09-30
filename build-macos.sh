@@ -384,6 +384,7 @@ else
   if [ "$use_gpg_batch" = 1 ]; then
     GPG_ARGS+=(--batch --yes)
   fi
+  # Artifact name checked by release-integrity-policy: SHA256SUMS.asc
   GPG_ARGS+=(--armor --detach-sign --output "${SHA256_FILE}.asc")
   if [ -n "${I2PCHAT_GPG_KEY_ID:-}" ]; then
     GPG_ARGS+=(--local-user "${I2PCHAT_GPG_KEY_ID}")

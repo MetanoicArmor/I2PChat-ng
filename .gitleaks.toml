@@ -7,8 +7,11 @@ title = "I2PChat"
 useDefault = true
 
 [allowlist]
-description = "Mock .dat first-line fixtures in unit tests (not production secrets)"
+description = "Test fixtures and golden vectors (synthetic keys, not production secrets)"
 paths = [
   '''tests/test_clear_locked_peer\.py''',
   '''tests/test_profile_dat\.py''',
+  '''cpp/testdata/vectors/.*''',
+  '''cpp/tests/test_storage_profile_dat\.cpp''',
+  '''cpp/tests/test_blindbox_replica_client\.cpp''',
 ]
