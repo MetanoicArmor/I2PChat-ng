@@ -16,10 +16,8 @@ android {
         targetSdk = 35
         versionCode = 150
         versionName = "1.5.0"
-        ndk {
-            // Phones are arm64; Windows/macOS emulators are almost always x86_64.
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
+        // ABI filters live on the product flavors. defaultConfig must stay
+        // empty or they are unioned into every flavor, including arm32.
         externalNativeBuild {
             cmake {
                 arguments += listOf(
@@ -64,6 +62,28 @@ android {
         }
     }
 
+    flavorDimensions += "cpu"
+    productFlavors {
+        create("standard") {
+            dimension = "cpu"
+            isDefault = true
+            ndk {
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+            buildConfigField("boolean", "BUNDLED_I2PD", "true")
+        }
+        // 32-bit phones. No bundled libi2pd.so: the app talks to an
+        // i2pd the user already runs (SAM 127.0.0.1:7656).
+        create("arm32") {
+            dimension = "cpu"
+            versionNameSuffix = "-arm32"
+            ndk {
+                abiFilters += "armeabi-v7a"
+            }
+            buildConfigField("boolean", "BUNDLED_I2PD", "false")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -87,6 +107,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     externalNativeBuild {
         cmake {

@@ -113,8 +113,12 @@ target_link_libraries(i2pchat_jni PRIVATE
   log
 )
 
-target_link_options(i2pchat_jni PRIVATE
-  "-Wl,-z,max-page-size=16384"
-  "-Wl,-z,common-page-size=16384"
-)
+# 16 KiB ELF alignment is a 64-bit Android requirement. armeabi-v7a
+# devices use 4 KiB pages; forcing 16 KiB there only bloats the .so.
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(i2pchat_jni PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+  )
+endif()
 target_compile_definitions(i2pchat_jni PRIVATE BOOST_ASIO_NO_DEPRECATED)

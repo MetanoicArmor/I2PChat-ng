@@ -777,26 +777,32 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Bundled i2pd", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = prefs.usingBundled,
-                    onCheckedChange = { on ->
-                        prefs = prefs.copy(backend = if (on) "bundled" else "system")
-                    },
-                )
+            if (BuildConfig.BUNDLED_I2PD) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Bundled i2pd", modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = prefs.usingBundled,
+                        onCheckedChange = { on ->
+                            prefs = prefs.copy(backend = if (on) "bundled" else "system")
+                        },
+                    )
+                }
+                Text("External SAM is any I2P router on this phone (loopback only). Bundled needs libi2pd.so in jniLibs/arm64-v8a.")
+            } else {
+                Text("This 32-bit build has no bundled router. Install i2pd separately and point SAM at it (loopback only, usually 127.0.0.1:7656).")
             }
-            Text("External SAM is any I2P router on this phone (loopback only). Bundled needs libi2pd.so in jniLibs/arm64-v8a.")
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(prefs.systemSamHost, { prefs = prefs.copy(systemSamHost = it) }, label = { Text("External host") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(prefs.systemSamPort.toString(), { prefs = prefs.copy(systemSamPort = it.toIntOrNull() ?: prefs.systemSamPort) }, label = { Text("External SAM port") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.bundledSamPort.toString(), { prefs = prefs.copy(bundledSamPort = it.toIntOrNull() ?: prefs.bundledSamPort) }, label = { Text("Bundled SAM port") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.bundledHttpProxyPort.toString(), { prefs = prefs.copy(bundledHttpProxyPort = it.toIntOrNull() ?: prefs.bundledHttpProxyPort) }, label = { Text("HTTP proxy") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.bundledSocksProxyPort.toString(), { prefs = prefs.copy(bundledSocksProxyPort = it.toIntOrNull() ?: prefs.bundledSocksProxyPort) }, label = { Text("SOCKS proxy") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text("Control HTTP") }, modifier = Modifier.fillMaxWidth())
+            if (BuildConfig.BUNDLED_I2PD) {
+                OutlinedTextField(prefs.bundledSamPort.toString(), { prefs = prefs.copy(bundledSamPort = it.toIntOrNull() ?: prefs.bundledSamPort) }, label = { Text("Bundled SAM port") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledHttpProxyPort.toString(), { prefs = prefs.copy(bundledHttpProxyPort = it.toIntOrNull() ?: prefs.bundledHttpProxyPort) }, label = { Text("HTTP proxy") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledSocksProxyPort.toString(), { prefs = prefs.copy(bundledSocksProxyPort = it.toIntOrNull() ?: prefs.bundledSocksProxyPort) }, label = { Text("SOCKS proxy") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text("Control HTTP") }, modifier = Modifier.fillMaxWidth())
+            }
             Spacer(Modifier.height(12.dp))
             Button(onClick = { bridge.saveRouter(prefs) }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
-            if (prefs.usingBundled) {
+            if (BuildConfig.BUNDLED_I2PD && prefs.usingBundled) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { bridge.restartBundledRouter() },

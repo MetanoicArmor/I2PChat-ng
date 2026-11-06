@@ -18,21 +18,27 @@ fi
 
 BUILD_TYPE="debug"
 DO_INSTALL=0
+ARM32=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --debug) BUILD_TYPE="debug" ;;
     --release) BUILD_TYPE="release" ;;
     --install) DO_INSTALL=1 ;;
+    --arm32) ARM32=1 ;;
     -h|--help)
       cat <<'EOF'
 Build the I2PChat Android APK (Kotlin + JNI + bundled i2pd).
 
 Usage:
-  ./build-android.sh [--debug|--release] [--install]
+  ./build-android.sh [--debug|--release] [--arm32] [--install]
 
   --debug     installable debug APK (default)
   --release   release APK (signed: upload keystore via I2PCHAT_ANDROID_* env, else Android debug keystore)
+  --arm32     armeabi-v7a APK with no bundled i2pd (external SAM 127.0.0.1:7656)
   --install   adb install -r the built APK
+
+The default build is arm64-v8a + x86_64 with bundled i2pd.
+--arm32 is a separate sideload APK for 32-bit phones on Android 8.0+.
 
 Needs JDK 17+, Android SDK (ANDROID_HOME or ANDROID_SDK_ROOT), NDK and CMake.
 The first native configure downloads Boost, nlohmann/json and libsodium.
@@ -157,11 +163,13 @@ else
   export ANDROID_NDK_HOME="${NDK_DIR}"
 fi
 
-I2PD_ARM="${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libi2pd.so"
-I2PD_X64="${ANDROID_DIR}/app/src/main/jniLibs/x86_64/libi2pd.so"
-if [ ! -f "${I2PD_ARM}" ] || [ ! -f "${I2PD_X64}" ]; then
-  echo "ERROR: bundled libi2pd.so is missing. Run ./android/scripts/fetch-i2pd.sh" >&2
-  exit 1
+if [ "${ARM32}" -eq 0 ]; then
+  I2PD_ARM="${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libi2pd.so"
+  I2PD_X64="${ANDROID_DIR}/app/src/main/jniLibs/x86_64/libi2pd.so"
+  if [ ! -f "${I2PD_ARM}" ] || [ ! -f "${I2PD_X64}" ]; then
+    echo "ERROR: bundled libi2pd.so is missing. Run ./android/scripts/fetch-i2pd.sh" >&2
+    exit 1
+  fi
 fi
 
 # Do NOT post-process libi2pd.so with align-elf-16k.py: bumping p_align without a
@@ -192,18 +200,38 @@ if [ "${BUILD_TYPE}" = "release" ] && [ -z "${I2PCHAT_ANDROID_KEYSTORE:-}" ]; th
   ensure_debug_keystore
 fi
 
-echo "==> Building I2PChat Android ${RELEASE_VERSION} (${BUILD_TYPE})"
+FLAVOR="standard"
+APK_LABEL="${BUILD_TYPE}"
+if [ "${ARM32}" -eq 1 ]; then
+  FLAVOR="arm32"
+  APK_LABEL="arm32-${BUILD_TYPE}"
+fi
+
+echo "==> Building I2PChat Android ${RELEASE_VERSION} (${APK_LABEL})"
 echo "    SDK ${SDK_DIR}"
 if [ -n "${NDK_DIR}" ]; then
   echo "    NDK ${NDK_DIR}"
 fi
 
-if [ "${BUILD_TYPE}" = "release" ]; then
-  GRADLE_TASK="assembleRelease"
-  APK_DIR="${ANDROID_DIR}/app/build/outputs/apk/release"
+# Product flavors rename the task: assembleRelease would build every flavor.
+# Task names are spelled out so this works on macOS bash 3.2 (no ${var^}).
+if [ "${ARM32}" -eq 1 ]; then
+  if [ "${BUILD_TYPE}" = "release" ]; then
+    GRADLE_TASK="assembleArm32Release"
+  else
+    GRADLE_TASK="assembleArm32Debug"
+  fi
 else
-  GRADLE_TASK="assembleDebug"
-  APK_DIR="${ANDROID_DIR}/app/build/outputs/apk/debug"
+  if [ "${BUILD_TYPE}" = "release" ]; then
+    GRADLE_TASK="assembleStandardRelease"
+  else
+    GRADLE_TASK="assembleStandardDebug"
+  fi
+fi
+if [ "${BUILD_TYPE}" = "release" ]; then
+  APK_DIR="${ANDROID_DIR}/app/build/outputs/apk/${FLAVOR}/release"
+else
+  APK_DIR="${ANDROID_DIR}/app/build/outputs/apk/${FLAVOR}/debug"
 fi
 
 (
@@ -219,7 +247,7 @@ if [ -z "${APK_SRC}" ] || [ ! -f "${APK_SRC}" ]; then
 fi
 
 mkdir -p "${REPO_ROOT}/dist"
-APK_DEST="${REPO_ROOT}/dist/I2PChat-android-v${RELEASE_VERSION}-${BUILD_TYPE}.apk"
+APK_DEST="${REPO_ROOT}/dist/I2PChat-android-v${RELEASE_VERSION}-${APK_LABEL}.apk"
 cp -f "${APK_SRC}" "${APK_DEST}"
 
 file_sha256() {

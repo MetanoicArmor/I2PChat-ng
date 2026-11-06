@@ -27,9 +27,12 @@ From the **repository root** (needs JDK 17+, `ANDROID_HOME` / SDK, NDK):
 ./build-android.sh --debug              # default — signed with the debug keystore
 ./build-android.sh --release            # release APK (upload keystore via I2PCHAT_ANDROID_* env, else debug keystore)
 ./build-android.sh --debug --install    # build + adb install -r
+./build-android.sh --arm32 --release    # 32-bit sideload APK, no bundled i2pd
 ```
 
 Output: `dist/I2PChat-android-v<VERSION>-<debug|release>.apk` and a matching `.sha256` sidecar.
+
+`--arm32` writes `dist/I2PChat-android-v<VERSION>-arm32-<debug|release>.apk`. It is **armeabi-v7a only**, Android 8.0+ (minSdk 26), and does not ship `libi2pd.so`. The phone needs a separate i2pd with SAM on `127.0.0.1:7656`. Play Store still wants the 64-bit APK; this one is sideload only. It uses the same application id, so it replaces the 64-bit install.
 
 Bundled `libi2pd.so` for **arm64-v8a** and **x86_64** must exist under `app/src/main/jniLibs/` (checked into the tree). To rebuild them for 16 KiB pages:
 

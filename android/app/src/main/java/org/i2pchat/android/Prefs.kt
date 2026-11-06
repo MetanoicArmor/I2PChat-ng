@@ -34,7 +34,7 @@ data class RouterPrefs(
 
         fun load(appRoot: File): RouterPrefs {
             val path = file(appRoot)
-            if (!path.isFile) return RouterPrefs()
+            if (!path.isFile) return RouterPrefs().normalized()
             return try {
                 val raw = JSONObject(path.readText())
                 RouterPrefs(
@@ -49,13 +49,17 @@ data class RouterPrefs(
                     bundledAutoStart = raw.optBoolean("bundled_auto_start", false),
                 ).normalized()
             } catch (_: Exception) {
-                RouterPrefs()
+                RouterPrefs().normalized()
             }
         }
     }
 
     fun normalized(): RouterPrefs {
-        val backendOk = if (backend == "bundled") "bundled" else "system"
+        val backendOk = when {
+            !BuildConfig.BUNDLED_I2PD -> "system"
+            backend == "bundled" -> "bundled"
+            else -> "system"
+        }
         val systemHost = if (systemSamHost == "localhost" || systemSamHost.startsWith("127.")) {
             systemSamHost.ifBlank { "127.0.0.1" }
         } else {

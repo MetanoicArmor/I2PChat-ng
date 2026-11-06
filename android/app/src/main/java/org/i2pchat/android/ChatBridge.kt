@@ -111,7 +111,7 @@ data class ChatUiState(
     val tofu: TofuPrompt? = null,
     val error: String = "",
     val theme: String = "dark",
-    val router: RouterPrefs = RouterPrefs(),
+    val router: RouterPrefs = RouterPrefs().normalized(),
     val uiPrefs: UiPrefs = UiPrefs(),
     val blindboxReady: Boolean = false,
     val replicaSource: String = "",
@@ -358,7 +358,11 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 val routerStatus = I2pdForegroundService.readStatus(appRoot)
                 failStart(
                     "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus " +
-                        "Try Router settings → Restart bundled i2pd, or wait a minute and Open again.",
+                        if (router.usingBundled) {
+                            "Try Router settings → Restart bundled i2pd, or wait a minute and Open again."
+                        } else {
+                            "Start i2pd on this phone and check Router settings → external SAM ${router.samHost}:${router.samPort}."
+                        },
                 )
                 return@launch
             }
