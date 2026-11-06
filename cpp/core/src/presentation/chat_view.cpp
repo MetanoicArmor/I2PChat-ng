@@ -26,6 +26,43 @@ std::string lowered(std::string_view text) {
     return out;
 }
 
+bool contains_ci(std::string_view haystack, std::string_view needle) {
+    return lowered(haystack).find(lowered(needle)) != std::string::npos;
+}
+
+/// Boost.Asio appends the source location to `system_error::what()`, which is
+/// a compiler path, not something to show on the router screen.
+std::string friendly_transport_reason(std::string_view raw) {
+    std::string_view text = raw;
+    const auto bracket = text.find(" [");
+    if (bracket != std::string_view::npos) {
+        text = text.substr(0, bracket);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    const bool refused = contains_ci(text, "refused") ||
+                         raw.find("system:111") != std::string_view::npos ||
+                         raw.find("system:61 ") != std::string_view::npos ||
+                         raw.find("system:61]") != std::string_view::npos ||
+                         raw.find("system:10061") != std::string_view::npos;
+    if (refused) {
+        return "router is not running";
+    }
+    if (contains_ci(text, "timed out") || contains_ci(text, "timeout")) {
+        return "router did not answer";
+    }
+    if (contains_ci(text, "unreachable") || contains_ci(text, "no route")) {
+        return "router was not found";
+    }
+    if (text.size() > 160) {
+        std::string out(text.substr(0, 157));
+        out += "...";
+        return out;
+    }
+    return std::string(text);
+}
+
 }  // namespace
 
 std::string short_address(std::string_view addr) {
@@ -172,7 +209,7 @@ std::vector<InfoRow> status_rows(const StatusInput& input) {
                                                         : input.local_addr});
     std::string transport(session::transport_state_name(input.transport));
     if (!input.transport_reason.empty()) {
-        transport += " (" + input.transport_reason + ")";
+        transport += " (" + friendly_transport_reason(input.transport_reason) + ")";
     }
     rows.push_back({"transport", transport});
     rows.push_back({"connected", std::to_string(input.live_peers.size())});

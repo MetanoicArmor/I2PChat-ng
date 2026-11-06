@@ -195,6 +195,22 @@ TEST_CASE("status rows describe the session") {
     CHECK(value_of("profile") == "default");
     CHECK(value_of("address") == kAlice);
     CHECK(value_of("transport") == "ready");
+
+    StatusInput refused = input;
+    refused.transport = session::TransportState::Failed;
+    refused.transport_reason =
+        "Connection refused [system:111 at /home/runner/work/I2PChat-ng/"
+        "cpp/build-release/_deps/boost-src/libs/asio/include/boost/asio/detail/"
+        "reactive_socket_connect_op.hpp:97:5 in function 'do_complete']";
+    const auto refused_value = [&] {
+        for (const InfoRow& row : status_rows(refused)) {
+            if (row.name == "transport") {
+                return row.value;
+            }
+        }
+        return std::string("(missing)");
+    }();
+    CHECK(refused_value == "failed (router is not running)");
     CHECK(value_of("connected") == "1");
     CHECK(value_of("selected") == "bbbbbbbb…");
     CHECK(value_of("contacts") == "4");
