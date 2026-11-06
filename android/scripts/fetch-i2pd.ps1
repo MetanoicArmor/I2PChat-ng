@@ -4,7 +4,7 @@
 #
 # Do not run align-elf-16k.py on these libs — see android/README.md.
 param(
-    [string]$Version = "2.61.0"
+    [string]$Version = "3.0.0"
 )
 
 $ErrorActionPreference = "Stop"

@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # Refresh bundled Android i2pd JNI libs + certificates from PurpleI2P APKs.
 #
-# NOTE: Do not post-process with align-elf-16k.py. Official libi2pd.so is still
-# linked for 4 KiB pages; faking p_align breaks Android 15+ loading. Keep
-# android:pageSizeCompat="enabled" until PurpleI2P ships a real 16 KiB build
-# (or we rebuild i2pd-android with NDK r28 + APP_SUPPORT_FLEXIBLE_PAGE_SIZES).
+# NOTE: Do not post-process with align-elf-16k.py. Official i2pd-android 3.0.0
+# APKs are already 16 KiB aligned; bumping p_align on an older 4 KiB library
+# breaks Android 15+ loading.
 #
 # Usage:
 #   ./android/scripts/fetch-i2pd.sh [version]
-# Default version: 2.61.0
+# Default version: 3.0.0
 set -euo pipefail
 
-VERSION="${1:-2.61.0}"
+VERSION="${1:-3.0.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP="${TMPDIR:-/tmp}/i2pd-android-bin-$$"
 ARM_DEST="${ROOT}/android/app/src/main/jniLibs/arm64-v8a/libi2pd.so"
@@ -41,7 +40,7 @@ apk = Path(r"""${apk}""")
 dest = Path(r"""${dest}""")
 dest.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(apk) as z:
-    name = f"lib/{abi}/libi2pd.so"
+    name = "lib/${abi}/libi2pd.so"
     try:
         data = z.read(name)
     except KeyError as exc:

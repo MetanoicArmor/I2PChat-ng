@@ -34,17 +34,17 @@ Output: `dist/I2PChat-android-v<VERSION>-<debug|release>.apk` and a matching `.s
 
 `--arm32` writes `dist/I2PChat-android-v<VERSION>-arm32-<debug|release>.apk`. It is **armeabi-v7a only**, Android 8.0+ (minSdk 26), and does not ship `libi2pd.so`. The phone needs a separate i2pd with SAM on `127.0.0.1:7656`. Play Store still wants the 64-bit APK; this one is sideload only. It uses the same application id, so it replaces the 64-bit install.
 
-Bundled `libi2pd.so` for **arm64-v8a** and **x86_64** must exist under `app/src/main/jniLibs/` (checked into the tree). To rebuild them for 16 KiB pages:
+Bundled `libi2pd.so` for **arm64-v8a** and **x86_64** must exist under `app/src/main/jniLibs/` (checked into the tree). Refresh them from the official i2pd-android APKs:
 
 ```bash
-./android/scripts/build-i2pd-16k.sh
+./android/scripts/fetch-i2pd.sh
 ```
 
 ## I2P router
 
 The core talks SAM on loopback, same as desktop.
 
-- **Bundled i2pd (default):** PurpleI2P **2.61.0** JNI `libi2pd.so`, rebuilt with **NDK r28** for **16 KiB** ELF alignment (`./android/scripts/build-i2pd-16k.sh`), started **in-process in a separate `:i2pd` service**. Open waits for SAM on `127.0.0.1:17656`. Chat native code is also NDK r28 / 16 KiB.
+- **Bundled i2pd (default):** PurpleI2P **3.0.0** JNI `libi2pd.so` from the official APKs (already **16 KiB** aligned; refresh with `./android/scripts/fetch-i2pd.sh`), started **in-process in a separate `:i2pd` service**. Open waits for SAM on `127.0.0.1:17656`. Chat native code is also NDK r28 / 16 KiB.
 - **External SAM:** switch to system router in Settings → I2P router (`127.0.0.1:7656`).
 
 I2P on a phone cannot hide in the background; the persistent notification is required so tunnels are not killed.

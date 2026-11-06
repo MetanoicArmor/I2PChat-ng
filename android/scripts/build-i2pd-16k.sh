@@ -32,9 +32,9 @@ echo "==> NDK ${NDK} (host ${HOST_TAG})"
 echo "==> Source ${SRC}"
 
 if [ ! -d "${SRC}/binary/jni/i2pd/libi2pd" ] || [ ! -d "${SRC}/binary/jni/openssl" ]; then
-  echo "==> Cloning i2pd-android 2.61.0 with submodules"
+  echo "==> Cloning i2pd-android 3.0.0 with submodules"
   rm -rf "${SRC}"
-  git clone --depth 1 --branch 2.61.0 https://github.com/PurpleI2P/i2pd-android.git "${SRC}"
+  git clone --depth 1 --branch 3.0.0 https://github.com/PurpleI2P/i2pd-android.git "${SRC}"
   git -C "${SRC}" submodule update --init --depth 1 --recursive
 fi
 

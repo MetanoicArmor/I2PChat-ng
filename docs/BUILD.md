@@ -21,7 +21,7 @@ All three scripts call [`scripts/build_cpp_binaries.sh`](../scripts/build_cpp_bi
 
 **Linux script** no longer uses uv/PyInstaller. It stages ELF deps with `ldd`, copies Qt `platforms` plugins when `qtpaths6` is available, then **`appimagetool`** (pinned SHA-256). TUI zip is `i2pchat-tui` + `usr/bin/I2PChat-tui` + `usr/lib`.
 
-**Bundled router version:** portable payloads still track i2pd **2.61.0** via [i2pchat-bundled-i2pd](https://github.com/MetanoicArmor/i2pchat-bundled-i2pd) (Linux from Ubuntu noble → Boost **1.83** SONAME).
+**Bundled router version:** portable payloads track i2pd **3.0.0** via [i2pchat-bundled-i2pd](https://github.com/MetanoicArmor/i2pchat-bundled-i2pd) (Linux from Ubuntu noble → Boost **1.83** SONAME). Android `libi2pd.so` is the official **3.0.0** JNI build (`./android/scripts/fetch-i2pd.sh`).
 
 **Optional bundled router staging:** portable builds can embed `i2pd` if local files are staged under `vendor/i2pd/`. Build scripts now auto-try [`scripts/ensure_bundled_i2pd.sh`](../scripts/ensure_bundled_i2pd.sh), which resolves in this order:
 
