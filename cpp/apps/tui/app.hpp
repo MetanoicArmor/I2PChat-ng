@@ -57,14 +57,16 @@ private:
     void on_submit();
     void handle_line(std::string line);
     void handle_command(const presentation::Command& command);
+    void use_sam(std::string host, std::uint16_t port);
+    void restart_session();
     void select_peer(std::string addr);
     [[nodiscard]] std::string resolve_peer(std::string_view token) const;
 
     void append_local(presentation::LineKind kind, std::string text);
     void refresh_rows();
     [[nodiscard]] presentation::StatusInput status_input() const;
-    [[nodiscard]] ftxui::Element render_chat() const;
-    [[nodiscard]] ftxui::Element render_info_screen() const;
+    [[nodiscard]] ftxui::Elements chat_rows() const;
+    [[nodiscard]] ftxui::Elements info_rows() const;
     [[nodiscard]] ftxui::Element render_trust_modal() const;
 
     session::TrustDecision on_trust_prompt(session::TrustPrompt prompt,
@@ -83,6 +85,8 @@ private:
     Screen screen_kind_ = Screen::Chat;
     std::string selected_;
     std::string draft_;
+    /// Caret in `draft_`. The input shows this, so Tab completion can move it.
+    int draft_cursor_ = 0;
     std::string status_reason_;
     session::TransportState transport_ = session::TransportState::Stopped;
     std::vector<presentation::ChatLine> lines_;

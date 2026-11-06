@@ -9,7 +9,10 @@
 
 #include "i2pchat/bytes.hpp"
 
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 #include "i2pchat/groups/store.hpp"
 #include "i2pchat/presentation/commands.hpp"
@@ -25,7 +28,11 @@ namespace {
 
 std::string help_text() {
     std::ostringstream out;
-    out << "Slash commands. Tab completes. F1–F8 switch screens.\n\n";
+    out << "Slash commands. Tab completes and leaves the cursor at the end.\n"
+        << "Mouse wheel, PgUp and PgDn scroll the window. Up and Down scroll "
+           "when the cursor is at the edge of the line.\n"
+        << "/sam <host> [port] sets the SAM address.\n"
+        << "F1–F8 switch screens.\n\n";
     for (const presentation::CommandHelp& entry : presentation::command_help()) {
         out << "  " << entry.usage << "\n      " << entry.summary << "\n";
     }
@@ -586,6 +593,32 @@ void TuiApp::handle_command(const presentation::Command& command) {
         case Kind::Settings:
             screen_kind_ = Screen::Settings;
             return;
+        case Kind::Sam: {
+            if (command.rest.empty()) {
+                append_local(presentation::LineKind::System,
+                             "SAM is " + options_.sam_host + ":" +
+                                 std::to_string(options_.sam_port) +
+                                 ". Usage: /sam <host> [port], /sam <host:port>, or /sam <port>");
+                screen_kind_ = Screen::Settings;
+                return;
+            }
+            const SamEndpointSpec spec =
+                parse_sam_endpoint(command.rest, options_.sam_host, options_.sam_port);
+            if (!spec.error.empty()) {
+                append_local(presentation::LineKind::Error, spec.error);
+                return;
+            }
+            if (!sam_host_permitted(spec.host)) {
+                append_local(presentation::LineKind::Error,
+                             "Refusing SAM host " + spec.host +
+                                 ". Set I2PCHAT_ALLOW_REMOTE_SAM=1 to use a router "
+                                 "that is not on this machine.");
+                return;
+            }
+            use_sam(spec.host, spec.port);
+            screen_kind_ = Screen::Settings;
+            return;
+        }
         case Kind::Profiles: {
             const std::filesystem::path root = options_.app_root / "profiles";
             std::string listed = "Profiles in " + root.string() + ":";
@@ -609,15 +642,252 @@ void TuiApp::handle_command(const presentation::Command& command) {
 }
 
 void TuiApp::on_submit() {
-    std::string line = draft_;
+    std::string line = std::move(draft_);
     draft_.clear();
+    draft_cursor_ = 0;
     if (line.empty()) {
         return;
     }
     handle_line(std::move(line));
 }
 
-Element TuiApp::render_chat() const {
+void TuiApp::use_sam(std::string host, std::uint16_t port) {
+    options_.sam_host = std::move(host);
+    options_.sam_port = port;
+    options_.bundled_router.clear();
+    try {
+        save_saved_sam(options_.app_root, options_.sam_host, options_.sam_port);
+    } catch (const std::exception& error) {
+        append_local(presentation::LineKind::Error,
+                     std::string("Could not save the SAM address: ") + error.what());
+    }
+    append_local(presentation::LineKind::System,
+                 "SAM set to " + options_.sam_host + ":" + std::to_string(options_.sam_port) +
+                     ". Reconnecting.");
+    restart_session();
+}
+
+void TuiApp::restart_session() {
+    stop_core();
+    core_.restart();
+    {
+        std::lock_guard lock(mutex_);
+        local_addr_.clear();
+        status_reason_.clear();
+        transport_ = session::TransportState::Stopped;
+    }
+    start_core();
+}
+
+namespace {
+
+/// The message pane.
+///
+/// `yframe` only follows the focused element, and the focused element is the
+/// compose line, so the window stayed pinned to the top and ignored the wheel.
+/// This pane keeps its own offset and draws just the rows that fit.
+class ScrollPane : public ComponentBase {
+public:
+    ScrollPane(std::function<Elements()> rows, const Screen* screen_kind,
+               ScreenInteractive* screen)
+        : rows_(std::move(rows)), screen_kind_(screen_kind), screen_(screen) {}
+
+    [[nodiscard]] bool following() const { return stick_bottom_; }
+
+    bool Focusable() const override { return true; }
+
+    bool OnEvent(Event event) override {
+        if (event.is_mouse()) {
+            return OnMouse(event);
+        }
+        const int page = std::max(1, viewport_ - 1);
+        if (event == Event::ArrowUp || event == Event::ArrowUpCtrl) {
+            return Nudge(-1);
+        }
+        if (event == Event::ArrowDown || event == Event::ArrowDownCtrl) {
+            return Nudge(1);
+        }
+        if (event == Event::PageUp) {
+            return Nudge(-page);
+        }
+        if (event == Event::PageDown) {
+            return Nudge(page);
+        }
+        if (event == Event::Home) {
+            stick_bottom_ = false;
+            scroll_ = 0;
+            return true;
+        }
+        if (event == Event::End) {
+            stick_bottom_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    Element OnRender() override {
+        if (screen_kind_ != nullptr && *screen_kind_ != seen_) {
+            seen_ = *screen_kind_;
+            stick_bottom_ = seen_ == Screen::Chat;
+            if (!stick_bottom_) {
+                scroll_ = 0;
+            }
+        }
+
+        Elements all = rows_ ? rows_() : Elements{};
+        const int total = static_cast<int>(all.size());
+        viewport_ = Viewport();
+        const int max_scroll = std::max(0, total - viewport_);
+        if (stick_bottom_ || scroll_ > max_scroll) {
+            scroll_ = max_scroll;
+        }
+        if (scroll_ < 0) {
+            scroll_ = 0;
+        }
+        if (scroll_ == max_scroll) {
+            stick_bottom_ = true;
+        }
+
+        Elements visible;
+        if (all.empty()) {
+            visible.push_back(text(" ") | dim);
+        } else {
+            const int end = std::min(total, scroll_ + viewport_);
+            visible.reserve(static_cast<std::size_t>(end - scroll_));
+            for (int index = scroll_; index < end; ++index) {
+                visible.push_back(std::move(all[static_cast<std::size_t>(index)]));
+            }
+        }
+
+        const int used = viewport_;
+        if (screen_ != nullptr) {
+            // The viewport is only known after layout. One extra frame picks up
+            // the real height (and a resize) without spinning.
+            if (!primed_) {
+                primed_ = true;
+                screen_->RequestAnimationFrame();
+            }
+            screen_->Post(Task{[this, used] {
+                if (Viewport() != used) {
+                    screen_->RequestAnimationFrame();
+                }
+            }});
+        }
+        return vbox(std::move(visible)) | yflex | reflect(box_);
+    }
+
+private:
+    bool Nudge(int delta) {
+        if (delta < 0) {
+            stick_bottom_ = false;
+        }
+        scroll_ = std::max(0, scroll_ + delta);
+        return true;
+    }
+
+    bool OnMouse(Event& event) {
+        if (!BoxReady() || !box_.Contain(event.mouse().x, event.mouse().y)) {
+            return false;
+        }
+        if (event.mouse().button == Mouse::WheelUp) {
+            return Nudge(-3);
+        }
+        if (event.mouse().button == Mouse::WheelDown) {
+            return Nudge(3);
+        }
+        if (event.mouse().button == Mouse::Left && event.mouse().motion == Mouse::Pressed) {
+            TakeFocus();
+            return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool BoxReady() const {
+        return box_.x_min != 0 || box_.x_max != 0 || box_.y_min != 0 || box_.y_max != 0;
+    }
+
+    [[nodiscard]] int Viewport() const {
+        if (BoxReady()) {
+            return std::max(1, box_.y_max - box_.y_min + 1);
+        }
+        // Header, two separators, the compose line and the footer.
+        return std::max(1, Terminal::Size().dimy - 5);
+    }
+
+    std::function<Elements()> rows_;
+    const Screen* screen_kind_ = nullptr;
+    ScreenInteractive* screen_ = nullptr;
+    Screen seen_ = Screen::Chat;
+    Box box_;
+    int scroll_ = 0;
+    int viewport_ = 1;
+    bool stick_bottom_ = true;
+    bool primed_ = false;
+};
+
+/// Compose line plus the scroll pane. Arrow keys stay in the line until they
+/// have nowhere left to go, and the wheel always scrolls the window under it.
+class CommandShell : public ComponentBase {
+public:
+    CommandShell(Component pane, Component input)
+        : pane_(std::move(pane)), input_(std::move(input)) {
+        Add(pane_);
+        Add(input_);
+    }
+
+    bool Focusable() const override { return true; }
+
+    Component ActiveChild() override { return active_ == 0 ? pane_ : input_; }
+
+    void SetActiveChild(ComponentBase* child) override {
+        if (child == pane_.get()) {
+            active_ = 0;
+        } else if (child == input_.get()) {
+            active_ = 1;
+        }
+    }
+
+    bool OnEvent(Event event) override {
+        if (event.is_mouse()) {
+            const bool wheel = event.mouse().button == Mouse::WheelUp ||
+                               event.mouse().button == Mouse::WheelDown;
+            if (wheel) {
+                if (pane_->OnEvent(event)) {
+                    return true;
+                }
+                return input_->OnEvent(event);
+            }
+            if (input_->OnEvent(event)) {
+                return true;
+            }
+            return pane_->OnEvent(event);
+        }
+        if (active_ == 0 && event.is_character()) {
+            input_->TakeFocus();
+            return input_->OnEvent(event);
+        }
+        const Component target = active_ == 0 ? pane_ : input_;
+        if (target->OnEvent(event)) {
+            return true;
+        }
+        if (active_ == 1 &&
+            (event == Event::ArrowUp || event == Event::ArrowDown || event == Event::PageUp ||
+             event == Event::PageDown || event == Event::ArrowUpCtrl ||
+             event == Event::ArrowDownCtrl)) {
+            return pane_->OnEvent(event);
+        }
+        return false;
+    }
+
+private:
+    Component pane_;
+    Component input_;
+    int active_ = 1;
+};
+
+}  // namespace
+
+Elements TuiApp::chat_rows() const {
     Elements body;
     body.reserve(lines_.size());
     for (const presentation::ChatLine& line : lines_) {
@@ -640,10 +910,10 @@ Element TuiApp::render_chat() const {
     if (body.empty()) {
         body.push_back(text("No messages yet. /connect <address> or /contacts.") | dim);
     }
-    return vbox(std::move(body)) | yframe | yflex;
+    return body;
 }
 
-Element TuiApp::render_info_screen() const {
+Elements TuiApp::info_rows() const {
     Elements rows;
     auto add_heading = [&](std::string_view title) {
         rows.push_back(text(std::string(title)) | bold | color(Color::Cyan));
@@ -737,17 +1007,34 @@ Element TuiApp::render_info_screen() const {
             rows.push_back(text("app-root: " + options_.app_root.string()));
             rows.push_back(text("SAM: " + options_.sam_host + ":" +
                                 std::to_string(options_.sam_port)));
+            rows.push_back(text("Set it with /sam <host> [port], /sam <host:port>, or /sam <port>") |
+                           dim);
+            rows.push_back(text("Saved for the next start. A remote host needs "
+                                "I2PCHAT_ALLOW_REMOTE_SAM=1.") |
+                           dim);
             rows.push_back(text(std::string("replicas: ") +
                                 (options_.blindbox_over_sam ? "over I2P" : "direct TCP")));
             break;
-        case Screen::Help:
+        case Screen::Help: {
             add_heading("Help");
-            rows.push_back(paragraph(help_text()));
+            const std::string help = help_text();
+            std::size_t start = 0;
+            while (start <= help.size()) {
+                const std::size_t newline = help.find('\n', start);
+                const std::size_t count =
+                    newline == std::string::npos ? std::string::npos : newline - start;
+                rows.push_back(text(help.substr(start, count)));
+                if (newline == std::string::npos) {
+                    break;
+                }
+                start = newline + 1;
+            }
             break;
+        }
         case Screen::Chat:
             break;
     }
-    return vbox(std::move(rows)) | yframe | yflex;
+    return rows;
 }
 
 Element TuiApp::render_trust_modal() const {
@@ -771,22 +1058,32 @@ int TuiApp::run() {
 
     InputOption input_opt = InputOption::Default();
     input_opt.multiline = false;
-    input_opt.placeholder = "message or /command";
+    input_opt.placeholder = "message or /command · Tab completes · PgUp/PgDn scrolls";
+    input_opt.cursor_position = &draft_cursor_;
     input_opt.on_enter = [this] { on_submit(); };
     Component input = Input(&draft_, input_opt);
 
-    Component layout = Renderer(input, [this, input] {
+    auto pane = Make<ScrollPane>(
+        [this] {
+            return screen_kind_ == Screen::Chat ? chat_rows() : info_rows();
+        },
+        &screen_kind_, &screen_);
+    Component shell = Make<CommandShell>(pane, input);
+
+    Component layout = Renderer(shell, [this, input, pane] {
         std::lock_guard lock(mutex_);
-        const std::string header = presentation::status_line(status_input());
-        Element main = screen_kind_ == Screen::Chat ? render_chat() : render_info_screen();
+        std::string header = "I2PChat  " + presentation::status_line(status_input());
+        if (!pane->following()) {
+            header += "    scrolled — PgDn returns to the end";
+        }
         Element page = vbox({
-            text("I2PChat  " + header) | bold | inverted,
+            text(header) | bold | inverted,
             separator(),
-            main,
+            pane->Render(),
             separator(),
-            hbox({text("> ") | bold, input->Render()}),
-            text("F1 chat  F2 contacts  F3 groups  F4 router  F5 backups  "
-                 "F6 diagnostics  F7 settings  F8 help  /quit") |
+            hbox({text("> ") | bold, input->Render() | xflex}),
+            text("F1 chat F2 contacts F3 groups F4 router F5 backups "
+                 "F6 diag F7 settings F8 help") |
                 dim,
         });
         if (trust_open_) {
@@ -845,33 +1142,14 @@ int TuiApp::run() {
             return true;
         }
         if (event == Event::Tab) {
-            const presentation::Command command = presentation::parse_command(draft_);
-            if (draft_.empty() || draft_.front() != '/') {
+            const presentation::TabCompletion done = presentation::complete_line(draft_);
+            if (!done.applied) {
                 return false;
             }
-            const std::string prefix = command.name.empty() && draft_ == "/"
-                                           ? std::string{}
-                                           : (command.name.empty() ? draft_.substr(1)
-                                                                   : command.name);
-            const std::vector<std::string> matches =
-                presentation::complete_command(prefix);
-            if (matches.size() == 1) {
-                draft_ = "/" + matches.front() + " ";
-                return true;
-            }
-            if (!matches.empty()) {
-                append_local(presentation::LineKind::System,
-                             "Matches: " + [&] {
-                                 std::string joined;
-                                 for (const std::string& name : matches) {
-                                     if (!joined.empty()) {
-                                         joined += " ";
-                                     }
-                                     joined += "/" + name;
-                                 }
-                                 return joined;
-                             }());
-                return true;
+            draft_ = done.text;
+            draft_cursor_ = done.cursor;
+            if (!done.notice.empty()) {
+                append_local(presentation::LineKind::System, done.notice);
             }
             return true;
         }

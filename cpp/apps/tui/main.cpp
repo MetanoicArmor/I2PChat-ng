@@ -27,8 +27,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    i2pchat::tui::Options options = parsed.options;
+    if (!options.sam_overridden) {
+        const i2pchat::tui::SavedSam saved = i2pchat::tui::load_saved_sam(options.app_root);
+        if (saved.found && i2pchat::tui::sam_host_permitted(saved.host)) {
+            options.sam_host = saved.host;
+            options.sam_port = saved.port;
+        } else if (saved.found) {
+            std::cerr << "i2pchat-tui: ignoring saved SAM host " << saved.host
+                      << " (set I2PCHAT_ALLOW_REMOTE_SAM=1 to allow it)\n";
+        }
+    }
+
     try {
-        i2pchat::tui::TuiApp app(parsed.options);
+        i2pchat::tui::TuiApp app(std::move(options));
         return app.run();
     } catch (const std::exception& error) {
         std::cerr << "i2pchat-tui: " << error.what() << "\n";

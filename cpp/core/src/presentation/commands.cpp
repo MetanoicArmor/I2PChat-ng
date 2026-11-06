@@ -17,7 +17,7 @@ struct Entry {
 
 /// The command table. Order is the order `/help` prints, which is grouped by
 /// what a user is doing rather than alphabetically.
-const std::array<Entry, 30> kCommands{{
+const std::array<Entry, 31> kCommands{{
     {CommandKind::Help, "help", "/help", "List every command"},
     {CommandKind::Status, "status", "/status", "Transport, peers and offline queue"},
     {CommandKind::Quit, "quit", "/quit", "Close the client"},
@@ -68,6 +68,8 @@ const std::array<Entry, 30> kCommands{{
     {CommandKind::Router, "router", "/router", "Bundled router status"},
     {CommandKind::Diagnostics, "diagnostics", "/diagnostics", "Diagnostics screen"},
     {CommandKind::Settings, "settings", "/settings", "Settings screen"},
+    {CommandKind::Sam, "sam", "/sam <host> [port]",
+     "Use this SAM router (host, host:port, or a port) and reconnect"},
     {CommandKind::Profiles, "profiles", "/profiles", "List profiles on this machine"},
     {CommandKind::Group, "group", "/group <subcommand>", "Group conversations"},
 }};
@@ -201,6 +203,59 @@ std::vector<std::string> complete_command(std::string_view prefix) {
     }
     std::sort(matches.begin(), matches.end());
     return matches;
+}
+
+TabCompletion complete_line(std::string_view draft) {
+    TabCompletion result;
+    result.text = std::string(draft);
+    result.cursor = static_cast<int>(result.text.size());
+
+    const auto begin = draft.find_first_not_of(" \t");
+    if (begin == std::string_view::npos || draft[begin] != '/') {
+        return result;
+    }
+    // Arguments are already being typed; completing the command word would
+    // throw away the address or the path.
+    if (draft.find_first_of(" \t", begin) != std::string_view::npos) {
+        return result;
+    }
+
+    const std::string_view token = draft.substr(begin);
+    const std::string prefix = token.size() <= 1 ? std::string{} : std::string(token.substr(1));
+    const std::vector<std::string> matches = complete_command(prefix);
+    result.applied = true;
+    const std::string leading(draft.substr(0, begin));
+
+    if (matches.empty()) {
+        result.notice = "No matching command.";
+        return result;
+    }
+
+    std::string shared = matches.front();
+    for (const std::string& name : matches) {
+        while (!shared.empty() && name.compare(0, shared.size(), shared) != 0) {
+            shared.pop_back();
+        }
+    }
+
+    if (matches.size() == 1) {
+        result.text = leading + "/" + matches.front() + " ";
+        result.cursor = static_cast<int>(result.text.size());
+        return result;
+    }
+
+    // Several matches. Extend to the shared prefix, but never delete what was
+    // already typed when the matches diverge before that point.
+    if (shared.size() >= prefix.size()) {
+        result.text = leading + "/" + shared;
+    }
+    result.cursor = static_cast<int>(result.text.size());
+    result.notice = "Matches:";
+    for (const std::string& name : matches) {
+        result.notice += " /";
+        result.notice += name;
+    }
+    return result;
 }
 
 }  // namespace i2pchat::presentation

@@ -93,6 +93,30 @@ TEST_CASE("completion narrows as the user types") {
     }
     CHECK(complete_command("/hel") == std::vector<std::string>{"help"});
     CHECK(complete_command("zzz").empty());
+
+    const TabCompletion help = complete_line("/hel");
+    CHECK(help.applied);
+    CHECK(help.text == "/help ");
+    CHECK(help.cursor == static_cast<int>(help.text.size()));
+    CHECK(help.notice.empty());
+
+    const TabCompletion ambiguous = complete_line("/con");
+    CHECK(ambiguous.applied);
+    CHECK(ambiguous.text == "/con");
+    CHECK(ambiguous.cursor == 4);
+    CHECK(ambiguous.notice.find("/connect") != std::string::npos);
+
+    const TabCompletion extended = complete_line("/hel");
+    CHECK(extended.cursor == static_cast<int>(extended.text.size()));
+
+    CHECK_FALSE(complete_line("hello").applied);
+    CHECK_FALSE(complete_line("/connect bob").applied);
+
+    const TabCompletion none = complete_line("/zzz");
+    CHECK(none.applied);
+    CHECK(none.text == "/zzz");
+    CHECK(none.cursor == 4);
+    CHECK_FALSE(none.notice.empty());
     // An empty prefix offers everything, which is what an empty slash shows.
     CHECK(complete_command("").size() == command_help().size());
 }

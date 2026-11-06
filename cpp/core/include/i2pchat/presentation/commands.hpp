@@ -57,6 +57,8 @@ enum class CommandKind {
     Router,
     Diagnostics,
     Settings,
+    /// Point the client at a SAM bridge (`/sam host [port]`).
+    Sam,
     Profiles,
     Group,
 };
@@ -104,5 +106,21 @@ struct CommandHelp {
 /// Commands whose name starts with `prefix` (without the slash), for tab
 /// completion. Sorted, and empty for a prefix nothing matches.
 [[nodiscard]] std::vector<std::string> complete_command(std::string_view prefix);
+
+/// What Tab should do to the compose line.
+///
+/// `applied` is false when the line is ordinary text (or a command that
+/// already has arguments): the caret stays where the editor left it.
+/// Otherwise `text` is the replacement and `cursor` is the caret, which is
+/// the end of the completed command so the next character is typed after it.
+struct TabCompletion {
+    bool applied = false;
+    std::string text;
+    int cursor = 0;
+    /// Set when several commands match, or when none do.
+    std::string notice;
+};
+
+[[nodiscard]] TabCompletion complete_line(std::string_view draft);
 
 }  // namespace i2pchat::presentation
