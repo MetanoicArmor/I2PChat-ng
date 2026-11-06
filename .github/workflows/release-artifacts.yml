@@ -3,7 +3,8 @@
 # Android: release APK (arm64 + x86_64) and armeabi-v7a sideload APK (no bundled i2pd).
 #
 # Same zip set as historical PyQt6 releases, plus Android.
-# Debian packages still come from "Release Linux packages" after zips land.
+# Jobs upload into a draft. publish-release marks it public only after
+# verify-desktop-assets sees the full zip set, which starts "Release Linux packages".
 name: Release artifacts
 
 on:
@@ -743,3 +744,31 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           bash scripts/verify_github_release_assets.sh --skip-deb --skip-gpg "${TAG}"
+
+  publish-release:
+    needs: [verify-desktop-assets]
+    if: ${{ success() && (github.event_name != 'workflow_dispatch' || github.event.inputs.upload != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+          raw="$(trim "${{ github.event.inputs.tag || github.ref_name }}")"
+          raw="${raw#v}"
+          raw="${raw#.}"
+          if ! echo "$raw" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tag must be semver X.Y.Z, got: $raw" >&2
+            exit 1
+          fi
+          TAG="v${raw}"
+          NOTES="docs/releases/RELEASE_${raw}.md"
+          args=(release edit "$TAG" --repo "${{ github.repository }}" --draft=false)
+          if [ -f "$NOTES" ]; then
+            args+=(--notes-file "$NOTES")
+          fi
+          gh "${args[@]}"
+          echo "Published ${TAG}"
