@@ -44,8 +44,23 @@ if [ -n "${VCPKG_TARGET_TRIPLET:-}" ]; then
   TOOLCHAIN+=(-DVCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET}")
 fi
 
+# Homebrew upgrades delete the previous Cellar directory. pkg-config imported
+# targets keep that absolute path in the CMake cache, so the next configure
+# fails until the cache is discarded.
+FRESH=()
+if [ -f "${BUILD_DIR}/CMakeCache.txt" ]; then
+  while IFS= read -r cached; do
+    if [ ! -e "${cached}" ]; then
+      echo "==> CMake cache references missing path ${cached}; reconfiguring from scratch"
+      FRESH=(--fresh)
+      break
+    fi
+  done < <(grep -oE '/(opt/homebrew|usr/local)/Cellar/[^"[:space:];]*' "${BUILD_DIR}/CMakeCache.txt" | sort -u)
+fi
+
 echo "==> CMake configure (${BUILD_DIR})"
-set -- cmake -S "${CPP_SRC}" -B "${BUILD_DIR}" \
+# ${arr[@]+...} keeps `set -u` quiet on bash 3.2 when the array is empty.
+set -- cmake ${FRESH[@]+"${FRESH[@]}"} -S "${CPP_SRC}" -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}" \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
   -DI2PCHAT_BUILD_TESTS=OFF \
