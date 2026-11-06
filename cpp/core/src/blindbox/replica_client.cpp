@@ -15,6 +15,7 @@
 #include <cctype>
 #include <charconv>
 #include <deque>
+#include <tuple>
 #include <utility>
 
 #include "i2pchat/crypto.hpp"
@@ -117,21 +118,24 @@ public:
             co_return std::nullopt;
         }
         if (timeout) {
-            auto [error, outcome] = co_await channel_.async_receive(
+            // Named tuple, not a structured binding: GCC -Wmaybe-uninitialized
+            // (and -Werror) false-positives on the anonymous binding of a
+            // co_await as_tuple result.
+            auto received = co_await channel_.async_receive(
                 asio::cancel_after(*timeout, asio::as_tuple(asio::use_awaitable)));
-            if (error) {
+            if (std::get<0>(received)) {
                 co_return std::nullopt;
             }
             --outstanding_;
-            co_return outcome;
+            co_return std::get<1>(std::move(received));
         }
-        auto [error, outcome] =
+        auto received =
             co_await channel_.async_receive(asio::as_tuple(asio::use_awaitable));
-        if (error) {
+        if (std::get<0>(received)) {
             co_return std::nullopt;
         }
         --outstanding_;
-        co_return outcome;
+        co_return std::get<1>(std::move(received));
     }
 
     /// Cancel whatever is still running and wait for it to unwind.
@@ -141,13 +145,13 @@ public:
             signal.emit(asio::cancellation_type::all);
         }
         while (outstanding_ > 0) {
-            auto [error, outcome] =
+            auto received =
                 co_await channel_.async_receive(asio::as_tuple(asio::use_awaitable));
-            if (error) {
+            if (std::get<0>(received)) {
                 break;
             }
             --outstanding_;
-            cancelled.push_back(outcome.index);
+            cancelled.push_back(std::get<1>(received).index);
         }
         co_return cancelled;
     }
