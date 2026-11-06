@@ -73,6 +73,7 @@ for arch in x86_64 aarch64; do
   need "I2PChat-linux-${arch}-tui-v${VER}.zip"
 done
 need "I2PChat-android-v${VER}.apk"
+need "I2PChat-android-v${VER}-arm32-release.apk"
 
 # Checksums + signature
 need "SHA256SUMS"

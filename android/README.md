@@ -2,7 +2,7 @@
 
 Native phone client: **Kotlin + Jetpack Compose** UI over the C++ `libi2pchat_core` / `ChatService`.
 
-**Prebuilt APK:** [I2PChat-android-v1.5.0.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.0.apk) on the [latest release](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest) (or build below).
+**Prebuilt APK:** [I2PChat-android-v1.5.1.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.1.apk) (64-bit, bundled i2pd) and [I2PChat-android-v1.5.1-arm32-release.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.1-arm32-release.apk) (32-bit sideload, external i2pd) on the [latest release](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest) (or build below).
 
 Open the `android/` folder in Android Studio, or build from the repo root with `./build-android.sh`.
 

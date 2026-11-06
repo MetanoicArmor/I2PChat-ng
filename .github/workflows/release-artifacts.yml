@@ -1,6 +1,6 @@
 # Official C++ release artifacts on GitHub-hosted runners (no Docker).
 # Linux: Ubuntu 24.04 amd64 + arm64. macOS: Apple Silicon + Intel. Windows: x64.
-# Android: release APK (arm64 + x86_64), unsigned unless signing secrets are set.
+# Android: release APK (arm64 + x86_64) and armeabi-v7a sideload APK (no bundled i2pd).
 #
 # Same zip set as historical PyQt6 releases, plus Android.
 # Debian packages still come from "Release Linux packages" after zips land.
@@ -663,6 +663,9 @@ jobs:
       - name: Build Android release APK
         run: ./build-android.sh --release
 
+      - name: Build Android arm32 sideload APK
+        run: ./build-android.sh --arm32 --release
+
       - name: Verify VERSION matches tag
         run: |
           VER="${{ steps.meta.outputs.ver }}"
@@ -676,21 +679,21 @@ jobs:
         run: |
           VER="${{ steps.meta.outputs.ver }}"
           SRC="dist/I2PChat-android-v${VER}-release.apk"
-          if [ ! -f "$SRC" ]; then
-            echo "ERROR: missing $SRC" >&2
-            ls -la dist >&2 || true
-            exit 1
-          fi
+          ARM32="dist/I2PChat-android-v${VER}-arm32-release.apk"
+          for f in "$SRC" "$ARM32"; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: missing $f" >&2
+              ls -la dist >&2 || true
+              exit 1
+            fi
+          done
           mkdir -p dist-upload
           cp "$SRC" "dist-upload/I2PChat-android-v${VER}.apk"
-          if [ -f "${SRC}.sha256" ]; then
-            # rewrite checksum file to the release asset name
-            HASH="$(awk '{print $1}' "${SRC}.sha256")"
-            printf '%s  I2PChat-android-v%s.apk\n' "$HASH" "$VER" > "dist-upload/SHA256SUMS.android"
-          else
-            sha256sum "dist-upload/I2PChat-android-v${VER}.apk" | awk '{print $1"  "$2}' \
-              | sed "s|dist-upload/||" > dist-upload/SHA256SUMS.android
-          fi
+          cp "$ARM32" "dist-upload/I2PChat-android-v${VER}-arm32-release.apk"
+          sha256sum \
+            "dist-upload/I2PChat-android-v${VER}.apk" \
+            "dist-upload/I2PChat-android-v${VER}-arm32-release.apk" \
+            | awk '{print $1"  "$2}' | sed "s|dist-upload/||" > dist-upload/SHA256SUMS.android
 
       - name: Upload Android workflow artifacts
         uses: actions/upload-artifact@v4
