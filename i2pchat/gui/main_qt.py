@@ -13256,7 +13256,8 @@ class ChatWindow(QtWidgets.QMainWindow):
     def finalize_shutdown_chrome(self) -> None:
         """Снять курсор/оверлей после полного выхода (в т.ч. sync force_cleanup в main)."""
         try:
-            QtWidgets.QApplication.restoreOverrideCursor()
+            if sys.platform != "darwin":
+                QtWidgets.QApplication.restoreOverrideCursor()
         except Exception:
             pass
         try:
@@ -13290,7 +13291,12 @@ class ChatWindow(QtWidgets.QMainWindow):
 
         stopping_bundled = self._bundled_router_manager is not None
         self._show_shutdown_overlay(stopping_bundled_router=stopping_bundled)
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        # macOS 27 + Qt 6.11: setOverrideCursor(WaitCursor) during AppKit
+        # terminate goes through QImage::toCGImage and traps in CGColorSpaceGetType
+        # (pointer authentication on a dead color space). The overlay already
+        # shows that shutdown is in progress.
+        if sys.platform != "darwin":
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.setWindowTitle(f"{self._window_title_base} — Shutting down…")
         QtCore.QCoreApplication.processEvents(
             QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents

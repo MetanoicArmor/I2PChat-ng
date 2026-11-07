@@ -5,15 +5,17 @@
 <h1 align="center">I2PChat</h1>
 
 <p align="center">
-  <a href="https://github.com/MetanoicArmor/I2PChat/releases/latest"><img src="https://img.shields.io/github/v/release/MetanoicArmor/I2PChat?label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/MetanoicArmor/I2PChat" alt="License"></a>
+  <a href="https://github.com/MetanoicArmor/I2PChat-ng/releases/latest"><img src="https://img.shields.io/github/v/release/MetanoicArmor/I2PChat-ng?label=release" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MetanoicArmor/I2PChat-ng" alt="License"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python"></a>
+  <a href="android/README.md"><img src="https://img.shields.io/badge/Android-APK-3DDC84.svg" alt="Android"></a>
   <a href="https://i2pd.website"><img src="https://img.shields.io/badge/I2P-SAM%20API-purple.svg" alt="I2P"></a>
 </p>
 
 <p align="center">
   <b>Experimental peer‑to‑peer chat client for the <a href="https://i2pd.website">I2P</a> anonymity network.</b><br>
-  Cross‑platform <b>PyQt6 GUI</b> and a separate <b>terminal client</b> (often labeled <b>TUI</b> — <i>terminal user interface</i>: the same chat in a console via Textual, no Qt windows) on one shared asynchronous core.<br>
+  The development branch is <b><code>python</code></b>: desktop is a <b>PyQt6 GUI</b> and a <b>Textual TUI</b> on one async core. <b>Android</b> is Kotlin + Compose over <code>cpp/core</code> and speaks the same vNext protocol.<br>
+  Releases <b>1.5.0</b> and <b>1.5.1</b> shipped a C++ desktop from the <code>c++</code> branch. <b>1.5.2</b> is this Python desktop again, with that release’s inbound Trust gate.<br>
   Prebuilt releases usually ship a <b>bundled <code>i2pd</code></b>; you can switch to a system router in the app (see manuals).
 </p>
 
@@ -59,7 +61,8 @@
 - **Contact book (Saved peers)** — left sidebar list backed by **`profiles/<name>/<name>.contacts.json`**: quick switch between saved `.b32.i2p` peers, optional display name/note, unread hints, resize/collapse, and a context menu (edit, trust details, remove). See **§3.1** in [MANUAL_EN](docs/MANUAL_EN.md) / [MANUAL_RU](docs/MANUAL_RU.md).
 - **Text groups** — multi-member conversations over the same vNext stream as 1:1 chat; offline delivery fans out per member via **pairwise** BlindBox (see the manuals for prerequisites and **§** on group BlindBox behavior)
 - **Terminal client (TUI)** — *terminal user interface*: full chat in a text shell (Textual, `i2pchat/gui/chat_python.py`); shipped as **`*-tui-*`** release zips and **`i2pchat-tui`** packages (Homebrew, apt, AUR), or **`python -m i2pchat.tui`** from source
-- Cross‑platform build scripts (Linux, macOS, Windows)
+- **Android** — Kotlin + Jetpack Compose over [`cpp/core`](cpp/core); release APK and a 32-bit sideload APK (external SAM). Build with [`./build-android.sh`](build-android.sh) ([details](android/README.md))
+- Cross‑platform build scripts (Linux, macOS, Windows, Android)
 
 #### 📖 Manuals
 
@@ -363,6 +366,17 @@ It will:
 
 The resulting `I2PChat.exe` is self‑contained and can be distributed to machines without Python installed.
 
+#### Android (APK)
+
+The phone client lives in [`android/`](android/README.md). It is a Kotlin UI over the native core in [`cpp/core`](cpp/core) and uses the same vNext protocol as the Python client. Desktop builds stay on Python.
+
+```bash
+./build-android.sh --debug
+./build-android.sh --release
+```
+
+Needs JDK 17, the Android SDK, and NDK r28. Details, bundled i2pd, and the 32-bit sideload APK are in [`android/README.md`](android/README.md).
+
 ### Verify release artifacts
 
 Release build scripts generate:
@@ -464,27 +478,29 @@ bc1qfenneg8pt7g42f94uww3l3d7gtw6rl9dd3uslg
 
 ### 📥 Prebuilt Downloads
 
-**[Latest release](https://github.com/MetanoicArmor/I2PChat/releases/latest)** — bundles match **`v` + [`VERSION`](VERSION)** in this repo (**v1.4.1** in the table below; **update these rows when you tag a new release** so `latest/download/…` filenames stay valid). No Python on the target machine for these zips.
+**[Latest release](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest)** — the table names match **`v` + [`VERSION`](VERSION)** (**v1.5.2**). Those files appear after the `v1.5.2` tag is published. Until then, **Latest** is still **v1.5.1** (C++ desktop). No Python on the target machine for these zips.
 
 Full zip layouts, **winget**, **`.deb`**, **Flatpak** notes → [**docs/INSTALL.md**](docs/INSTALL.md).
 
 | Variant | Download | Launch |
 |---------|----------|--------|
-| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — GUI** | [I2PChat-windows-x64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-windows-x64-v1.4.1.zip) | Unzip → run `I2PChat.exe` |
-| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — TUI only** | [I2PChat-windows-tui-x64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-windows-tui-x64-v1.4.1.zip) | `I2PChat-tui.exe` in the extracted tree |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (arm64)** | [I2PChat-macOS-arm64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-arm64-v1.4.1.zip) | Unzip → open **`I2PChat-macOS-arm64-bundle/I2PChat.app`** (see **INSTALL.md**) |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (arm64)** | [I2PChat-macOS-arm64-tui-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-arm64-tui-v1.4.1.zip) | Run **`./i2pchat-tui`** from the extracted folder |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (Intel x64)** | [I2PChat-macOS-x64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-x64-v1.4.1.zip) | Unzip → open **`I2PChat-macOS-x64-bundle/I2PChat.app`** (see **INSTALL.md**) |
-| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (Intel x64)** | [I2PChat-macOS-x64-tui-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-macOS-x64-tui-v1.4.1.zip) | Run **`./i2pchat-tui`** from the extracted folder |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-v1.4.1.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.4.1.zip](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-v1.4.1.zip) | Same — AppImage inside the zip |
-| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-x86_64-tui-v1.4.1.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat/releases/latest/download/I2PChat-linux-aarch64-tui-v1.4.1.zip) | After unzip: **`./i2pchat-tui`** |
+| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — GUI** | [I2PChat-windows-x64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-windows-x64-v1.5.2.zip) | Unzip → run `I2PChat.exe` |
+| <img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows — TUI only** | [I2PChat-windows-tui-x64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-windows-tui-x64-v1.5.2.zip) | `I2PChat-tui.exe` in the extracted tree |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (arm64)** | [I2PChat-macOS-arm64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-arm64-v1.5.2.zip) | Unzip → open **`I2PChat-macOS-arm64-bundle/I2PChat.app`** (see **INSTALL.md**) |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (arm64)** | [I2PChat-macOS-arm64-tui-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-arm64-tui-v1.5.2.zip) | Run **`./i2pchat-tui`** from the extracted folder |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — GUI (Intel x64)** | [I2PChat-macOS-x64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-x64-v1.5.2.zip) | Unzip → open **`I2PChat-macOS-x64-bundle/I2PChat.app`** (see **INSTALL.md**) |
+| <img src="docs/icons/icons8-macos-48.png" alt="macOS" width="28" height="28" align="middle" /> **macOS — TUI only (Intel x64)** | [I2PChat-macOS-x64-tui-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-macOS-x64-tui-v1.5.2.zip) | Run **`./i2pchat-tui`** from the extracted folder |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (x86_64)** | [I2PChat-linux-x86_64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-v1.5.2.zip) | Unzip → `chmod +x I2PChat.AppImage` → run |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — GUI (aarch64)** | [I2PChat-linux-aarch64-v1.5.2.zip](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-v1.5.2.zip) | Same — AppImage inside the zip |
+| <img src="docs/icons/icons8-linux-48.png" alt="Linux" width="28" height="28" align="middle" /> **Linux — TUI** | [x86_64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-x86_64-tui-v1.5.2.zip) · [aarch64 TUI](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-linux-aarch64-tui-v1.5.2.zip) | After unzip: **`./i2pchat-tui`** |
+| **Android** | [I2PChat-android-v1.5.2.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.2.apk) | arm64 + x86_64, bundled i2pd |
+| **Android — 32-bit sideload** | [I2PChat-android-v1.5.2-arm32-release.apk](https://github.com/MetanoicArmor/I2PChat-ng/releases/latest/download/I2PChat-android-v1.5.2-arm32-release.apk) | No bundled i2pd; SAM at `127.0.0.1:7656` |
 
 > **Router backend:** On a **fresh install** (no `router_prefs.json` yet), I2PChat defaults to a **system** `i2pd` **SAM** endpoint (typically `127.0.0.1:7656`). Switch to the **bundled** sidecar when your build includes it via **More actions → I2P router…** (shortcut **Cmd/Ctrl+R**); the choice is persisted. The same dialog opens the router data/log paths and can restart the bundled router.
 
 ### 📦 Package managers
 
-<img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows (x64) — [winget](https://learn.microsoft.com/windows/package-manager/winget/)** (community manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs); ships the **`*-winget-*`** zip **without** embedded `i2pd`. For a bundled router, use the full **`*-windows-x64-v*.zip`** from [Releases](https://github.com/MetanoicArmor/I2PChat/releases).)
+<img src="docs/icons/icons8-windows-48.png" alt="Windows" width="28" height="28" align="middle" /> **Windows (x64) — [winget](https://learn.microsoft.com/windows/package-manager/winget/)** (community manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs); ships the **`*-winget-*`** zip **without** embedded `i2pd`. For a bundled router, use the full **`*-windows-x64-v*.zip`** from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases).)
 
 ```powershell
 winget install MetanoicArmor.I2PChat       # GUI
@@ -510,12 +526,12 @@ yay -S i2pchat-bin       # GUI — AppImage from release
 yay -S i2pchat-tui-bin   # TUI only
 ```
 
-> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) (`yay -S i2pchat-git`) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). It may still install and run as *that* app, but it is **not** **MetanoicArmor/I2PChat** (Python / PyQt6 / Textual TUI). For this project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or clone this repo and run **`python -m i2pchat.gui`** / **`python -m i2pchat.tui`**.
+> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) (`yay -S i2pchat-git`) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). It may still install and run as *that* app, but it is **not** **MetanoicArmor/I2PChat-ng** (Python / PyQt6 / Textual TUI). For this project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or clone this repo and run **`python -m i2pchat.gui`** / **`python -m i2pchat.tui`**.
 
-<img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat/releases)** (works without any mirror):
+<img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases)** (works without any mirror):
 
 ```bash
-# after downloading e.g. i2pchat_1.4.1_amd64.deb
+# after downloading e.g. i2pchat_1.5.2_amd64.deb
 sudo apt install ./i2pchat_*_amd64.deb
 # optional TUI-only: sudo apt install ./i2pchat-tui_*_amd64.deb
 ```

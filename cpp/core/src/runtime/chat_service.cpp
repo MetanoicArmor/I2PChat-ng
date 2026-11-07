@@ -1,0 +1,1831 @@
+#include "i2pchat/runtime/chat_service.hpp"
+
+#include "i2pchat/runtime/identity.hpp"
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <stdexcept>
+#include <utility>
+
+#include "i2pchat/blindbox/state.hpp"
+#include "i2pchat/encoding.hpp"
+#include "i2pchat/crypto.hpp"
+#include "i2pchat/groups/invite.hpp"
+#include "i2pchat/groups/store.hpp"
+#include "i2pchat/groups/wire.hpp"
+#include "i2pchat/protocol/codec.hpp"
+#include "i2pchat/protocol/signals.hpp"
+#include "i2pchat/protocol/text_chunking.hpp"
+#include "i2pchat/sam/destination.hpp"
+#include "i2pchat/session/peer_session.hpp"
+#include "i2pchat/storage/contacts.hpp"
+#include "i2pchat/storage/keyring.hpp"
+
+namespace i2pchat::runtime {
+namespace {
+
+/// A destination in I2P-base64 is 516 characters or more; a base32 host is 52.
+/// Nothing in between is a valid peer identifier, so the length decides.
+constexpr std::size_t kMinDestinationLength = 300;
+
+std::int64_t unix_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string preview_of(const std::string& text) {
+    // Measured in code points, like the contact book's own limit.
+    std::string out;
+    std::size_t points = 0;
+    for (std::size_t index = 0; index < text.size() && points < storage::kPreviewMaxLength;) {
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+        std::size_t width = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            width = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            width = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            width = 4;
+        }
+        width = std::min(width, text.size() - index);
+        out.append(text, index, width);
+        index += width;
+        ++points;
+    }
+    return out;
+}
+
+std::string session_nickname(const std::string& profile) {
+    const Bytes suffix = crypto::random_bytes(4);
+    return "chat_" + profile + "_" + std::to_string(unix_now()) + "_" +
+           encoding::hex_encode(ByteView(suffix));
+}
+
+bool live_link(const PeerLink* link, session::SessionManager& sessions,
+               std::string_view peer_addr) {
+    return link != nullptr && !link->closed() && link->secure() &&
+           sessions.live_ready(peer_addr);
+}
+
+bool superseded_stream_close(std::string_view reason) {
+    return reason == "replaced by a newer stream" || reason == "duplicate stream";
+}
+
+}  // namespace
+
+/// Everything the service keeps for one peer while the process runs.
+struct ChatService::Peer {
+    std::string addr;
+    std::shared_ptr<PeerLink> link;
+    std::unique_ptr<transfer::IncomingTransfers> incoming;
+    /// Cancelled to wake a `connect_peer` that is waiting on the handshake.
+    std::shared_ptr<asio::steady_timer> connect_waiter;
+    bool connect_succeeded = false;
+};
+
+std::string_view delivery_state_name(DeliveryState state) {
+    switch (state) {
+        case DeliveryState::Sent:
+            return "sent";
+        case DeliveryState::Delivered:
+            return "delivered";
+        case DeliveryState::Queued:
+            return "queued";
+        case DeliveryState::Failed:
+            return "failed";
+    }
+    return "sent";
+}
+
+ChatService::ChatService(asio::any_io_executor executor, ChatServiceConfig config,
+                         ChatEvents events)
+    : executor_(std::move(executor)),
+      config_(std::move(config)),
+      events_(std::move(events)),
+      paths_(config_.app_root / "profiles" / config_.profile, config_.profile),
+      sessions_(config_.sessions) {
+    crypto::init();
+    if (config_.downloads_dir.empty()) {
+        config_.downloads_dir = paths_.data_dir() / "downloads";
+    }
+    if (config_.images_dir.empty()) {
+        config_.images_dir = paths_.data_dir() / "images";
+    }
+
+    session::SessionManager::Callbacks callbacks;
+    callbacks.on_transport_state = [this](session::TransportState, session::TransportState to,
+                                         const std::string& reason) {
+        if (events_.on_transport_state) {
+            events_.on_transport_state(to, reason);
+        }
+    };
+    callbacks.on_peer_state = [this](const std::string& peer_id, session::PeerState,
+                                     session::PeerState to, const std::string& reason) {
+        if (events_.on_peer_state) {
+            events_.on_peer_state(peer_id, to, reason);
+        }
+    };
+    sessions_ = session::SessionManager(config_.sessions, std::move(callbacks));
+}
+
+ChatService::~ChatService() = default;
+
+asio::awaitable<void> ChatService::start() {
+    if (running_) {
+        co_return;
+    }
+    std::filesystem::create_directories(paths_.data_dir());
+    std::filesystem::create_directories(config_.downloads_dir);
+    std::filesystem::create_directories(config_.images_dir);
+
+    emit_system("Initializing Profile: " + config_.profile);
+    if (config_.profile == kTransientProfile) {
+        emit_system(
+            "Security note: TRANSIENT profile does not persist TOFU trust pins between restarts.");
+        emit_system("Use a named profile for persistent peer-key trust continuity.");
+    }
+    const bool had_destination = load_destination(paths_).has_value();
+    const bool had_keyring =
+        storage::keyring::get(storage::kKeyringService, config_.profile).has_value();
+    if (had_keyring) {
+        emit_system("Loaded identity from secure keyring");
+    } else if (had_destination) {
+        emit_system("Loaded identity from encrypted " + paths_.identity_dat().string());
+    } else {
+        emit_system("Generating new Ed25519 identity...");
+    }
+
+    if (config_.profile != kTransientProfile) {
+        trust_ = session::TrustStore(paths_.trust_store());
+        trust_.load();
+    }
+    if (events_.on_trust_prompt) {
+        trust_.set_prompt_handler(events_.on_trust_prompt);
+    }
+
+    sessions_.set_transport_state(session::TransportState::Starting, "start");
+
+    const Bytes signing_seed = load_or_create_signing_seed(paths_);
+    if (const std::optional<sam::Destination> existing = load_destination(paths_)) {
+        identity_ = identity_from(config_.profile, *existing, ByteView(signing_seed));
+        contacts_ = storage::load_contact_book(paths_.contacts(),
+                                              ByteView(identity_.identity_key));
+        if (events_.on_local_address) {
+            events_.on_local_address(identity_.local_addr);
+        }
+        if (events_.on_contacts_changed) {
+            events_.on_contacts_changed();
+        }
+    }
+
+    if (!had_destination && !had_keyring && config_.profile != kTransientProfile) {
+        emit_system("Identity will be saved encrypted to " + paths_.identity_dat().string());
+    }
+
+    emit_system("Starting I2P session, please wait…");
+    sam_ = std::make_shared<sam::SamSession>(executor_, config_.sam);
+    try {
+        if (identity_.destination_base64.empty()) {
+            identity_ = co_await load_identity(*sam_, paths_);
+            contacts_ = storage::load_contact_book(paths_.contacts(),
+                                                  ByteView(identity_.identity_key));
+            if (events_.on_local_address) {
+                events_.on_local_address(identity_.local_addr);
+            }
+            if (events_.on_contacts_changed) {
+                events_.on_contacts_changed();
+            }
+        }
+        sam::SessionOptions options;
+        options.session_id = session_nickname(config_.profile);
+        options.destination = identity_.destination_base64;
+        options.options = config_.sam_options;
+        co_await sam_->open(options);
+    } catch (const std::exception& error) {
+        sessions_.set_transport_state(session::TransportState::Failed, error.what());
+        emit_error("Cannot reach I2P SAM at " + config_.sam.host + ":" +
+                   std::to_string(config_.sam.port) +
+                   ". Start i2pd or choose a router.");
+        running_ = true;
+        stopping_ = false;
+        co_return;
+    }
+
+    sessions_.set_transport_state(session::TransportState::SamConnected,
+                                  "sam-session-created");
+    running_ = true;
+    stopping_ = false;
+
+    if (config_.blindbox_enabled) {
+        const bool replicas_from_config = config_.replicas.has_value();
+        if (!replicas_from_config) {
+            config_.replicas = storage::load_replica_settings(
+                paths_.blindbox_replicas(), ByteView(identity_.identity_key));
+        }
+        replica_settings_ = *config_.replicas;
+        replica_source_ = replicas_from_config ? "config" : "profile-file";
+        if (replica_settings_.endpoints.empty() && !replicas_from_config &&
+            config_.profile != kTransientProfile &&
+            !storage::builtin_release_replicas_disabled()) {
+            replica_settings_.endpoints = storage::default_release_blindbox_endpoints();
+            config_.replicas = replica_settings_;
+            replica_source_ = "release-builtin";
+        } else if (replica_settings_.endpoints.empty()) {
+            replica_source_ = "none";
+        } else if (!replicas_from_config &&
+                   storage::same_as_release_builtin_endpoints(replica_settings_.endpoints)) {
+            replica_source_ = "release-builtin";
+        }
+        if (replica_settings_.auth_locked) {
+            emit_error(
+                "BlindBox replica tokens could not be decrypted; the offline path "
+                "will be attempted without them.");
+        }
+    }
+
+    if (events_.on_local_address) {
+        events_.on_local_address(identity_.local_addr);
+    }
+    emit_system("Building I2P tunnels (may take 1–2 min)...");
+    sessions_.set_transport_state(session::TransportState::WarmingTunnels, "tunnel-warmup");
+
+    asio::co_spawn(executor_, [this] { return accept_loop(); }, asio::detached);
+    if (config_.blindbox_enabled) {
+        asio::co_spawn(executor_, [this] { return blindbox_loop(); }, asio::detached);
+    }
+
+    bool tunnels_ready = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    warmup_timer_ = std::make_unique<asio::steady_timer>(executor_);
+    while (!stopping_ && std::chrono::steady_clock::now() < deadline) {
+        // Hold a local ref: stop() may reset sam_ while this coroutine is still
+        // running, and a bare member dereference would then segfault.
+        const std::shared_ptr<sam::SamSession> sam = sam_;
+        if (!sam) {
+            break;
+        }
+        try {
+            (void)co_await sam->naming_lookup(identity_.local_addr + ".b32.i2p");
+            tunnels_ready = true;
+            break;
+        } catch (const std::exception&) {
+        }
+        if (stopping_ || !warmup_timer_) {
+            break;
+        }
+        warmup_timer_->expires_after(std::chrono::seconds(3));
+        boost::system::error_code wait_error;
+        co_await warmup_timer_->async_wait(
+            asio::redirect_error(asio::use_awaitable, wait_error));
+    }
+    warmup_timer_.reset();
+    if (stopping_) {
+        co_return;
+    }
+    emit_system("Online! My Address: " + identity_.local_addr);
+    if (tunnels_ready) {
+        emit_system("Tunnels ready. Waiting for incoming connections...");
+        sessions_.set_transport_state(session::TransportState::Ready, "tunnels-ready");
+    } else {
+        emit_system("Tunnels may still be building. Wait 1–2 min before connecting.");
+        sessions_.set_transport_state(session::TransportState::Degraded, "tunnels-pending");
+    }
+}
+
+asio::awaitable<void> ChatService::stop() {
+    if (!running_) {
+        co_return;
+    }
+    stopping_ = true;
+    running_ = false;
+    if (warmup_timer_) {
+        warmup_timer_->cancel();
+    }
+    sessions_.set_transport_state(session::TransportState::ShuttingDown, "stop");
+
+    for (auto& [addr, peer] : peers_) {
+        if (peer->link && !peer->link->closed()) {
+            peer->link->close_gracefully();
+        }
+    }
+    peers_.clear();
+
+    for (const auto& [addr, snapshot] : blindbox_snapshots_) {
+        save_blindbox_snapshot(addr);
+    }
+    save_contacts();
+    if (trust_.persistent()) {
+        trust_.save();
+    }
+    if (sam_) {
+        sam_->close();
+        sam_.reset();
+    }
+    replicas_.reset();
+    sessions_.reset();
+    sessions_.set_transport_state(session::TransportState::Stopped, "stopped");
+    co_return;
+}
+
+ChatService::Peer& ChatService::ensure_peer(const std::string& peer_addr) {
+    auto found = peers_.find(peer_addr);
+    if (found == peers_.end()) {
+        auto peer = std::make_unique<Peer>();
+        peer->addr = peer_addr;
+        found = peers_.emplace(peer_addr, std::move(peer)).first;
+    }
+    return *found->second;
+}
+
+ChatService::Peer* ChatService::find_peer(std::string_view peer_addr) {
+    const auto found = peers_.find(std::string(peer_addr));
+    return found == peers_.end() ? nullptr : found->second.get();
+}
+
+PeerLinkConfig ChatService::link_config(const std::string& peer_addr,
+                                        session::ConnectionDirection direction) {
+    PeerLinkConfig config;
+    config.session.local_dest_base64 = identity_.public_destination_base64;
+    config.session.direction = direction;
+    config.session.padding = config_.padding;
+    config.session.handshake.local_addr = identity_.local_addr;
+    config.session.handshake.peer_addr = peer_addr;
+    config.session.handshake.signing_seed = identity_.signing_seed;
+    config.session.handshake.signing_public = identity_.signing_public;
+    config.session.handshake.trust_verifier = [this](const std::string& addr,
+                                                     ByteView signing_key) {
+        const bool saved_contact = contacts_.has_peer(addr);
+        const bool auto_first =
+            saved_contact || config_.trust_auto_accept_first_sighting;
+        return trust_.verify_or_pin(addr, signing_key, auto_first);
+    };
+    return config;
+}
+
+void ChatService::wire_transfers(Peer& peer) {
+    transfer::IncomingTransfers::Config config;
+    config.downloads_dir = config_.downloads_dir;
+    config.images_dir = config_.images_dir;
+
+    const std::string addr = peer.addr;
+    transfer::IncomingTransfers::Callbacks callbacks;
+    callbacks.send = [this, addr](const transfer::Frame& frame) {
+        if (Peer* target = find_peer(addr); target != nullptr && target->link) {
+            target->link->send_text(frame.type, frame.body, next_msg_id());
+        }
+    };
+    callbacks.accept_file = [this, addr](const std::string& name, std::uint64_t size) {
+        return events_.accept_file ? events_.accept_file(addr, name, size) : true;
+    };
+    callbacks.on_progress = [this, addr](const transfer::Progress& progress) {
+        if (events_.on_transfer) {
+            events_.on_transfer(addr, progress);
+        }
+    };
+    callbacks.on_system = [this](const std::string& message) { emit_system(message); };
+    callbacks.on_error = [this](const std::string& message) { emit_error(message); };
+    callbacks.on_file_received = [this, addr](const std::filesystem::path& path) {
+        storage::HistoryEntry entry;
+        entry.kind = "in";
+        entry.text = "[file] " + path.string();
+        entry.ts = storage::now_iso8601_utc();
+        append_history(addr, entry);
+        if (events_.on_file_received) {
+            events_.on_file_received(addr, path);
+        }
+    };
+    callbacks.on_image_received = [this, addr](const std::filesystem::path& path) {
+        storage::HistoryEntry entry;
+        entry.kind = "in";
+        entry.text = "[image] " + path.string();
+        entry.ts = storage::now_iso8601_utc();
+        append_history(addr, entry);
+        if (events_.on_image_received) {
+            events_.on_image_received(addr, path);
+        }
+    };
+    callbacks.on_image_lines_received = [this, addr](const std::string& text) {
+        if (events_.on_image_text) {
+            events_.on_image_text(addr, text);
+        }
+    };
+    peer.incoming =
+        std::make_unique<transfer::IncomingTransfers>(std::move(config), std::move(callbacks));
+}
+
+void ChatService::attach_link(Peer& peer, std::shared_ptr<PeerLink> link) {
+    // Outbound connect attaches the link before the handshake finishes; when
+    // on_established runs it must not close and reattach the same stream.
+    if (peer.link == link) {
+        return;
+    }
+    // Two sides dialling at once leaves two streams; the newer one wins, which
+    // matches the reference implementation and avoids a split channel.
+    if (peer.link && !peer.link->closed()) {
+        peer.link->close("replaced by a newer stream");
+    }
+    peer.link = std::move(link);
+    wire_transfers(peer);
+}
+
+asio::awaitable<void> ChatService::accept_loop() {
+    while (running_) {
+        const std::shared_ptr<sam::SamSession> sam = sam_;
+        if (!sam) {
+            co_return;
+        }
+        sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
+        bool accepted = false;
+        try {
+            stream = co_await sam->accept_stream();
+            accepted = true;
+        } catch (const std::exception& error) {
+            if (running_) {
+                emit_error(std::string("accepting a peer failed: ") + error.what());
+            }
+        }
+        if (!accepted) {
+            if (!running_) {
+                co_return;
+            }
+            // A failed ACCEPT usually means the session is gone; without a
+            // pause this would spin.
+            asio::steady_timer pause(executor_);
+            pause.expires_after(std::chrono::seconds(2));
+            boost::system::error_code ignored;
+            co_await pause.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+            continue;
+        }
+
+        // An inbound session must learn who is calling from the identity
+        // preface rather than from the router: the address SAM reports is not
+        // authenticated, and the session layer refuses to be told it in
+        // advance. So the link is created anonymously and registered against a
+        // peer once the handshake names one.
+        PeerLinkConfig config = link_config({}, session::ConnectionDirection::Inbound);
+        PeerLink::Callbacks callbacks;
+        callbacks.on_established = [this](PeerLink& link) { on_established(link); };
+        callbacks.on_frame = [this](PeerLink& link, const PeerFrame& frame) {
+            on_frame(link.peer_addr(), frame);
+        };
+        callbacks.on_closed = [this](PeerLink& link, const std::string& reason) {
+            on_link_closed(link.peer_addr(), reason, link.shared_from_this());
+        };
+
+        PeerLink::create(std::move(stream.socket), std::move(stream.prebuffered), config,
+                         std::move(callbacks))
+            ->start();
+    }
+}
+
+asio::awaitable<std::string> ChatService::resolve_destination(const std::string& peer) {
+    const std::string trimmed = std::string(sam::normalize_peer_address(peer));
+    if (peer.size() >= kMinDestinationLength) {
+        co_return peer;
+    }
+    if (trimmed.empty()) {
+        throw std::invalid_argument("not an I2P address: " + peer);
+    }
+    co_return co_await sam_->naming_lookup(trimmed + ".b32.i2p");
+}
+
+asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
+    if (!running_) {
+        emit_error("Not connected to a router yet.");
+        co_return false;
+    }
+
+    std::string destination;
+    try {
+        destination = co_await resolve_destination(peer);
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not resolve ") + peer + ": " + error.what());
+        co_return false;
+    }
+    const std::string peer_addr =
+        sam::Destination::from_public_base64(destination).base32();
+    if (peer_addr == identity_.local_addr) {
+        emit_error("That is this client's own address.");
+        co_return false;
+    }
+
+    Peer& peer_entry = ensure_peer(peer_addr);
+    if (live_link(peer_entry.link.get(), sessions_, peer_addr)) {
+        co_return true;
+    }
+    if (peer_entry.link != nullptr &&
+        (!peer_entry.link->secure() || peer_entry.link->closed() ||
+         !sessions_.live_ready(peer_addr))) {
+        peer_entry.link.reset();
+    }
+
+    if (peer_entry.connect_waiter && peer_entry.link && !peer_entry.link->closed() &&
+        !peer_entry.link->secure()) {
+        boost::system::error_code ignored;
+        co_await peer_entry.connect_waiter->async_wait(
+            asio::redirect_error(asio::use_awaitable, ignored));
+        Peer* pending = find_peer(peer_addr);
+        if (pending != nullptr && live_link(pending->link.get(), sessions_, peer_addr)) {
+            co_return true;
+        }
+        if (pending != nullptr && pending->connect_succeeded) {
+            co_return true;
+        }
+        co_return false;
+    }
+
+    // Tie-break for simultaneous dials is handled in on_established (prefer inbound).
+    // Do not wait here — that delayed the first message by up to 15s when the peer
+    // was not dialling us.
+    emit_system("Connecting to " + peer_addr.substr(0, 16) +
+                "… (first contact may take 30–90s while I2P builds tunnels)");
+    sessions_.on_connecting(peer_addr);
+    sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
+    try {
+        stream = co_await sam_->connect_stream(destination);
+    } catch (const std::exception& error) {
+        const double delay = sessions_.schedule_reconnect(peer_addr, error.what());
+        sessions_.mark_live_failure(peer_addr, error.what());
+        emit_error(std::string("connecting to ") + peer_addr.substr(0, 16) + "… failed: " +
+                   error.what() + " (retry in " + std::to_string(static_cast<int>(delay)) +
+                   "s)");
+        co_return false;
+    }
+
+    peer_entry.connect_succeeded = false;
+    peer_entry.connect_waiter = std::make_shared<asio::steady_timer>(executor_);
+    peer_entry.connect_waiter->expires_after(kHandshakeTimeout + std::chrono::seconds(5));
+
+    PeerLinkConfig config = link_config(peer_addr, session::ConnectionDirection::Outbound);
+    PeerLink::Callbacks callbacks;
+    callbacks.on_established = [this](PeerLink& link) { on_established(link); };
+    callbacks.on_frame = [this](PeerLink& link, const PeerFrame& frame) {
+        on_frame(link.peer_addr(), frame);
+    };
+    callbacks.on_closed = [this](PeerLink& link, const std::string& reason) {
+        on_link_closed(link.peer_addr(), reason, link.shared_from_this());
+    };
+
+    auto link = PeerLink::create(std::move(stream.socket), std::move(stream.prebuffered),
+                                config, std::move(callbacks));
+    attach_link(peer_entry, link);
+    sessions_.on_stream_open(peer_addr, destination);
+    sessions_.on_handshaking(peer_addr);
+    link->start();
+
+    boost::system::error_code ignored;
+    co_await peer_entry.connect_waiter->async_wait(
+        asio::redirect_error(asio::use_awaitable, ignored));
+
+    Peer* settled = find_peer(peer_addr);
+    if (settled == nullptr || !settled->connect_succeeded) {
+        sessions_.mark_live_failure(peer_addr, "handshake did not complete");
+        if (settled != nullptr && settled->link != nullptr && !settled->link->secure()) {
+            settled->link->close("handshake failed");
+        }
+        co_return false;
+    }
+    settled->connect_waiter.reset();
+    co_return true;
+}
+
+void ChatService::disconnect_peer(std::string_view peer) {
+    if (Peer* entry = find_peer(peer); entry != nullptr && entry->link) {
+        entry->link->close_gracefully();
+    }
+}
+
+void ChatService::on_established(PeerLink& link) {
+    const std::string addr = link.peer_addr();
+    if (addr.empty()) {
+        return;
+    }
+    sessions_.on_secure(addr);
+    sessions_.mark_live_ok(addr);
+
+    Peer& peer = ensure_peer(addr);
+    const std::shared_ptr<PeerLink> established = link.shared_from_this();
+    if (peer.link == established) {
+        // Outbound dial already registered this stream in connect_peer().
+    } else if (!live_link(peer.link.get(), sessions_, addr)) {
+        attach_link(peer, established);
+    } else if (established->direction() == session::ConnectionDirection::Inbound &&
+               peer.link->direction() == session::ConnectionDirection::Outbound) {
+        // Remote sends on our acceptor stream; do not keep a parallel outbound dial.
+        attach_link(peer, established);
+    } else if (established->direction() == session::ConnectionDirection::Outbound &&
+               peer.link->direction() == session::ConnectionDirection::Inbound) {
+        established->close("duplicate stream");
+    } else {
+        attach_link(peer, established);
+    }
+    peer.connect_succeeded = true;
+    if (peer.connect_waiter) {
+        peer.connect_waiter->cancel();
+    }
+    remember_contact(addr, {});
+    emit_system("Secure channel with " + addr.substr(0, 16) + "… established");
+    offer_blindbox_root(addr);
+}
+
+void ChatService::offer_blindbox_root(const std::string& peer_addr) {
+    if (!config_.blindbox_enabled ||
+        !blindbox::initiates_root_exchange(identity_.local_addr, peer_addr)) {
+        return;
+    }
+    Peer* peer = find_peer(peer_addr);
+    if (peer == nullptr || peer->link == nullptr || !peer->link->secure()) {
+        return;
+    }
+    blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
+    const std::optional<blindbox::PendingRoot> pending =
+        blindbox::ensure_pending_root(snapshot, config_.blindbox, unix_now());
+    if (!pending.has_value()) {
+        return;
+    }
+    if (pending->created) {
+        save_blindbox_snapshot(peer_addr);
+    }
+    peer->link->send_signal(
+        protocol::build_blindbox_root(pending->epoch, ByteView(pending->secret)),
+        next_msg_id());
+}
+
+void ChatService::on_link_closed(const std::string& peer_addr, const std::string& reason,
+                                 std::shared_ptr<PeerLink> link) {
+    if (peer_addr.empty()) {
+        return;
+    }
+    if (superseded_stream_close(reason)) {
+        // attach_link() or duplicate-stream pruning; session continues on the other stream.
+        return;
+    }
+    sessions_.on_disconnected(peer_addr, reason);
+    sessions_.clear_inflight(peer_addr);
+    Peer* entry = find_peer(peer_addr);
+    if (entry == nullptr) {
+        return;
+    }
+    if (link && entry->link == link) {
+        entry->link.reset();
+    } else if (!link && entry->link && entry->link->closed()) {
+        entry->link.reset();
+    }
+    if (entry->incoming) {
+        entry->incoming->reset();
+    }
+    if (entry->connect_waiter) {
+        entry->connect_waiter->cancel();
+    }
+    emit_system("Disconnected from " + peer_addr.substr(0, 16) + "…: " + reason);
+    if (events_.on_contacts_changed) {
+        events_.on_contacts_changed();
+    }
+}
+
+void ChatService::on_frame(const std::string& peer_addr, const PeerFrame& frame) {
+    if (peer_addr.empty()) {
+        return;
+    }
+    sessions_.touch(peer_addr);
+
+    switch (frame.msg_type) {
+        case 'U':
+            on_text(peer_addr, frame.text(), frame.msg_id);
+            return;
+        case 'S':
+            on_signal(peer_addr, protocol::parse_signal(frame.text()));
+            return;
+        case 'F':
+        case 'D':
+        case 'E':
+        case 'G':
+        case 'I':
+            if (Peer* peer = find_peer(peer_addr); peer != nullptr && peer->incoming) {
+                peer->incoming->on_frame(frame.msg_type, frame.text(), frame.msg_id);
+            }
+            return;
+        default:
+            return;
+    }
+}
+
+void ChatService::on_text(const std::string& peer_addr, const std::string& text,
+                          std::uint64_t msg_id) {
+    if (ingest_group_transport(peer_addr, text)) {
+        if (Peer* peer = find_peer(peer_addr); peer != nullptr && peer->link && msg_id != 0) {
+            peer->link->send_signal(protocol::build_msg_ack(msg_id), next_msg_id());
+        }
+        return;
+    }
+    storage::HistoryEntry entry;
+    entry.kind = "in";
+    entry.text = text;
+    entry.ts = storage::now_iso8601_utc();
+    if (msg_id != 0) {
+        entry.message_id = std::to_string(msg_id);
+    }
+    append_history(peer_addr, entry);
+    remember_contact(peer_addr, text);
+
+    if (Peer* peer = find_peer(peer_addr); peer != nullptr && peer->link && msg_id != 0) {
+        peer->link->send_signal(protocol::build_msg_ack(msg_id), next_msg_id());
+    }
+}
+
+void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal& signal) {
+    if (!signal.well_formed && signal.kind != protocol::SignalKind::Unknown) {
+        return;
+    }
+    Peer* peer = find_peer(peer_addr);
+    switch (signal.kind) {
+        case protocol::SignalKind::MsgAck:
+            (void)sessions_.acknowledge_inflight(peer_addr, signal.message_id);
+            update_delivery(peer_addr, signal.message_id, DeliveryState::Delivered, "live",
+                            "peer-ack");
+            return;
+        case protocol::SignalKind::FileAck:
+        case protocol::SignalKind::ImgAck:
+            (void)sessions_.acknowledge_inflight(peer_addr, signal.message_id);
+            if (signal.message_id != 0) {
+                update_delivery(peer_addr, signal.message_id, DeliveryState::Delivered, "live",
+                                "peer-ack");
+            } else if (!signal.name.empty()) {
+                // Older peers may omit the id; match the latest outgoing media with that name.
+                update_delivery_by_media_name(peer_addr, signal.name, DeliveryState::Delivered,
+                                              "live", "peer-ack");
+            }
+            return;
+        case protocol::SignalKind::RejectFile:
+            emit_system(peer_addr.substr(0, 16) + "… declined " + signal.name);
+            return;
+        case protocol::SignalKind::AbortFile:
+            if (peer != nullptr && peer->incoming) {
+                peer->incoming->on_signal(signal);
+            }
+            return;
+        case protocol::SignalKind::Quit:
+            if (peer != nullptr && peer->link) {
+                peer->link->close("peer sent QUIT");
+            }
+            return;
+        case protocol::SignalKind::BlindBoxRoot: {
+            blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
+            if (signal.epoch < snapshot.root_epoch) {
+                // An older epoch than the one in use is either a replay or a
+                // peer that has not caught up; adopting it would send into a
+                // slot the peer is not watching.
+                return;
+            }
+            if (snapshot.root_secret.has_value() && snapshot.root_epoch != signal.epoch) {
+                blindbox::PreviousRoot previous;
+                previous.epoch = snapshot.root_epoch;
+                previous.secret = *snapshot.root_secret;
+                previous.expires_at = unix_now() + config_.blindbox.privacy.previous_grace_seconds;
+                snapshot.prev_roots.insert(snapshot.prev_roots.begin(), previous);
+                snapshot.prev_roots = blindbox::prune_previous_roots(
+                    std::move(snapshot.prev_roots),
+                    config_.blindbox.privacy.max_previous_roots, unix_now());
+            }
+            snapshot.root_secret = signal.root_secret;
+            snapshot.root_epoch = signal.epoch;
+            snapshot.root_created_at = unix_now();
+            snapshot.root_send_index_base = snapshot.state.send_index;
+            save_blindbox_snapshot(peer_addr);
+            if (peer != nullptr && peer->link) {
+                peer->link->send_signal(protocol::build_blindbox_root_ack(signal.epoch),
+                                        next_msg_id());
+            }
+            emit_system("Offline delivery enabled with " + peer_addr.substr(0, 16) + "…");
+            return;
+        }
+        case protocol::SignalKind::BlindBoxRootAck: {
+            blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
+            if (blindbox::commit_pending_root(snapshot, signal.epoch, config_.blindbox,
+                                              unix_now())) {
+                save_blindbox_snapshot(peer_addr);
+                emit_system("Offline delivery enabled with " + peer_addr.substr(0, 16) + "…");
+            }
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string peer,
+                                                                   std::string text) {
+    std::vector<std::uint64_t> ids;
+    const std::string peer_addr = std::string(sam::normalize_peer_address(peer));
+    if (peer_addr.empty()) {
+        emit_error("not an I2P address: " + peer);
+        co_return ids;
+    }
+
+    {
+        Peer* target = find_peer(peer_addr);
+        if (target == nullptr || !live_link(target->link.get(), sessions_, peer_addr)) {
+            (void)co_await connect_peer(peer);
+        }
+    }
+
+    const std::vector<std::string> chunks = protocol::split_long_chat_text(text);
+    for (const std::string& chunk : chunks) {
+        const std::uint64_t msg_id = next_msg_id();
+        storage::HistoryEntry entry;
+        entry.kind = "out";
+        entry.text = chunk;
+        entry.ts = storage::now_iso8601_utc();
+        entry.message_id = std::to_string(msg_id);
+
+        Peer* target = find_peer(peer_addr);
+        const bool live_path =
+            target != nullptr && live_link(target->link.get(), sessions_, peer_addr);
+        if (live_path) {
+            entry.delivery_state = "sent";
+            entry.delivery_route = "live";
+            append_history(peer_addr, entry);
+            target->link->send_text('U', chunk, msg_id);
+            sessions_.register_inflight(peer_addr, msg_id);
+            if (events_.on_delivery) {
+                events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent,
+                                                   "live", "sent"});
+            }
+            ids.push_back(msg_id);
+            remember_contact(peer_addr, chunk);
+            continue;
+        }
+
+        entry.delivery_state = "sending";
+        entry.delivery_route = "blindbox";
+        append_history(peer_addr, entry);
+        const bool queued = co_await send_offline(peer_addr, chunk, msg_id);
+        if (queued) {
+            ids.push_back(msg_id);
+            remember_contact(peer_addr, chunk);
+        }
+    }
+    co_return ids;
+}
+
+bool ChatService::ensure_replica_client() {
+    if (replicas_) {
+        return true;
+    }
+    if (!config_.blindbox_enabled || replica_settings_.endpoints.empty()) {
+        return false;
+    }
+    blindbox::ReplicaClientConfig config;
+    config.endpoints = replica_settings_.endpoints;
+    config.replica_auth = replica_settings_.auth;
+    try {
+        blindbox::StreamFactory factory =
+            config_.blindbox_over_sam && sam_
+                ? blindbox::sam_stream_factory(sam_)
+                : blindbox::direct_stream_factory(executor_);
+        replicas_ = std::make_shared<blindbox::ReplicaClient>(executor_, std::move(config),
+                                                              std::move(factory));
+    } catch (const std::exception& error) {
+        emit_error(std::string("BlindBox replicas are misconfigured: ") + error.what());
+        return false;
+    }
+    return true;
+}
+
+asio::awaitable<bool> ChatService::send_offline(const std::string& peer_addr,
+                                               std::string text, std::uint64_t msg_id) {
+    if (!ensure_replica_client()) {
+        update_delivery(peer_addr, msg_id, DeliveryState::Failed, "blindbox",
+                        "no-replicas");
+        emit_error("Peer is offline and no BlindBox replicas are configured.");
+        co_return false;
+    }
+    blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
+    if (!snapshot.root_secret.has_value()) {
+        update_delivery(peer_addr, msg_id, DeliveryState::Failed, "blindbox", "no-root");
+        emit_error(
+            "Peer is offline and no offline channel has been agreed yet — connect once "
+            "while both clients are online.");
+        co_return false;
+    }
+
+    const Bytes frame =
+        protocol::encode_frame('U', as_bytes(text), msg_id, 0);
+    try {
+        const blindbox::SendOutcome outcome = co_await blindbox::send_pairwise(
+            *replicas_, snapshot, identity_.local_addr, frame, config_.blindbox, unix_now());
+        save_blindbox_snapshot(peer_addr);
+        update_delivery(peer_addr, msg_id, DeliveryState::Queued, "blindbox",
+                        "slot " + std::to_string(outcome.index));
+        co_return true;
+    } catch (const std::exception& error) {
+        update_delivery(peer_addr, msg_id, DeliveryState::Failed, "blindbox", error.what());
+        emit_error(std::string("BlindBox send failed: ") + error.what() +
+                   " — use Connect or wait for the peer to message you once for a live channel.");
+        co_return false;
+    }
+}
+
+asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::path path) {
+    const std::string peer_addr = std::string(sam::normalize_peer_address(peer));
+    Peer* target = find_peer(peer_addr);
+    if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+        emit_error("Files can only be sent over a live connection.");
+        co_return false;
+    }
+
+    std::optional<transfer::OutgoingTransfer> outgoing;
+    const std::filesystem::path source = path;
+    try {
+        outgoing.emplace(std::move(path), false);
+    } catch (const std::exception& error) {
+        emit_error(std::string("cannot send that file: ") + error.what());
+        co_return false;
+    }
+
+    const std::uint64_t msg_id = next_msg_id();
+    storage::HistoryEntry entry;
+    entry.kind = "out";
+    entry.text = "[file] " + source.string();
+    entry.ts = storage::now_iso8601_utc();
+    entry.message_id = std::to_string(msg_id);
+    entry.delivery_state = "sent";
+    entry.delivery_route = "live";
+    append_history(peer_addr, entry);
+    sessions_.register_inflight(peer_addr, msg_id);
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+    }
+
+    const transfer::Frame header = outgoing->header();
+    target->link->send_text(header.type, header.body, msg_id);
+    while (std::optional<transfer::Frame> next = outgoing->next()) {
+        Peer* still = find_peer(peer_addr);
+        if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
+            emit_error("Connection dropped mid-transfer.");
+            co_return false;
+        }
+        still->link->send_text(next->type, next->body, next_msg_id());
+        if (events_.on_transfer) {
+            events_.on_transfer(peer_addr, outgoing->progress());
+        }
+        // Yield so keepalives and incoming frames are not starved by a large
+        // file's chunk loop.
+        asio::steady_timer breath(executor_);
+        breath.expires_after(std::chrono::milliseconds(0));
+        boost::system::error_code ignored;
+        co_await breath.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+    }
+    if (events_.on_transfer) {
+        events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
+    }
+    co_return true;
+}
+
+asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem::path path) {
+    const std::string peer_addr = std::string(sam::normalize_peer_address(peer));
+    Peer* target = find_peer(peer_addr);
+    if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+        emit_error("Images can only be sent over a live connection.");
+        co_return false;
+    }
+
+    std::optional<transfer::OutgoingTransfer> outgoing;
+    const std::filesystem::path source = path;
+    try {
+        outgoing.emplace(std::move(path), true);
+    } catch (const std::exception& error) {
+        emit_error(std::string("cannot send that image: ") + error.what());
+        co_return false;
+    }
+
+    const std::uint64_t msg_id = next_msg_id();
+    storage::HistoryEntry entry;
+    entry.kind = "out";
+    entry.text = "[image] " + source.string();
+    entry.ts = storage::now_iso8601_utc();
+    entry.message_id = std::to_string(msg_id);
+    entry.delivery_state = "sent";
+    entry.delivery_route = "live";
+    append_history(peer_addr, entry);
+    sessions_.register_inflight(peer_addr, msg_id);
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+    }
+
+    const transfer::Frame header = outgoing->header();
+    target->link->send_text(header.type, header.body, msg_id);
+    while (std::optional<transfer::Frame> next = outgoing->next()) {
+        Peer* still = find_peer(peer_addr);
+        if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
+            co_return false;
+        }
+        still->link->send_text(next->type, next->body, next_msg_id());
+        asio::steady_timer breath(executor_);
+        breath.expires_after(std::chrono::milliseconds(0));
+        boost::system::error_code ignored;
+        co_await breath.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+    }
+    if (events_.on_transfer) {
+        events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
+    }
+    co_return true;
+}
+
+asio::awaitable<void> ChatService::blindbox_loop() {
+    asio::steady_timer timer(executor_);
+    while (running_) {
+        timer.expires_after(config_.blindbox_poll_interval);
+        boost::system::error_code error;
+        co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        if (error || !running_) {
+            co_return;
+        }
+        try {
+            co_await poll_blindbox();
+        } catch (const std::exception& failure) {
+            emit_error(std::string("BlindBox poll failed: ") + failure.what());
+        }
+    }
+}
+
+asio::awaitable<std::size_t> ChatService::poll_blindbox() {
+    if (!ensure_replica_client()) {
+        co_return 0;
+    }
+    std::size_t delivered = 0;
+    // Snapshot the addresses first: collecting mutates the map.
+    std::vector<std::string> addrs;
+    for (const auto& [addr, snapshot] : blindbox_snapshots_) {
+        if (snapshot.root_secret.has_value() || !snapshot.prev_roots.empty()) {
+            addrs.push_back(addr);
+        }
+    }
+    for (const std::string& addr : addrs) {
+        delivered += co_await collect_from_peer(addr);
+    }
+    delivered += co_await collect_from_groups();
+    if (config_.blindbox.privacy.cover_gets > 0) {
+        co_await blindbox::emit_cover_gets(*replicas_, config_.blindbox.privacy.cover_gets);
+    }
+    co_return delivered;
+}
+
+asio::awaitable<std::size_t> ChatService::collect_from_peer(const std::string& peer_addr) {
+    blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
+    std::vector<blindbox::ReceivedMessage> messages;
+    try {
+        messages = co_await blindbox::poll_pairwise(*replicas_, snapshot,
+                                                    identity_.local_addr, config_.blindbox,
+                                                    unix_now());
+    } catch (const std::exception& error) {
+        emit_error(std::string("BlindBox collection failed: ") + error.what());
+        co_return 0;
+    }
+    if (messages.empty()) {
+        co_return 0;
+    }
+    save_blindbox_snapshot(peer_addr);
+
+    std::size_t delivered = 0;
+    for (const blindbox::ReceivedMessage& message : messages) {
+        // A collected blob holds one plaintext vNext frame, the same bytes the
+        // live path would have carried.
+        protocol::FrameReader reader;
+        reader.feed(ByteView(message.frame));
+        try {
+            while (const std::optional<protocol::Frame> frame = reader.next()) {
+                if (frame->msg_type != 'U') {
+                    continue;
+                }
+                const std::string text = to_string(ByteView(frame->payload));
+                if (ingest_group_transport(peer_addr, text)) {
+                    ++delivered;
+                    continue;
+                }
+                storage::HistoryEntry entry;
+                entry.kind = "in";
+                entry.text = text;
+                entry.ts = storage::now_iso8601_utc();
+                entry.delivery_route = "blindbox";
+                if (frame->msg_id != 0) {
+                    entry.message_id = std::to_string(frame->msg_id);
+                }
+                append_history(peer_addr, entry);
+                remember_contact(peer_addr, entry.text);
+                ++delivered;
+            }
+        } catch (const protocol::ProtocolError& error) {
+            emit_error(std::string("a collected BlindBox message was malformed: ") +
+                       error.what());
+        }
+    }
+    co_return delivered;
+}
+
+asio::awaitable<std::size_t> ChatService::collect_from_groups() {
+    if (!ensure_replica_client()) {
+        co_return 0;
+    }
+    std::size_t delivered = 0;
+    const std::vector<groups::GroupState> states =
+        groups::list_states(paths_, ByteView(identity_.identity_key),
+                            ByteView(identity_.signing_seed));
+    for (const groups::GroupState& state : states) {
+        std::optional<groups::StoredConversation> conv = load_group(state.group_id());
+        if (!conv || !conv->blindbox_channel || !conv->blindbox_channel->root_secret) {
+            continue;
+        }
+        for (const std::string& member : conv->state.members()) {
+            if (groups::normalize_member_id(member) ==
+                groups::normalize_member_id(identity_.local_addr)) {
+                continue;
+            }
+            std::vector<blindbox::ReceivedMessage> messages;
+            try {
+                messages = co_await blindbox::poll_group(
+                    *replicas_, *conv->blindbox_channel, member, config_.blindbox, unix_now());
+            } catch (const std::exception& error) {
+                emit_error(std::string("Group BlindBox collection failed: ") + error.what());
+                continue;
+            }
+            for (const blindbox::ReceivedMessage& message : messages) {
+                protocol::FrameReader reader;
+                reader.feed(ByteView(message.frame));
+                try {
+                    while (const std::optional<protocol::Frame> frame = reader.next()) {
+                        if (frame->msg_type != 'U') {
+                            continue;
+                        }
+                        const std::string text = to_string(ByteView(frame->payload));
+                        if (ingest_group_transport(member, text)) {
+                            ++delivered;
+                        }
+                    }
+                } catch (const protocol::ProtocolError& error) {
+                    emit_error(std::string("a collected group BlindBox message was malformed: ") +
+                               error.what());
+                }
+            }
+        }
+        try {
+            groups::save_conversation(paths_, *conv, ByteView(identity_.identity_key),
+                                      ByteView(identity_.signing_seed));
+        } catch (const std::exception& error) {
+            emit_error(std::string("could not save group BlindBox state: ") + error.what());
+        }
+    }
+    co_return delivered;
+}
+
+blindbox::PeerSnapshot& ChatService::blindbox_snapshot(const std::string& peer_addr) {
+    const auto found = blindbox_snapshots_.find(peer_addr);
+    if (found != blindbox_snapshots_.end()) {
+        return found->second;
+    }
+    const std::filesystem::path path =
+        paths_.data_dir() /
+        blindbox::peer_state_filename(config_.profile, peer_addr);
+    blindbox::PeerSnapshot snapshot = blindbox::load_peer_snapshot(
+        path, peer_addr, config_.profile, ByteView(identity_.signing_seed));
+    return blindbox_snapshots_.emplace(peer_addr, std::move(snapshot)).first->second;
+}
+
+void ChatService::save_blindbox_snapshot(const std::string& peer_addr) {
+    const auto found = blindbox_snapshots_.find(peer_addr);
+    if (found == blindbox_snapshots_.end() || config_.profile == kTransientProfile) {
+        return;
+    }
+    const std::filesystem::path path =
+        paths_.data_dir() / blindbox::peer_state_filename(config_.profile, peer_addr);
+    try {
+        blindbox::save_peer_snapshot(path, found->second, config_.profile,
+                                     ByteView(identity_.signing_seed));
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not save BlindBox state: ") + error.what());
+    }
+}
+
+void ChatService::append_history(const std::string& peer_addr, storage::HistoryEntry entry) {
+    std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
+    entries.push_back(entry);
+    if (config_.profile != kTransientProfile) {
+        try {
+            storage::save_history(paths_, peer_addr, entries,
+                                  ByteView(identity_.identity_key), config_.retention);
+        } catch (const std::exception& error) {
+            emit_error(std::string("could not save history: ") + error.what());
+        }
+    }
+    if (events_.on_history) {
+        events_.on_history(peer_addr, entry);
+    }
+}
+
+void ChatService::update_delivery(const std::string& peer_addr, std::uint64_t msg_id,
+                                  DeliveryState state, const std::string& route,
+                                  const std::string& reason) {
+    const std::string id = std::to_string(msg_id);
+    std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
+    for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry) {
+        if (entry->message_id.has_value() && *entry->message_id == id) {
+            entry->delivery_state = std::string(delivery_state_name(state));
+            entry->delivery_route = route;
+            entry->delivery_reason = reason;
+            break;
+        }
+    }
+    if (config_.profile != kTransientProfile && !entries.empty()) {
+        try {
+            storage::save_history(paths_, peer_addr, entries,
+                                  ByteView(identity_.identity_key), config_.retention);
+        } catch (const std::exception&) {
+            // A delivery marker is not worth failing a send over.
+        }
+    }
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, msg_id, state, route, reason});
+    }
+}
+
+void ChatService::update_delivery_by_media_name(const std::string& peer_addr,
+                                                const std::string& name,
+                                                DeliveryState state, const std::string& route,
+                                                const std::string& reason) {
+    if (name.empty()) {
+        return;
+    }
+    std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
+    std::uint64_t matched_id = 0;
+    for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry) {
+        if (entry->kind != "out" && entry->kind != "me") {
+            continue;
+        }
+        const bool media = entry->text.rfind("[image] ", 0) == 0 ||
+                           entry->text.rfind("[file] ", 0) == 0;
+        if (!media) {
+            continue;
+        }
+        const auto slash = entry->text.find_last_of("/\\");
+        const std::string basename =
+            slash == std::string::npos ? entry->text : entry->text.substr(slash + 1);
+        if (basename != name && entry->text.find(name) == std::string::npos) {
+            continue;
+        }
+        entry->delivery_state = std::string(delivery_state_name(state));
+        entry->delivery_route = route;
+        entry->delivery_reason = reason;
+        if (entry->message_id) {
+            try {
+                matched_id = std::stoull(*entry->message_id);
+            } catch (...) {
+            }
+        }
+        break;
+    }
+    if (config_.profile != kTransientProfile && !entries.empty()) {
+        try {
+            storage::save_history(paths_, peer_addr, entries,
+                                  ByteView(identity_.identity_key), config_.retention);
+        } catch (const std::exception&) {
+        }
+    }
+    if (events_.on_delivery) {
+        events_.on_delivery(DeliveryReport{peer_addr, matched_id, state, route, reason});
+    }
+}
+
+void ChatService::remember_contact(const std::string& peer_addr, const std::string& preview) {
+    bool changed = contacts_.remember_peer(peer_addr);
+    changed = contacts_.set_last_active_peer(peer_addr) || changed;
+    if (!preview.empty()) {
+        changed = contacts_.touch_peer_message_meta(peer_addr, preview_of(preview),
+                                                   storage::now_iso8601_utc()) ||
+                  changed;
+    }
+    if (!changed) {
+        return;
+    }
+    save_contacts();
+    if (events_.on_contacts_changed) {
+        events_.on_contacts_changed();
+    }
+}
+
+void ChatService::save_contacts() {
+    if (config_.profile == kTransientProfile) {
+        return;
+    }
+    try {
+        storage::save_contact_book(paths_.contacts(), contacts_,
+                                   ByteView(identity_.identity_key));
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not save contacts: ") + error.what());
+    }
+}
+
+std::vector<storage::HistoryEntry> ChatService::history(std::string_view peer) const {
+    const std::string addr(peer);
+    const auto found = history_.find(addr);
+    if (found != history_.end()) {
+        return found->second;
+    }
+    return storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+}
+
+bool ChatService::live(std::string_view peer) {
+    std::string addr = sam::normalize_peer_address(std::string(peer));
+    if (addr.empty()) {
+        addr.assign(peer);
+    }
+    const auto found = peers_.find(addr);
+    if (found == peers_.end()) {
+        return false;
+    }
+    return live_link(found->second->link.get(), sessions_, addr);
+}
+
+bool ChatService::peer_offline_ready(std::string_view peer) const {
+    const std::string addr = sam::normalize_peer_address(std::string(peer));
+    const auto found = blindbox_snapshots_.find(addr);
+    if (found == blindbox_snapshots_.end()) {
+        return false;
+    }
+    return found->second.root_secret.has_value();
+}
+
+std::vector<std::string> ChatService::connected_peers() const {
+    std::vector<std::string> out;
+    for (const auto& [addr, peer] : peers_) {
+        if (peer->link && !peer->link->closed() && peer->link->secure()) {
+            out.push_back(addr);
+        }
+    }
+    return out;
+}
+
+bool ChatService::blindbox_ready() const {
+    return config_.blindbox_enabled && !replica_settings_.endpoints.empty();
+}
+
+void ChatService::save_replica_settings(storage::ReplicaSettings settings) {
+    settings.endpoints = storage::normalize_replica_endpoints(settings.endpoints);
+    replica_settings_ = std::move(settings);
+    config_.replicas = replica_settings_;
+    replica_source_ = replica_settings_.endpoints.empty()
+                          ? "none"
+                          : (storage::same_as_release_builtin_endpoints(replica_settings_.endpoints)
+                                 ? "release-builtin"
+                                 : "profile-file");
+    storage::save_replica_settings(paths_.blindbox_replicas(), replica_settings_,
+                                   ByteView(identity_.identity_key));
+}
+
+std::vector<groups::GroupState> ChatService::list_groups() const {
+    try {
+        return groups::list_states(paths_, ByteView(identity_.identity_key),
+                                   ByteView(identity_.signing_seed));
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+std::optional<groups::StoredConversation> ChatService::load_group(
+    std::string_view group_id) const {
+    try {
+        return groups::load_conversation(paths_, group_id, ByteView(identity_.identity_key),
+                                         ByteView(identity_.signing_seed));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+groups::GroupState ChatService::create_group(std::string title,
+                                             std::vector<std::string> members) {
+    std::vector<std::string> roster;
+    roster.push_back(groups::normalize_member_id(identity_.local_addr));
+    for (const std::string& member : members) {
+        const std::string id = groups::normalize_member_id(member);
+        if (id.empty() || id == roster.front()) {
+            continue;
+        }
+        roster.push_back(id);
+    }
+    groups::GroupState state(crypto::random_hex(12), 0, std::move(roster), std::move(title));
+    return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
+                                ByteView(identity_.signing_seed), 1)
+        .state;
+}
+
+groups::GroupState ChatService::update_group(const std::string& group_id, std::string title,
+                                             std::vector<std::string> members) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        throw std::runtime_error("unknown group");
+    }
+    std::vector<std::string> roster;
+    roster.push_back(groups::normalize_member_id(identity_.local_addr));
+    for (const std::string& member : members) {
+        const std::string id = groups::normalize_member_id(member);
+        if (id.empty() || id == roster.front()) {
+            continue;
+        }
+        roster.push_back(id);
+    }
+    groups::GroupState state(existing->state.group_id(), existing->state.epoch() + 1,
+                             std::move(roster), std::move(title));
+    return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
+                                ByteView(identity_.signing_seed), std::nullopt)
+        .state;
+}
+
+bool ChatService::delete_group(const std::string& group_id) {
+    if (group_coordinator_) {
+        group_coordinator_->forget_group(group_id);
+    }
+    return groups::delete_record(paths_, group_id);
+}
+
+std::optional<groups::TopologySnapshot> ChatService::group_topology(const std::string& group_id) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        return std::nullopt;
+    }
+    groups::TopologyInputs inputs;
+    inputs.local_member_id = groups::normalize_member_id(identity_.local_addr);
+    const bool bb_ok = blindbox_ready();
+    int offline = 0;
+    int offline_without_root = 0;
+    for (const std::string& member : existing->state.members()) {
+        const std::string id = groups::normalize_member_id(member);
+        if (id.empty() || id == inputs.local_member_id) {
+            continue;
+        }
+        const bool live = this->live(id);
+        inputs.live_by_member[id] = live;
+        const session::PeerTransport* transport = sessions_.find_peer(id);
+        inputs.peer_state_by_member[id] =
+            transport != nullptr ? std::string(session::peer_state_name(transport->state))
+                                 : std::string("disconnected");
+        bool root_ready = false;
+        if (bb_ok) {
+            try {
+                root_ready = blindbox_snapshot(id).root_secret.has_value();
+            } catch (const std::exception&) {
+                root_ready = false;
+            }
+        }
+        inputs.blindbox_ready_by_member[id] = root_ready;
+        if (!live) {
+            ++offline;
+            if (!root_ready) {
+                ++offline_without_root;
+            }
+        }
+    }
+    inputs.group_blindbox_ready = bb_ok && offline > 0 && offline_without_root == 0;
+    inputs.await_group_root = bb_ok && offline > 0 && offline_without_root > 0;
+    for (auto it = existing->history.rbegin(); it != existing->history.rend(); ++it) {
+        if (it->kind == "me" && !it->delivery_results.empty()) {
+            inputs.delivery_status_by_member = it->delivery_results;
+            inputs.delivery_reason_by_member = it->delivery_reasons;
+            break;
+        }
+    }
+    groups::TopologySnapshot snapshot = groups::build_observed_topology(existing->state, inputs);
+    for (groups::TopologyNode& node : snapshot.nodes) {
+        if (node.is_local) {
+            node.label = "You";
+            continue;
+        }
+        if (const storage::ContactRecord* rec = contacts_.get(node.member_id);
+            rec != nullptr && !rec->display_name.empty()) {
+            node.label = rec->display_name;
+        }
+    }
+    return snapshot;
+}
+
+groups::GroupState ChatService::join_group_invite(std::string_view token) {
+    const groups::GroupInvite invite = groups::decode_invite(token);
+    groups::GroupState state(invite.group_id, invite.epoch, invite.members, invite.title);
+    return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
+                                ByteView(identity_.signing_seed), std::nullopt)
+        .state;
+}
+
+void ChatService::append_group_text(const std::string& group_id, std::string text) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        throw std::runtime_error("unknown group");
+    }
+    groups::HistoryEntry entry;
+    entry.kind = "me";
+    entry.sender_id = identity_.local_addr;
+    entry.text = std::move(text);
+    entry.payload = entry.text;
+    entry.created_at = storage::now_iso8601_utc();
+    entry.msg_id = crypto::random_hex(16);
+    (void)groups::append_history(paths_, existing->state, entry, ByteView(identity_.identity_key),
+                                 ByteView(identity_.signing_seed), std::nullopt);
+    emit_group_message(group_id);
+}
+
+void ChatService::emit_group_message(const std::string& group_id) const {
+    if (events_.on_group_message) {
+        events_.on_group_message(group_id);
+    }
+}
+
+bool ChatService::ingest_group_transport(const std::string& peer_addr, const std::string& text) {
+    std::optional<groups::DecodedTransportMessage> decoded;
+    try {
+        decoded = groups::decode_transport(text);
+    } catch (const groups::WireError& error) {
+        emit_error(std::string(error.what()));
+        return true;
+    }
+    if (!decoded) {
+        return false;
+    }
+
+    // The embedded roster and title are chosen by the sender. Keep the local
+    // group, and refuse a frame for a group this profile has never joined.
+    const std::optional<groups::StoredConversation> stored =
+        load_group(decoded->state.group_id());
+    if (!stored) {
+        emit_error(
+            "Group transport for an unknown group is rejected; use a signed invite");
+        return true;
+    }
+    const std::string sender = groups::normalize_member_id(decoded->envelope.sender_id);
+    if (sender.empty()) {
+        emit_error("Group transport sender is missing");
+        return true;
+    }
+    if (decoded->delivery_scope == groups::kDeliveryScopeRecipient) {
+        if (!storage::same_i2p_destination(sender, peer_addr)) {
+            emit_error("Group transport sender does not match the authenticated peer");
+            return true;
+        }
+        if (decoded->recipient_id.has_value() &&
+            !storage::same_i2p_destination(*decoded->recipient_id, identity_.local_addr)) {
+            emit_error("Group transport recipient does not match this profile");
+            return true;
+        }
+    } else if (decoded->delivery_scope == groups::kDeliveryScopeGroupBlindBox) {
+        if (!decoded->signer_key.has_value() ||
+            decoded->signer_key->size() != crypto::kEd25519PublicSize) {
+            emit_error("Group blindbox transport is missing a valid signer key");
+            return true;
+        }
+        const std::optional<session::TrustPin> pin = trust_.pin_for(sender);
+        const std::string signer_hex = encoding::hex_encode(ByteView(*decoded->signer_key));
+        if (!pin.has_value() || pin->signing_key_hex != signer_hex) {
+            emit_error("Group blindbox signer key does not match the pinned sender key");
+            return true;
+        }
+    }
+
+    std::string op;
+    std::string joined;
+    if (decoded->envelope.content_type == groups::ContentType::GroupControl &&
+        decoded->envelope.payload.is_object()) {
+        const auto op_field = decoded->envelope.payload.find("op");
+        if (op_field != decoded->envelope.payload.end() && op_field->is_string()) {
+            op = op_field->get<std::string>();
+            for (char& ch : op) {
+                if (ch >= 'A' && ch <= 'Z') {
+                    ch = static_cast<char>(ch - 'A' + 'a');
+                }
+            }
+        }
+        if (op == "join") {
+            const auto joined_field = decoded->envelope.payload.find("joined_member_id");
+            if (joined_field != decoded->envelope.payload.end() && joined_field->is_string()) {
+                joined = groups::normalize_member_id(joined_field->get<std::string>());
+            }
+            if (joined.empty() || !storage::same_i2p_destination(joined, sender)) {
+                emit_error("Group join may only add the authenticated sender");
+                return true;
+            }
+        }
+    }
+    if (!stored->state.has_member(sender) && op != "join") {
+        emit_error("Group transport sender is not a member of the known group roster");
+        return true;
+    }
+
+    std::vector<std::string> members = stored->state.members();
+    if (op == "join" && !stored->state.has_member(sender)) {
+        members.push_back(sender);
+    }
+    std::string title = stored->state.title();
+    if (op != "join" && decoded->envelope.content_type == groups::ContentType::GroupControl &&
+        decoded->envelope.payload.is_object()) {
+        const auto title_field = decoded->envelope.payload.find("title");
+        if (title_field != decoded->envelope.payload.end() && title_field->is_string()) {
+            const std::string incoming_title = title_field->get<std::string>();
+            if (!incoming_title.empty()) {
+                title = incoming_title;
+            }
+        }
+    }
+    const std::uint64_t epoch = std::max(
+        stored->state.epoch(), std::max(decoded->envelope.epoch, decoded->state.epoch()));
+    const groups::GroupState safe(decoded->state.group_id(), epoch, std::move(members), title);
+
+    groups::HistoryEntry entry;
+    const std::string local = groups::normalize_member_id(identity_.local_addr);
+    entry.kind = groups::normalize_member_id(decoded->envelope.sender_id) == local ? "me" : "peer";
+    entry.sender_id = decoded->envelope.sender_id;
+    entry.content_type = decoded->envelope.content_type;
+    if (decoded->envelope.payload.is_string()) {
+        entry.text = decoded->envelope.payload.get<std::string>();
+        entry.payload = entry.text;
+    } else {
+        entry.payload = decoded->envelope.payload;
+    }
+    entry.msg_id = decoded->envelope.msg_id;
+    entry.group_seq = decoded->envelope.group_seq;
+    entry.epoch = decoded->envelope.epoch;
+    entry.created_at = decoded->envelope.created_at;
+    entry.source_peer = peer_addr;
+    (void)groups::append_history(paths_, safe, entry, ByteView(identity_.identity_key),
+                                 ByteView(identity_.signing_seed), std::nullopt);
+    emit_group_message(safe.group_id());
+    return true;
+}
+
+void ChatService::ensure_group_coordinator() {
+    if (group_coordinator_) {
+        return;
+    }
+    groups::GroupCoordinator::Callbacks callbacks;
+    callbacks.send_live = [this](const std::string& recipient, const groups::GroupEnvelope& envelope,
+                                 const groups::RecipientDelivery& delivery)
+        -> asio::awaitable<groups::TransportOutcome> {
+        const std::string dest = sam::normalize_peer_address(recipient);
+        const std::optional<groups::StoredConversation> conv = load_group(envelope.group_id);
+        if (!conv) {
+            co_return groups::TransportOutcome{false, "unknown-group", {}};
+        }
+        Peer* target = find_peer(dest);
+        if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+            co_return groups::TransportOutcome{false, "no-live-session", {}};
+        }
+        const std::string wire =
+            groups::encode_transport_v1(conv->state, envelope, delivery);
+        const std::uint64_t msg_id = next_msg_id();
+        target->link->send_text('U', wire, msg_id);
+        co_return groups::TransportOutcome{true, "live-session", std::to_string(msg_id)};
+    };
+    callbacks.send_offline = [this](const std::string& recipient,
+                                    const groups::GroupEnvelope& envelope,
+                                    const groups::RecipientDelivery& delivery)
+        -> asio::awaitable<groups::TransportOutcome> {
+        const std::string dest = sam::normalize_peer_address(recipient);
+        std::optional<groups::StoredConversation> conv = load_group(envelope.group_id);
+        if (!conv) {
+            co_return groups::TransportOutcome{false, "unknown-group", {}};
+        }
+        if (!ensure_replica_client()) {
+            co_return groups::TransportOutcome{false, "blindbox-disabled", {}};
+        }
+        if (last_group_bb_msg_id_ == envelope.msg_id) {
+            co_return groups::TransportOutcome{true, "blindbox-ready", {}};
+        }
+        blindbox::PeerSnapshot& snapshot = blindbox_snapshot(dest);
+        if (snapshot.root_secret.has_value()) {
+            const std::string wire =
+                groups::encode_transport_v1(conv->state, envelope, delivery);
+            const std::uint64_t msg_id = next_msg_id();
+            const Bytes frame = protocol::encode_frame('U', as_bytes(wire), msg_id, 0);
+            try {
+                (void)co_await blindbox::send_pairwise(*replicas_, snapshot, identity_.local_addr,
+                                                       frame, config_.blindbox, unix_now());
+                save_blindbox_snapshot(dest);
+                co_return groups::TransportOutcome{true, "blindbox-ready", std::to_string(msg_id)};
+            } catch (const std::exception& error) {
+                co_return groups::TransportOutcome{false, error.what(), {}};
+            }
+        }
+        if (conv->blindbox_channel && conv->blindbox_channel->root_secret.has_value() &&
+            conv->blindbox_channel->group_epoch == envelope.epoch) {
+            try {
+                const Bytes signer = identity_.signing_public;
+                const Bytes payload =
+                    groups::v3_signature_payload(conv->state, envelope, ByteView(signer));
+                const Bytes signature = crypto::sign_data(ByteView(identity_.signing_seed),
+                                                          ByteView(payload));
+                const std::string wire =
+                    groups::encode_transport_v3(conv->state, envelope, ByteView(signer),
+                                                ByteView(signature));
+                const std::uint64_t msg_id = next_msg_id();
+                const Bytes frame = protocol::encode_frame('U', as_bytes(wire), msg_id, 0);
+                (void)co_await blindbox::send_group(*replicas_, *conv->blindbox_channel,
+                                                    identity_.local_addr, frame, config_.blindbox,
+                                                    unix_now());
+                groups::save_conversation(paths_, *conv, ByteView(identity_.identity_key),
+                                          ByteView(identity_.signing_seed));
+                last_group_bb_msg_id_ = envelope.msg_id;
+                co_return groups::TransportOutcome{true, "blindbox-ready",
+                                                   std::to_string(msg_id)};
+            } catch (const std::exception& error) {
+                co_return groups::TransportOutcome{false, error.what(), {}};
+            }
+        }
+        co_return groups::TransportOutcome{false, "blindbox-await-root", {}};
+    };
+    callbacks.live_ready = [this](const std::string& peer) {
+        const std::string dest = sam::normalize_peer_address(peer);
+        return sessions_.live_ready(dest);
+    };
+    callbacks.new_msg_id = [] { return crypto::random_hex(16); };
+    callbacks.now = [] { return storage::now_iso8601_utc(); };
+    group_coordinator_ = std::make_unique<groups::GroupCoordinator>(std::move(callbacks));
+}
+
+asio::awaitable<void> ChatService::send_group_text(std::string group_id, std::string text) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        emit_error("unknown group");
+        co_return;
+    }
+    ensure_group_coordinator();
+    group_coordinator_->prime_sequence(existing->state.group_id(), existing->next_group_seq);
+    groups::SendResult result =
+        co_await group_coordinator_->send_text(existing->state, identity_.local_addr, text);
+    groups::HistoryEntry entry;
+    entry.kind = "me";
+    entry.sender_id = identity_.local_addr;
+    entry.content_type = result.envelope.content_type;
+    entry.text = std::move(text);
+    entry.payload = entry.text;
+    entry.msg_id = result.envelope.msg_id;
+    entry.group_seq = result.envelope.group_seq;
+    entry.epoch = result.envelope.epoch;
+    entry.created_at = result.envelope.created_at;
+    for (const groups::MemberDelivery& delivery : result.deliveries) {
+        entry.delivery_results[delivery.recipient_id] =
+            std::string(groups::delivery_status_name(delivery.status));
+        entry.delivery_reasons[delivery.recipient_id] = delivery.reason;
+    }
+    (void)groups::append_history(paths_, existing->state, entry, ByteView(identity_.identity_key),
+                                 ByteView(identity_.signing_seed), result.envelope.group_seq + 1);
+    emit_group_message(existing->state.group_id());
+}
+
+std::string ChatService::encode_group_invite(const std::string& group_id) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        throw std::runtime_error("unknown group");
+    }
+    groups::GroupInvite invite;
+    invite.invite_id = crypto::random_hex(12);
+    invite.group_id = existing->state.group_id();
+    invite.members = existing->state.members();
+    invite.epoch = existing->state.epoch();
+    invite.inviter_id = identity_.local_addr;
+    invite.title = existing->state.title();
+    invite.created_at = storage::now_iso8601_utc();
+    return groups::encode_invite(invite, ByteView(identity_.signing_seed));
+}
+
+std::uint64_t ChatService::next_msg_id() {
+    const std::uint64_t id = next_msg_id_;
+    next_msg_id_ = next_msg_id_ == 0xFFFFFFFFFFFFFFFFULL ? 1 : next_msg_id_ + 1;
+    return id;
+}
+
+void ChatService::emit_system(const std::string& message) const {
+    if (events_.on_system) {
+        events_.on_system(message);
+    }
+}
+
+void ChatService::emit_error(const std::string& message) const {
+    if (events_.on_error) {
+        events_.on_error(message);
+    }
+}
+
+}  // namespace i2pchat::runtime

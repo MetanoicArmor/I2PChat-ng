@@ -1212,6 +1212,12 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             core = I2PChatCore(profile="alice", on_message=messages.append)
             core.get_profile_data_dir = lambda create=True: tmpdir  # type: ignore[method-assign]
             core.my_dest = _DummyDest(ALICE_BARE)
+            core.create_group(
+                title="Imported group",
+                members=[BOB_BARE],
+                group_id="core-group-2",
+                epoch=4,
+            )
             state = GroupState(
                 group_id="core-group-2",
                 epoch=4,
@@ -1259,6 +1265,12 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             core = I2PChatCore(profile="alice")
             core.get_profile_data_dir = lambda create=True: tmpdir  # type: ignore[method-assign]
             core.my_dest = _DummyDest(ALICE_BARE)
+            core.create_group(
+                title="Dup test",
+                members=[BOB_BARE],
+                group_id="core-group-3",
+                epoch=2,
+            )
             state = GroupState(
                 group_id="core-group-3",
                 epoch=2,
@@ -1297,6 +1309,12 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             core = I2PChatCore(profile="alice")
             core.get_profile_data_dir = lambda create=True: tmpdir  # type: ignore[method-assign]
             core.my_dest = _DummyDest(ALICE_BARE)
+            core.create_group(
+                title="Original title",
+                members=[BOB_BARE],
+                group_id="core-group-dup-safe",
+                epoch=2,
+            )
             original_state = GroupState(
                 group_id="core-group-dup-safe",
                 epoch=2,
@@ -1502,7 +1520,9 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             assert final_state is not None
             self.assertEqual(final_state.title, "Imported title")
             self.assertEqual(final_state.epoch, 5)
-            self.assertIn(CAROL_BARE, final_state.members)
+            self.assertIn(ALICE_BARE, final_state.members)
+            self.assertIn(BOB_BARE, final_state.members)
+            self.assertNotIn(CAROL_BARE, final_state.members)
             self.assertEqual(final_history[-1].kind, "peer")
             self.assertEqual(final_history[-1].sender_id, BOB_BARE)
             self.assertEqual(final_history[-1].text, "")
@@ -1656,6 +1676,12 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             core = I2PChatCore(profile="alice")
             core.get_profile_data_dir = lambda create=True: tmpdir  # type: ignore[method-assign]
             core.my_dest = _DummyDest(ALICE_BARE)
+            core.create_group(
+                title="Bool wrapper",
+                members=[BOB_BARE],
+                group_id="core-group-bool-wrapper",
+                epoch=1,
+            )
             state = GroupState(
                 group_id="core-group-bool-wrapper",
                 epoch=1,

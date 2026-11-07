@@ -1,0 +1,96 @@
+name: Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [python]
+    paths:
+      - android/**
+      - cpp/core/**
+      - build-android.sh
+      - VERSION
+      - .github/workflows/android.yml
+  pull_request:
+    paths:
+      - android/**
+      - cpp/core/**
+      - build-android.sh
+      - VERSION
+      - .github/workflows/android.yml
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages + NDK r28
+        env:
+          NDK_VERSION: "28.2.13676358"
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: android-gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-gradle-${{ runner.os }}-
+
+      - name: Cache Android native deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/.cxx
+            android/app/build
+          key: android-native-${{ runner.os }}-${{ hashFiles('android/app/src/main/cpp/**', 'cpp/core/**', 'VERSION') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
+
+      - name: Verify bundled libi2pd.so
+        run: |
+          test -f android/app/src/main/jniLibs/arm64-v8a/libi2pd.so
+          test -f android/app/src/main/jniLibs/x86_64/libi2pd.so
+
+      - name: Build Android release APKs
+        run: |
+          ./build-android.sh --release
+          ./build-android.sh --arm32 --release
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            dist/I2PChat-android-v*-release.apk
+            dist/I2PChat-android-v*-arm32-release.apk
+            dist/*.sha256
+          if-no-files-found: error

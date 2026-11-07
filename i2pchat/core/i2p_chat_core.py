@@ -4806,9 +4806,19 @@ class I2PChatCore:
             return False
 
     async def _set_verified_peer_identity(
-        self, peer_addr: str, raw_dest: str, *, source: str
+        self,
+        peer_addr: str,
+        raw_dest: str,
+        *,
+        source: str,
+        activate: bool = False,
     ) -> bool:
-        """Фиксирует peer identity только после SAM-проверки binding."""
+        """Фиксирует peer identity только после SAM-проверки binding.
+
+        Входящий незнакомец не становится текущим пиром и не попадает в книгу
+        контактов, пока handshake не завершится доверием. ``activate=True`` —
+        явное переключение уже выбранного пользователем пира.
+        """
         normalized_addr = self._normalize_peer_addr(peer_addr)
         canonical_dest = self._canonical_dest_base64(raw_dest)
         if not await self._verify_address_binding_via_sam(normalized_addr, canonical_dest):
@@ -4816,9 +4826,19 @@ class I2PChatCore:
                 f"Rejected {source} identity: SAM lookup does not confirm {normalized_addr[:24]}..."
             )
             return False
-        self.activate_peer_context(normalized_addr)
-        self.current_peer_dest_b64 = canonical_dest
-        self.peer_identity_binding_verified = True
+        sess = self._live_sessions.get(normalized_addr)
+        if sess is not None:
+            sess.current_peer_dest_b64 = canonical_dest
+            sess.peer_identity_binding_verified = True
+        try:
+            active = self._normalize_peer_addr(self.current_peer_addr or "")
+        except Exception:
+            active = ""
+        if activate:
+            self.activate_peer_context(normalized_addr)
+        if activate or (active and same_i2p_destination(active, normalized_addr)):
+            self.current_peer_dest_b64 = canonical_dest
+            self.peer_identity_binding_verified = True
         return True
 
     def activate_peer_context(self, peer_addr: str) -> str:
@@ -7078,34 +7098,39 @@ class I2PChatCore:
             raise ValueError("Unsupported group transport content type")
         if not any(same_i2p_destination(sender_id, m) for m in state.members if m):
             raise ValueError("Group transport sender is not a group member")
-        # Authorize the sender against the LOCALLY known roster, not just the
-        # roster embedded in the (attacker-controlled) message. If we already
-        # know this group and the sender is not in our roster, the only
-        # legitimate case is a peer announcing their own join via a
-        # GROUP_CONTROL "join" op; anything else (a non-member injecting text,
-        # or spoofing membership changes for others) is rejected. For groups we
-        # have not seen yet, first-contact trust is established via the signed
-        # invite, so we fall back to the message roster only when no local
-        # state exists.
+        # Authorize the sender against the LOCALLY known roster, not the roster
+        # embedded in the message. An unknown group is rejected: first contact
+        # is a signed invite. A non-member may only announce their own join;
+        # that announcement adds the sender and cannot replace the local roster.
         local_state = self.load_group_state(group_id)
-        if local_state is not None and not any(
+        if local_state is None:
+            raise ValueError(
+                "Group transport for an unknown group is rejected; use a signed invite"
+            )
+        sender_in_local = any(
             same_i2p_destination(sender_id, m) for m in local_state.members if m
+        )
+        if envelope.content_type == GroupContentType.GROUP_CONTROL and isinstance(
+            envelope.payload, dict
         ):
-            is_self_join = False
+            op = str(envelope.payload.get("op") or "").strip().lower()
+            if op == "join":
+                joined_member = normalize_member_id(
+                    str(envelope.payload.get("joined_member_id") or "")
+                )
+                if not joined_member or not same_i2p_destination(
+                    joined_member, sender_id
+                ):
+                    raise ValueError(
+                        "Group join may only add the authenticated sender"
+                    )
+        if not sender_in_local:
+            op = ""
             if envelope.content_type == GroupContentType.GROUP_CONTROL and isinstance(
                 envelope.payload, dict
             ):
                 op = str(envelope.payload.get("op") or "").strip().lower()
-                joined_member = normalize_member_id(
-                    str(envelope.payload.get("joined_member_id") or "")
-                )
-                if (
-                    op == "join"
-                    and joined_member
-                    and same_i2p_destination(joined_member, sender_id)
-                ):
-                    is_self_join = True
-            if not is_self_join:
+            if op != "join":
                 raise ValueError(
                     "Group transport sender is not a member of the known group roster"
                 )
@@ -7208,26 +7233,30 @@ class I2PChatCore:
             local_member = self._local_group_member_id()
         except Exception:
             local_member = ""
-        merged_members = list(existing.members if existing is not None else ())
-        merged_members.extend(incoming.members)
-        merged_members.append(envelope.sender_id)
+        # The wire snapshot is attacker-controlled. Keep the local roster;
+        # a join adds exactly one authenticated sender in
+        # ``_apply_group_control_payload``.
+        if existing is not None:
+            merged_members = list(existing.members)
+            title = existing.title
+            created_at = existing.created_at
+            base_epoch = int(existing.epoch)
+            base_updated = existing.updated_at
+        else:
+            merged_members = []
+            title = None
+            created_at = incoming.created_at
+            base_epoch = 0
+            base_updated = incoming.updated_at
         if local_member:
             merged_members.append(local_member)
         return GroupState(
             group_id=incoming.group_id,
-            title=(incoming.title or (existing.title if existing is not None else None)),
-            epoch=max(
-                int(envelope.epoch),
-                int(incoming.epoch),
-                int(existing.epoch) if existing is not None else 0,
-            ),
+            title=title,
+            epoch=max(int(envelope.epoch), int(incoming.epoch), base_epoch),
             members=tuple(merged_members),
-            created_at=existing.created_at if existing is not None else incoming.created_at,
-            updated_at=max(
-                incoming.updated_at,
-                envelope.created_at,
-                existing.updated_at if existing is not None else incoming.updated_at,
-            ),
+            created_at=created_at,
+            updated_at=max(incoming.updated_at, envelope.created_at, base_updated),
         )
 
     def _apply_group_control_payload(
@@ -7240,17 +7269,23 @@ class I2PChatCore:
     ) -> GroupState:
         if not isinstance(payload, dict):
             return state
-        title = str(payload.get("title") or "").strip() or state.title
-        members = tuple(
-            str(member)
-            for member in payload.get("members", state.members)
-        )
+        op = str(payload.get("op") or "").strip().lower()
+        title = state.title
+        if op != "join":
+            incoming_title = str(payload.get("title") or "").strip()
+            if incoming_title:
+                title = incoming_title
+        members = list(state.members)
+        if op == "join":
+            joined = normalize_member_id(str(payload.get("joined_member_id") or ""))
+            if joined:
+                members.append(joined)
         control_epoch = int(payload.get("epoch", epoch))
         return GroupState(
             group_id=state.group_id,
             title=title,
             epoch=max(int(state.epoch), control_epoch),
-            members=members,
+            members=tuple(members),
             created_at=state.created_at,
             updated_at=updated_at,
         )
@@ -10358,8 +10393,7 @@ class I2PChatCore:
             sess._hs_tofu_awaiting_ui = True
             if sess.announce_lifecycle:
                 self._emit_system(
-                    "Keys confirmed. Accept the Trust dialog to enable Send "
-                    "(peer may already be able to message you)."
+                    "Keys confirmed. Accept the Trust dialog to open the secure channel."
                 )
             try:
                 trusted = await self._pin_or_verify_peer_signing_key(
@@ -10390,7 +10424,16 @@ class I2PChatCore:
                 peer_addr_norm = self._normalize_peer_addr(peer_addr_norm)
             except ValueError:
                 pass
+            if self.ensure_peer_in_saved_contacts(peer_addr_norm):
+                self._emit_system(
+                    f"Accepted first contact from {peer_addr_norm[:12]}... "
+                    "and added it to Saved peers."
+                )
             self.activate_peer_context(peer_addr_norm)
+            if sess.current_peer_dest_b64:
+                self.current_peer_dest_b64 = sess.current_peer_dest_b64
+                self.peer_identity_binding_verified = True
+            self._emit_peer_changed(peer_addr_norm)
             self.session_manager.set_peer_handshake_complete(
                 peer_addr_norm, reason="handshake-ok"
             )
@@ -10487,19 +10530,16 @@ class I2PChatCore:
 
                 try:
                     raw_dest = peer_identity_line.decode().strip()
-                    peer_addr = i2plib.Destination(raw_dest).base32
+                    dest_obj = i2plib.Destination(raw_dest)
+                    peer_addr = dest_obj.base32
+                    canonical_dest = getattr(dest_obj, "base64", None) or raw_dest
 
                     verified = await self._set_verified_peer_identity(
-                        peer_addr, raw_dest, source="preface"
+                        peer_addr, raw_dest, source="preface", activate=False
                     )
                     if not verified:
                         writer.close()
                         continue
-                    if self.ensure_peer_in_saved_contacts(peer_addr):
-                        self._emit_system(
-                            f"Accepted first contact from {peer_addr[:12]}... "
-                            "and added it to Saved peers."
-                        )
                     peer_addr_norm = self._normalize_peer_addr(peer_addr)
                     existing_session = self._live_sessions.get(peer_addr_norm)
                     if existing_session is not None:
@@ -10535,6 +10575,8 @@ class I2PChatCore:
                         continue
 
                     extra_ls = LivePeerSession(peer_id=peer_addr_norm)
+                    extra_ls.current_peer_dest_b64 = canonical_dest
+                    extra_ls.peer_identity_binding_verified = True
                     self._live_sessions[peer_addr_norm] = extra_ls
 
                     self._emit_message(
@@ -11381,14 +11423,15 @@ class I2PChatCore:
                                 )
                                 break
                             if not await self._set_verified_peer_identity(
-                                new_peer, body, source="framed"
+                                new_peer, body, source="framed", activate=False
                             ):
                                 break
-                            self.peer_b32 = new_peer
-                            self._emit_message(
-                                "info", f"Peer Identity: {self.peer_b32}"
-                            )
-                            self._emit_peer_changed(self.peer_b32)
+                            if sess.handshake_complete:
+                                self.peer_b32 = new_peer
+                                self._emit_message(
+                                    "info", f"Peer Identity: {self.peer_b32}"
+                                )
+                                self._emit_peer_changed(self.peer_b32)
                         except Exception:
                             pass
 

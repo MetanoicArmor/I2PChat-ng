@@ -291,6 +291,118 @@ class GroupSenderAuthenticationTests(unittest.TestCase):
             self.assertEqual(result.status, GroupImportStatus.INVALID)
             self.assertIn("unsigned", (result.error or "").lower())
 
+    def test_self_join_adds_only_the_sender(self) -> None:
+        eve = "dddddddddddddddddddddddddddddddddddddddd"
+        injected = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = self._make_core(tmpdir)
+            state = GroupState(
+                group_id="audit-group-1",
+                epoch=4,
+                members=(ALICE_BARE, eve, injected),
+                title="Taken over",
+            )
+            envelope = GroupEnvelope(
+                group_id="audit-group-1",
+                epoch=4,
+                msg_id="join-evil",
+                sender_id=eve,
+                group_seq=1,
+                content_type=GroupContentType.GROUP_CONTROL,
+                payload={
+                    "op": "join",
+                    "members": [eve, injected],
+                    "title": "Taken over",
+                    "epoch": 4,
+                    "joined_member_id": eve,
+                },
+            )
+            wire = encode_group_transport_text(
+                state,
+                envelope,
+                GroupRecipientDeliveryMetadata(
+                    recipient_id=ALICE_BARE,
+                    delivery_id="join-evil:alice",
+                ),
+            )
+            result = core.import_group_transport(wire, source_peer=eve)
+            saved = core.load_group_state("audit-group-1")
+            assert result is not None
+            assert saved is not None
+            self.assertEqual(result.status, GroupImportStatus.IMPORTED)
+            self.assertIn(ALICE_BARE, saved.members)
+            self.assertIn(BOB_BARE, saved.members)
+            self.assertIn(CAROL_BARE, saved.members)
+            self.assertIn(eve, saved.members)
+            self.assertNotIn(injected, saved.members)
+            self.assertEqual(saved.title, "Audit group")
+
+    def test_member_text_cannot_inject_roster(self) -> None:
+        eve = "dddddddddddddddddddddddddddddddddddddddd"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = self._make_core(tmpdir)
+            state = GroupState(
+                group_id="audit-group-1",
+                epoch=2,
+                members=(ALICE_BARE, BOB_BARE, eve),
+                title="Renamed by text",
+            )
+            envelope = GroupEnvelope(
+                group_id="audit-group-1",
+                epoch=2,
+                msg_id="text-inject",
+                sender_id=BOB_BARE,
+                group_seq=1,
+                content_type=GroupContentType.GROUP_TEXT,
+                payload="hello",
+            )
+            wire = encode_group_transport_text(
+                state,
+                envelope,
+                GroupRecipientDeliveryMetadata(
+                    recipient_id=ALICE_BARE,
+                    delivery_id="text-inject:alice",
+                ),
+            )
+            result = core.import_group_transport(wire, source_peer=BOB_BARE)
+            saved = core.load_group_state("audit-group-1")
+            assert result is not None
+            assert saved is not None
+            self.assertEqual(result.status, GroupImportStatus.IMPORTED)
+            self.assertEqual(saved.members, (ALICE_BARE, BOB_BARE, CAROL_BARE))
+            self.assertEqual(saved.title, "Audit group")
+
+    def test_unknown_group_transport_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = self._make_core(tmpdir)
+            state = GroupState(
+                group_id="brand-new-group",
+                epoch=1,
+                members=(ALICE_BARE, BOB_BARE),
+                title="Surprise",
+            )
+            envelope = GroupEnvelope(
+                group_id="brand-new-group",
+                epoch=1,
+                msg_id="new-group-1",
+                sender_id=BOB_BARE,
+                group_seq=1,
+                content_type=GroupContentType.GROUP_TEXT,
+                payload="hello",
+            )
+            wire = encode_group_transport_text(
+                state,
+                envelope,
+                GroupRecipientDeliveryMetadata(
+                    recipient_id=ALICE_BARE,
+                    delivery_id="new-group-1:alice",
+                ),
+            )
+            result = core.import_group_transport(wire, source_peer=BOB_BARE)
+            assert result is not None
+            self.assertEqual(result.status, GroupImportStatus.INVALID)
+            self.assertIsNone(core.load_group_state("brand-new-group"))
+
 
 class PreHandshakeSignalRejectionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

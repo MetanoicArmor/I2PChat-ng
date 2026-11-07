@@ -216,7 +216,7 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(remembered, [PEER_BARE])
 
-    async def test_accept_loop_allows_first_contact_and_adds_peer_to_saved(self) -> None:
+    async def test_accept_loop_does_not_save_peer_before_trust(self) -> None:
         core = I2PChatCore(profile="alice")
         core.my_dest = SimpleNamespace(base64="DEST_B64")
         remembered: list[str] = []
@@ -271,8 +271,46 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
             core_module.i2plib.stream_accept = original_stream_accept  # type: ignore[assignment]
             core_module.i2plib.Destination = original_destination  # type: ignore[assignment]
 
-        self.assertEqual(remembered, [PEER_BARE])
-        self.assertTrue(any("Accepted first contact" in msg for msg in systems), systems)
+        self.assertEqual(remembered, [])
+        self.assertFalse(any("Accepted first contact" in msg for msg in systems), systems)
+        self.assertNotEqual(core.current_peer_addr, PEER_BARE)
+
+    async def test_contact_is_saved_only_after_trust(self) -> None:
+        core = I2PChatCore(profile="alice")
+        core.blindbox_enabled = False
+        core.current_peer_addr = OTHER_BARE
+        peer = core._normalize_peer_addr(PEER_BARE)
+        sess = LivePeerSession(peer_id=peer)
+        sess._hs_tofu_pending_key = b"\x11" * 32
+        sess.current_peer_dest_b64 = "DEST"
+        sess.peer_identity_binding_verified = True
+        core._live_sessions[peer] = sess
+        remembered: list[str] = []
+        core.ensure_peer_in_saved_contacts = lambda addr: remembered.append(addr) or True  # type: ignore[method-assign]
+        core._pin_or_verify_peer_signing_key = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        writer = _FakeWriter()
+
+        await core._finalize_secure_channel(
+            sess, writer, peer_id=peer, peer_addr=peer
+        )
+
+        self.assertEqual(remembered, [])
+        self.assertEqual(core.current_peer_addr, OTHER_BARE)
+        self.assertFalse(sess.handshake_complete)
+
+        sess._hs_tofu_pending_key = b"\x22" * 32
+        core._pin_or_verify_peer_signing_key = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        core._send_blindbox_root_if_needed = AsyncMock()  # type: ignore[method-assign]
+        core._legacy_group_blindbox_outbound_enabled = lambda: False  # type: ignore[method-assign]
+
+        await core._finalize_secure_channel(
+            sess, writer, peer_id=peer, peer_addr=peer
+        )
+
+        self.assertEqual(remembered, [peer])
+        self.assertEqual(core.current_peer_addr, peer)
+        self.assertTrue(sess.handshake_complete)
+        self.assertEqual(core.current_peer_dest_b64, "DEST")
 
     async def test_accept_loop_prefers_incoming_during_simultaneous_connect_when_local_sorts_after_peer(self) -> None:
         core = I2PChatCore(profile="alice")
