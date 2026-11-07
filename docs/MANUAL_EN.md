@@ -66,7 +66,7 @@ After you choose a profile, the main chat window opens:
   On important network/security changes and errors, the status row is temporarily expanded for readability, then returns to normal compact behavior.
 - **Theme switch** — to the right of the status row (sun/moon icon). Toggles `ligth` and `night`.
 - **Saved peers** — optional **left** sidebar with the per-profile contact book; details in **§3.1**.
-- **Chat area** — shows your and peer messages, system notices, and file transfer progress. You can select and copy message text (right‑click or context menu).
+- **Chat area** — shows your and peer messages, feedback on your actions, and file transfer progress. Network service messages (tunnels, handshakes, connects/disconnects) live on the **Status** page (see **§3.2**). You can select and copy message text (right‑click or context menu).
 - **Message input** — below the chat: type your text. **By default**, **macOS** uses **Enter** to send and **Shift+Enter** for a new line; **Windows/Linux** use **Enter** for a new line and **Ctrl+Enter** to send. On **macOS**, **Command+Enter** and **Ctrl+Enter** both send in either mode. In the **`⋯`** menu you can turn **Enter sends message: ON/OFF** for your preference — when ON, **Enter** sends and **Shift+Enter** inserts a new line; when OFF, **Enter** inserts a new line. The placeholder hint under the field matches the active mode. Setting is saved in **`ui_prefs.json`**. You can **paste a raster image** from the clipboard (**Ctrl+V** / **⌘V** or **Paste** in the field’s menu); it is sent like **Send picture** (PNG/JPEG/WebP).
 - **Actions bar** — at the bottom: peer address, connection buttons, and the **`⋯`** menu (see section 4).
 
@@ -81,6 +81,19 @@ The **Saved peers** strip on the **left** is your local **contact book** for the
 - **◀ / ▶** — collapse or expand the sidebar; when the profile is **locked to a peer**, the strip may start **collapsed** to give more space to the chat.
 - **Drag** the narrow grip between the list and the chat to resize the strip (within min/max limits).
 - **Right‑click** a contact — **Edit name & note…** (local labels only), **Contact details…** (address, TOFU fingerprint, optional **Remove pin**), **Remove from saved peers…** (with options to also delete encrypted history, TOFU pin, profile lock, and BlindBox state file for that peer, where applicable).
+
+#### 3.2. Status page and verbose log
+
+The app opens on the **Status** page so you can see whether the messenger is ready. In the GUI it is the **Status** button above the contact list (also in the **`⋯`** menu); **Chats →** or clicking a contact returns to the conversation. On Android it is the first bottom tab (**Status / Chats / Settings**); in the TUI it is shown at startup and toggled with **F9** (close with **F9** or **Esc**).
+
+- **Readiness checklist**: I2P router (built-in i2pd or system router), router connection (SAM), tunnels, your address, BlindBox offline delivery. The header reads "Ready to chat" once everything is fine.
+- **Problem and what to do**: when the router is unreachable you get actionable advice. For a system i2pd: make sure the router is running, SAM is enabled, and the host and port are correct. For the built-in i2pd the app reads its log and names the cause: reseed failed (check the internet connection and clock sync, use a proxy on first start, or reseed manually if your provider blocks it), clock skew, port in use, no network. **Router settings** and (for the built-in i2pd) **Restart** buttons are next to the advice.
+- **Events** — a short log of plain-language notices.
+- **Verbose log** — a toggle (on the GUI Status page, in Android Settings, in the TUI the **V** key on the status screen, the switch in **F5 Settings**, or **`/verbose on|off`**). It adds technical messages: handshake timeouts, BlindBox, connects and disconnects. Saved in **`ui_prefs.json`**.
+
+The link state of each contact is shown next to the contact instead of chat messages: a green dot means connected, yellow means connecting. In the TUI it appears in the status bar next to the peer address.
+
+**TUI input:** **Enter** sends; a new line is **Shift+Enter**, **Alt+Enter**, or **Ctrl+J**. **Ctrl+Enter** also inserts a new line, but only in terminals that report it separately from Enter (kitty keyboard protocol); most terminals send it as a plain Enter. **Ctrl+S** still sends.
 
 ### 4. Actions bar (connection and profiles)
 

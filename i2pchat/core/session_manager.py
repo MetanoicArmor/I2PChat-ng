@@ -75,6 +75,79 @@ class PeerTransportState:
     inflight_msg_ids: set[int] = field(default_factory=set)
 
 
+def auto_reconnect_delay(attempt: int) -> float:
+    """10s, then 20, 30, 40, 50, and 60s from then on."""
+    return float(min(60, 10 * max(1, int(attempt))))
+
+
+class AutoReconnectBook:
+    """Peers that already had a secure channel this run and were not hung up by the user."""
+
+    def __init__(self) -> None:
+        self._peers: dict[str, dict[str, object]] = {}
+
+    def note_secure(self, peer_id: str) -> None:
+        self._peers[peer_id] = {
+            "eligible": True,
+            "cancelled": False,
+            "attempt": 0,
+            "due": 0.0,
+            "inflight": False,
+        }
+
+    def note_user_disconnect(self, peer_id: str) -> None:
+        meta = self._peers.get(peer_id)
+        if meta is None:
+            return
+        meta["cancelled"] = True
+        meta["eligible"] = False
+
+    def tracked(self) -> list[str]:
+        return list(self._peers)
+
+    def waiting(self, peer_id: str) -> bool:
+        meta = self._peers.get(peer_id)
+        return bool(
+            meta
+            and meta["eligible"]
+            and not meta["cancelled"]
+            and not meta["inflight"]
+            and float(meta["due"]) > 0.0
+        )
+
+    def tick(self, now: float, *, secure: set[str]) -> list[str]:
+        """Arm the next wait, and return peers whose dial is due."""
+        due: list[str] = []
+        for peer_id, meta in self._peers.items():
+            if not meta["eligible"] or meta["cancelled"] or meta["inflight"]:
+                continue
+            if peer_id in secure:
+                meta["attempt"] = 0
+                meta["due"] = 0.0
+                continue
+            if float(meta["due"]) <= 0.0:
+                meta["attempt"] = 1
+                meta["due"] = now + auto_reconnect_delay(1)
+                continue
+            if now < float(meta["due"]):
+                continue
+            attempt = int(meta["attempt"]) + 1
+            meta["attempt"] = attempt
+            meta["due"] = now + auto_reconnect_delay(attempt)
+            meta["inflight"] = True
+            due.append(peer_id)
+        return due
+
+    def finished(self, peer_id: str, *, secure: bool) -> None:
+        meta = self._peers.get(peer_id)
+        if meta is None:
+            return
+        meta["inflight"] = False
+        if secure:
+            meta["attempt"] = 0
+            meta["due"] = 0.0
+
+
 class SessionManager:
     """
     Owns transport/session lifecycle state for I2P live delivery path.

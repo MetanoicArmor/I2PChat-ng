@@ -40,7 +40,7 @@ class I2pdForegroundService : Service() {
                 startBundled(intent)
             }
         } else {
-            publish("Using external SAM", alive = false)
+            publish(getString(R.string.svc_external), alive = false)
         }
         return START_NOT_STICKY
     }
@@ -53,7 +53,7 @@ class I2pdForegroundService : Service() {
     private fun shutdownDaemon() {
         runCatching { I2PD_JNI.stopDaemon() }
         started.set(false)
-        publish("Stopped", alive = false)
+        publish(getString(R.string.svc_stopped), alive = false)
     }
 
     private fun samReady(): Boolean =
@@ -65,8 +65,8 @@ class I2pdForegroundService : Service() {
     private fun startBundled(intent: Intent?) {
         if (started.get()) {
             if (samReady()) {
-                publish(lastMessage.ifBlank { "Bundled i2pd running" }, alive = true)
-                notify(lastMessage.ifBlank { "Bundled i2pd running" })
+                publish(lastMessage.ifBlank { getString(R.string.svc_running) }, alive = true)
+                notify(lastMessage.ifBlank { getString(R.string.svc_running) })
                 return
             }
             Log.w(TAG, "i2pd marked started but SAM is down — stopping stale daemon")
@@ -93,8 +93,8 @@ class I2pdForegroundService : Service() {
         val json = JSONObject(prepared)
         if (!json.optBoolean("ok", false)) {
             started.set(false)
-            val error = json.optString("error", "Router config failed")
-            publish(error, alive = false)
+            val error = json.optString("error").ifBlank { getString(R.string.svc_config_failed) }
+            publish(error, alive = false, failed = true)
             notify(error)
             return
         }
@@ -105,15 +105,13 @@ class I2pdForegroundService : Service() {
             I2PD_JNI.loadLibraries()
         } catch (ex: Throwable) {
             started.set(false)
-            val error =
-                "Cannot load libi2pd.so: ${ex.message}. " +
-                    "Reinstall a current APK or use external SAM in Router settings."
-            publish(error, alive = false)
+            val error = getString(R.string.svc_load_failed, ex.message.orEmpty())
+            publish(error, alive = false, failed = true)
             notify(error)
             return
         }
-        publish("Starting bundled i2pd…", alive = false)
-        notify("Starting bundled i2pd…")
+        publish(getString(R.string.svc_starting), alive = false)
+        notify(getString(R.string.svc_starting))
         thread(name = "i2pd-daemon", isDaemon = true) {
             try {
                 I2PD_JNI.setDataDir(dataDir.absolutePath)
@@ -131,9 +129,9 @@ class I2pdForegroundService : Service() {
                         Thread.sleep(150)
                     }
                     val text = if (samUp) {
-                        "Bundled i2pd running on SAM ${prefs.bundledSamPort}"
+                        getString(R.string.svc_running)
                     } else {
-                        "i2pd started, waiting for SAM ${prefs.bundledSamPort}"
+                        getString(R.string.svc_waiting_sam, prefs.bundledSamPort)
                     }
                     publish(text, alive = samUp)
                     notify(text)
@@ -142,15 +140,15 @@ class I2pdForegroundService : Service() {
                     }
                 } else {
                     started.set(false)
-                    val error = "i2pd: ${result.ifBlank { "start failed" }}"
-                    publish(error, alive = false)
+                    val error = getString(R.string.svc_start_failed, result.ifBlank { "start failed" })
+                    publish(error, alive = false, failed = true)
                     notify(error)
                 }
             } catch (ex: Throwable) {
                 started.set(false)
-                val error = "i2pd crashed: ${ex.message}"
+                val error = getString(R.string.svc_crashed, ex.message.orEmpty())
                 Log.e(TAG, error, ex)
-                publish(error, alive = false)
+                publish(error, alive = false, failed = true)
                 notify(error)
             }
         }
@@ -198,15 +196,17 @@ class I2pdForegroundService : Service() {
         startForeground(NotificationHelper.ROUTER_ID, NotificationHelper.routerNotification(this, text))
     }
 
-    private fun publish(text: String, alive: Boolean) {
+    private fun publish(text: String, alive: Boolean, failed: Boolean = false) {
         message.set(text)
         lastAlive = alive
+        lastFailed = failed
         val appRoot = File(filesDir, "i2pchat")
         statusFile(appRoot).parentFile?.mkdirs()
         statusFile(appRoot).writeText(
             JSONObject()
                 .put("message", text)
                 .put("alive", alive)
+                .put("failed", failed)
                 .toString(),
         )
     }
@@ -224,6 +224,9 @@ class I2pdForegroundService : Service() {
         val lastMessage: String get() = message.get()
         @Volatile
         var lastAlive: Boolean = false
+            private set
+        @Volatile
+        var lastFailed: Boolean = false
             private set
 
         fun statusFile(appRoot: File) = File(appRoot, "router/i2pd.status")
@@ -246,7 +249,11 @@ class I2pdForegroundService : Service() {
             context.startForegroundService(intent)
         }
 
-        fun restartBundled(context: Context, appRoot: File, text: String = "Restarting bundled i2pd…") {
+        fun restartBundled(
+            context: Context,
+            appRoot: File,
+            text: String = context.getString(R.string.svc_restarting),
+        ) {
             val intent = Intent(context, I2pdForegroundService::class.java)
                 .putExtra(EXTRA_BUNDLED, true)
                 .putExtra(EXTRA_APP_ROOT, appRoot.absolutePath)
@@ -263,6 +270,19 @@ class I2pdForegroundService : Service() {
                 app.stopService(Intent(app, I2pdForegroundService::class.java))
             }, 500)
         }
+
+        /** True when the last start attempt of the built-in router ended in an error. */
+        fun hasFailed(appRoot: File): Boolean {
+            val file = statusFile(appRoot)
+            if (!file.isFile) return lastFailed
+            return try {
+                JSONObject(file.readText()).optBoolean("failed", lastFailed)
+            } catch (_: Exception) {
+                lastFailed
+            }
+        }
+
+        fun logFile(appRoot: File) = File(appRoot, "router/i2pd.log")
 
         fun readStatus(appRoot: File): String {
             val file = statusFile(appRoot)

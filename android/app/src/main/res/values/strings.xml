@@ -3,4 +3,239 @@
     <string name="router_channel">I2P router</string>
     <string name="messages_channel">Messages</string>
     <string name="router_notification">I2PChat is connected to I2P. This uses battery while tunnels stay up.</string>
+
+    <!-- Common -->
+    <string name="action_cancel">Cancel</string>
+    <string name="action_open">Open</string>
+    <string name="action_save">Save</string>
+    <string name="action_accept">Accept</string>
+    <string name="action_save_as">Save as…</string>
+    <string name="action_reject">Reject</string>
+    <string name="cd_emoji">Emoji</string>
+    <string name="cd_file">File</string>
+    <string name="cd_image">Image</string>
+    <string name="cd_send">Send</string>
+    <string name="cd_new_chat">New chat</string>
+    <string name="address_copied">Address copied</string>
+    <string name="none_value">none</string>
+    <string name="yes_value">yes</string>
+    <string name="no_value">no</string>
+
+    <!-- Native library -->
+    <string name="native_failed_title">Native library failed to load</string>
+    <string name="native_failed_hint">Rebuild the app after Gradle sync. The emulator needs the x86_64 native library; a phone needs arm64-v8a.</string>
+    <string name="native_missing_abi">libi2pchat_jni.so is missing for this ABI. Rebuild after Gradle sync (x86_64 emulator or arm64 phone).</string>
+    <string name="native_load_failed">Failed to load native library</string>
+
+    <!-- Files -->
+    <string name="open_file_title">Open file?</string>
+    <string name="open_file_body">The file “%1$s” was received from a contact. Open it only if you trust the sender: attachments can be malicious.</string>
+    <string name="tap_to_open">Tap to open</string>
+    <string name="incoming_file">Incoming file</string>
+    <string name="file_offer_body">%1$s wants to send\n%2$s\n(%3$s)\n\nAccept stores it in the folder from Settings. Save as… keeps this one file somewhere else.</string>
+    <string name="incoming_folders">Incoming files</string>
+    <string name="incoming_folders_hint">Empty means the usual app folders. Both can be the same path. A custom path is used the next time a chat starts.</string>
+    <string name="files_folder">Files folder</string>
+    <string name="images_folder">Images folder</string>
+    <string name="ephemeral_media">Do not keep files</string>
+    <string name="ephemeral_media_hint">Received files go into a cache and are deleted when I2PChat closes or you switch profile. Save as… can still keep one file.</string>
+
+    <!-- Trust -->
+    <string name="tofu_key_changed">Signing key changed</string>
+    <string name="tofu_new_key">New contact key</string>
+    <string name="tofu_body">Contact %1$s\nNew: %2$s\nOld: %3$s\n\nAccept only if you expected this identity.</string>
+    <string name="tofu_no_old_key">(none)</string>
+
+    <!-- Profile -->
+    <string name="profile_title">Choose profile</string>
+    <string name="profile_intro">Use random_address for a one-time session; trusted contact keys are not kept in that mode. I2P on a phone keeps a foreground service running and uses battery. The built-in router starts when this screen opens; the first start can take 1–2 minutes.</string>
+    <string name="profile_label">Profile</string>
+    <string name="profile_password">Profile password</string>
+    <string name="profile_password_hint">Optional. A password seals this profile: it will not open, and its contacts and history stay unreadable, until the password is entered. The backup passphrase is a different password.</string>
+    <string name="profile_password_change_hint">Set a new password, or leave it empty and save to remove it. This applies to the profile that is open now.</string>
+    <string name="profile_password_save">Save profile password</string>
+    <string name="profile_password_saved">Profile password updated.</string>
+    <string name="backup_transfer_hint">This file moves your address and contacts between this phone and a computer. The passphrase below locks the file. A profile that already has its own password asks for that password again when it is opened.</string>
+    <string name="profile_starting">Starting I2P…</string>
+    <string name="router_settings">Router settings</string>
+
+    <!-- Navigation -->
+    <string name="tab_status">Status</string>
+    <string name="tab_chats">Chats</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Chat list -->
+    <string name="title_with_profile">I2PChat @ %1$s</string>
+    <string name="menu_new_chat">New chat</string>
+    <string name="menu_new_group">New group</string>
+    <string name="menu_switch_profile">Switch profile</string>
+    <string name="open_chat_title">Open chat</string>
+    <string name="i2p_address">I2P address</string>
+    <string name="search">Search</string>
+    <string name="group_default_title">Group</string>
+    <string name="group_preview">Group · %1$s</string>
+    <string name="group_members">Members: %1$d</string>
+    <string name="network_not_ready">The network is not ready yet. Tap to open Status.</string>
+    <string name="image_preview">📷 Image</string>
+
+    <!-- Contact link state -->
+    <string name="peer_online">online</string>
+    <string name="peer_connecting">connecting…</string>
+    <string name="peer_offline">offline</string>
+    <string name="peer_offline_blindbox">offline · delivery via BlindBox</string>
+
+    <!-- Conversation -->
+    <string name="menu_rename">Rename</string>
+    <string name="menu_connect">Connect</string>
+    <string name="menu_disconnect">Disconnect</string>
+    <string name="menu_forget_pin">Forget trusted key</string>
+    <string name="menu_clear_history">Clear history</string>
+    <string name="menu_remove">Remove</string>
+    <string name="menu_edit_group">Edit group</string>
+    <string name="menu_copy_invite">Copy invite</string>
+    <string name="menu_topology">Topology</string>
+    <string name="menu_delete_group">Delete group</string>
+    <string name="display_name">Display name</string>
+    <string name="name">Name</string>
+    <string name="find_in_chat">Find in chat</string>
+    <string name="message_hint">Message</string>
+
+    <!-- Settings -->
+    <string name="theme">Theme</string>
+    <string name="theme_system">system</string>
+    <string name="theme_light">light</string>
+    <string name="theme_dark">dark</string>
+    <string name="your_address">Your address</string>
+    <string name="waiting_for_address">Waiting for the router…</string>
+    <string name="copy_address">Copy address</string>
+    <string name="i2p_router">I2P router</string>
+    <string name="blindbox">BlindBox</string>
+    <string name="backup_restore">Backup / restore</string>
+    <string name="check_offline_now">Check offline messages now</string>
+    <string name="history_retention">History retention</string>
+    <string name="max_messages">Max messages</string>
+    <string name="max_age_days">Max age (days, 0 = none)</string>
+    <string name="save_retention">Save retention</string>
+    <string name="foreground_note">I2P stays in a foreground service on this phone. That is required to keep tunnels alive; it uses battery.</string>
+    <string name="verbose_log">Verbose log</string>
+    <string name="verbose_log_hint">Show technical messages on the Status screen: handshakes, BlindBox, connects and disconnects.</string>
+
+    <!-- Router -->
+    <string name="bundled_i2pd">Built-in i2pd</string>
+    <string name="router_external_hint">An external router is any I2P router with SAM enabled: on this phone, on another computer in the local network, or at an IPv6 address such as Yggdrasil. The built-in one needs libi2pd.so in jniLibs/arm64-v8a.</string>
+    <string name="router_no_bundled">This 32-bit build has no built-in router. Install i2pd separately, enable SAM and point the app at it. The address can be this phone (127.0.0.1:7656), another computer on the local network, or an IPv6 address.</string>
+    <string name="router_allow_remote">Router on another machine (local network or Yggdrasil). The SAM connection is not encrypted.</string>
+    <string name="router_host_empty">Enter a SAM host.</string>
+    <string name="router_host_invalid">SAM host must be an IPv4 address, an IPv6 address or a hostname.</string>
+    <string name="router_host_remote">This address is not on this phone. Turn on “Router on another machine” to use a router on the local network or Yggdrasil.</string>
+    <string name="router_saved">Router settings saved.</string>
+    <string name="tunnel_length">Tunnel length, hops (%1$d–%2$d)</string>
+    <string name="tunnel_length_hint">More hops are more anonymous but slower. Default %1$d. Applies on the next Open.</string>
+    <string name="external_host">External router host</string>
+    <string name="external_sam_port">External SAM port</string>
+    <string name="bundled_sam_port">Built-in SAM port</string>
+    <string name="http_proxy">HTTP proxy</string>
+    <string name="socks_proxy">SOCKS proxy</string>
+    <string name="control_http">Control HTTP</string>
+    <string name="restart_bundled">Restart built-in i2pd</string>
+    <string name="restart_bundled_hint">Use this if the router does not start or a previous i2pd did not shut down.</string>
+
+    <!-- BlindBox -->
+    <string name="blindbox_state">Ready: %1$s · source: %2$s</string>
+    <string name="replicas_label">Replica endpoints, one per line</string>
+    <string name="save_replicas">Save replicas</string>
+    <string name="check_now">Check now</string>
+
+    <!-- Backup -->
+    <string name="backup_title">Backup</string>
+    <string name="passphrase">Passphrase</string>
+    <string name="include_history">Include history</string>
+    <string name="export_profile">Export profile</string>
+    <string name="export_history">Export history</string>
+    <string name="import_profile">Import profile</string>
+    <string name="import_history">Import history</string>
+
+    <!-- Groups -->
+    <string name="new_group">New group</string>
+    <string name="edit_group">Edit group</string>
+    <string name="group_title">Title</string>
+    <string name="group_members_hint">Members, one address per line</string>
+    <string name="join_token">Join with invite token</string>
+    <string name="join">Join</string>
+    <string name="group_map">Group map</string>
+    <string name="no_topology">No topology yet</string>
+
+    <!-- Status screen -->
+    <string name="status_ready">Ready to chat</string>
+    <string name="status_not_ready">Not ready yet</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_online">Online</string>
+    <string name="status_warming">I2P is building tunnels…</string>
+    <string name="status_failed">Failed</string>
+    <string name="status_starting">Starting I2P…</string>
+    <string name="status_waiting_router">Starting the router… %1$d s</string>
+    <string name="status_restarting_router">Restarting the router… %1$d s</string>
+    <string name="status_router_ready_tap_open">Router is ready. Tap Open.</string>
+    <string name="status_backup_ok">Backup completed</string>
+    <string name="check_router">I2P router</string>
+    <string name="check_sam">Router connection (SAM)</string>
+    <string name="check_tunnels">Tunnels</string>
+    <string name="check_address">Your address</string>
+    <string name="check_blindbox">Offline delivery (BlindBox)</string>
+    <string name="router_kind_bundled">built-in i2pd</string>
+    <string name="router_kind_system">system router %1$s</string>
+    <string name="state_ok">OK</string>
+    <string name="state_pending">in progress</string>
+    <string name="state_failed">problem</string>
+    <string name="state_off">off</string>
+    <string name="status_problem">What to do</string>
+    <string name="status_events">Events</string>
+    <string name="status_no_events">No events yet.</string>
+    <string name="status_choose_profile">Choose profile</string>
+
+    <!-- Router diagnostics -->
+    <string name="diag_system_sam_unreachable">Cannot connect to the system i2pd router at %1$s. Make sure the router is running, SAM is enabled in it, and the address and port are correct.</string>
+    <string name="diag_reseed_failed">Could not download the initial list of I2P nodes (reseed). Check your internet connection and the device clock, use a proxy for the first start, or reseed manually if your provider blocks access.</string>
+    <string name="diag_clock_skew">The device clock differs too much from network time. Enable automatic date and time and restart the router.</string>
+    <string name="diag_port_in_use">A router port is already in use, probably by an old i2pd process. Restart the built-in i2pd or change the ports in router settings.</string>
+    <string name="diag_no_network">The router has no network access. Check your internet connection.</string>
+    <string name="diag_tunnels_slow">The I2P network is warming up. This usually takes 1–2 minutes on first start.</string>
+    <string name="diag_router_crashed">The built-in i2pd router stopped unexpectedly. Restart it.</string>
+
+    <!-- Notices -->
+    <string name="notice_session_starting">Starting I2P session…</string>
+    <string name="notice_tunnels_building">Building I2P tunnels, this usually takes 1–2 minutes…</string>
+    <string name="notice_session_online">Online. Your address is ready to share.</string>
+    <string name="notice_tunnels_ready">Tunnels are ready. You can chat now.</string>
+    <string name="notice_tunnels_slow">Tunnels are still being built. Wait 1–2 minutes before connecting.</string>
+    <string name="notice_profile_transient">One-time profile: trusted contact keys are not kept after restart.</string>
+    <string name="notice_router_starting">Starting the built-in i2pd router…</string>
+    <string name="notice_router_restarting">The router does not respond, restarting the built-in i2pd…</string>
+    <string name="notice_router_waiting">Waiting for the router (SAM %1$s)…</string>
+    <string name="notice_router_sam_ready">Router is ready (SAM %1$s).</string>
+    <string name="notice_start_failed">Could not start the I2P session: %1$s</string>
+    <string name="notice_trust_prompt">Confirm the key of %1$s to start chatting.</string>
+    <string name="notice_file_offer">%1$s offers a file.</string>
+    <string name="notice_file_offer_stale">The file offer “%1$s” is no longer valid.</string>
+    <string name="notice_connect_failed">Could not connect to %1$s. The contact may be offline or the tunnels are not ready yet.</string>
+    <string name="notice_peer_connecting">Connecting to %1$s…</string>
+    <string name="notice_peer_secure">Encrypted channel with %1$s established.</string>
+    <string name="notice_peer_disconnected">%1$s disconnected.</string>
+
+    <!-- Router service -->
+    <string name="svc_starting">Starting the built-in i2pd…</string>
+    <string name="svc_restarting">Restarting the built-in i2pd…</string>
+    <string name="svc_running">I2P router is running</string>
+    <string name="svc_waiting_sam">i2pd started, waiting for SAM %1$d</string>
+    <string name="svc_external">Using an external I2P router</string>
+    <string name="svc_stopped">Stopped</string>
+    <string name="svc_crashed">i2pd crashed: %1$s</string>
+    <string name="svc_load_failed">Cannot load libi2pd.so: %1$s. Reinstall a current APK or use an external router in router settings.</string>
+    <string name="svc_start_failed">i2pd: %1$s</string>
+    <string name="svc_config_failed">Router configuration failed</string>
+
+    <!-- Notifications -->
+    <string name="notify_trust">Confirm the contact key: %1$s…</string>
+    <string name="notify_file">File received: %1$s</string>
+    <string name="notify_image">Image received</string>
 </resources>

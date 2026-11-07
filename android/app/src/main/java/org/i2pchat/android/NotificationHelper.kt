@@ -58,7 +58,7 @@ object NotificationHelper {
         val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_notify)
             .setContentTitle(context.getString(R.string.app_name))
-            .setContentText("Подтвердите ключ собеседника: ${peer.take(18)}…")
+            .setContentText(context.getString(R.string.notify_trust, peer.take(18)))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(open)

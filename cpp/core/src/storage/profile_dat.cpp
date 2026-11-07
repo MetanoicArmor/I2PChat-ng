@@ -7,6 +7,8 @@
 
 #include "i2pchat/crypto.hpp"
 #include "i2pchat/encoding.hpp"
+
+#include <sodium.h>
 #include "i2pchat/storage/atomic_write.hpp"
 #include "i2pchat/storage/keyring.hpp"
 
@@ -80,9 +82,23 @@ void write_wrap_sidecar(const std::filesystem::path& path, ByteView wrap_key) {
 
 }  // namespace
 
+std::uint16_t profile_dat_version(ByteView raw) {
+    if (raw.size() < 6 ||
+        !std::equal(kProfileDatMagic.begin(), kProfileDatMagic.end(), raw.begin())) {
+        return 0;
+    }
+    return read_u16_be(raw.subspan(4, 2));
+}
+
 bool is_encrypted_profile_dat(ByteView raw) {
-    return raw.size() >= kProfileDatHeaderSize &&
-           std::equal(kProfileDatMagic.begin(), kProfileDatMagic.end(), raw.begin());
+    const std::uint16_t version = profile_dat_version(raw);
+    if (version == kProfileDatVersion) {
+        return raw.size() >= kProfileDatHeaderSize;
+    }
+    if (version == kProfileDatVersionPassword) {
+        return raw.size() >= 4 + 2 + kProfileDatPasswordSaltSize;
+    }
+    return false;
 }
 
 std::filesystem::path profile_dat_wrap_path(const std::filesystem::path& profile_data_dir,
@@ -168,9 +184,65 @@ Bytes encrypt_profile_dat(std::string_view private_key_base64, ByteView wrap_key
     return blob;
 }
 
+Bytes derive_profile_password_key(std::string_view password, ByteView salt) {
+    crypto::init();
+    if (salt.size() != crypto_pwhash_SALTBYTES) {
+        throw ProfileDatError("profile password salt must be 16 bytes");
+    }
+    Bytes out(32);
+    if (crypto_pwhash(out.data(), out.size(), password.data(), password.size(), salt.data(),
+                      crypto_pwhash_OPSLIMIT_MODERATE, crypto_pwhash_MEMLIMIT_MODERATE,
+                      crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        throw ProfileDatError("Argon2id could not derive the profile key");
+    }
+    return out;
+}
+
+Bytes encrypt_profile_dat_with_password(std::string_view private_key_base64,
+                                       std::string_view password) {
+    const std::string key = trim(private_key_base64);
+    if (key.empty() || password.empty()) {
+        throw ProfileDatError("A profile password and a private key are both required");
+    }
+    const Bytes salt = crypto::random_bytes(kProfileDatPasswordSaltSize);
+    const Bytes file_key = derive_profile_password_key(password, ByteView(salt));
+    const Bytes ciphertext = crypto::encrypt_message(ByteView(file_key), as_bytes(key + "\n"));
+    Bytes blob;
+    blob.reserve(4 + 2 + salt.size() + ciphertext.size());
+    append(blob, kProfileDatMagic);
+    append_u16_be(blob, kProfileDatVersionPassword);
+    append(blob, ByteView(salt));
+    append(blob, ByteView(ciphertext));
+    return blob;
+}
+
+std::string decrypt_profile_dat_with_password(ByteView raw, std::string_view password) {
+    if (profile_dat_version(raw) != kProfileDatVersionPassword) {
+        throw ProfileDatError("Not a password-protected profile .dat");
+    }
+    if (password.empty()) {
+        throw ProfileDatError("A password is required to open this profile.");
+    }
+    const ByteView salt = raw.subspan(6, kProfileDatPasswordSaltSize);
+    const ByteView ciphertext = raw.subspan(6 + kProfileDatPasswordSaltSize);
+    const Bytes file_key = derive_profile_password_key(password, salt);
+    const std::optional<Bytes> plaintext = crypto::decrypt_message(ByteView(file_key), ciphertext);
+    if (!plaintext.has_value()) {
+        throw ProfileDatError("Wrong profile password.");
+    }
+    const std::vector<std::string> lines = non_empty_lines(to_string(ByteView(*plaintext)));
+    if (lines.empty()) {
+        throw ProfileDatError("Decrypted profile .dat is empty");
+    }
+    return lines.front();
+}
+
 std::string decrypt_profile_dat(ByteView raw, ByteView wrap_key) {
     if (!is_encrypted_profile_dat(raw)) {
         throw ProfileDatError("Not an encrypted profile .dat");
+    }
+    if (profile_dat_version(raw) == kProfileDatVersionPassword) {
+        throw ProfileDatError("A password is required to open this profile.");
     }
     const std::uint16_t version = read_u16_be(raw.subspan(4, 2));
     if (version != kProfileDatVersion) {
@@ -225,7 +297,8 @@ ProfileDatContents read_profile_dat_file(const std::filesystem::path& path,
                                          std::string_view profile,
                                          const std::filesystem::path& profile_data_dir,
                                          const PeerAddressPredicate& is_peer,
-                                         bool create_wrap_key) {
+                                         bool create_wrap_key,
+                                         std::string_view password) {
     ProfileDatContents contents;
     if (!std::filesystem::is_regular_file(path)) {
         return contents;
@@ -235,6 +308,11 @@ ProfileDatContents read_profile_dat_file(const std::filesystem::path& path,
         return contents;
     }
 
+    if (profile_dat_version(ByteView(raw)) == kProfileDatVersionPassword) {
+        contents.private_key_base64 =
+            decrypt_profile_dat_with_password(ByteView(raw), password);
+        return contents;
+    }
     if (is_encrypted_profile_dat(ByteView(raw))) {
         const std::optional<Bytes> wrap =
             create_wrap_key
@@ -258,7 +336,13 @@ ProfileDatContents read_profile_dat_file(const std::filesystem::path& path,
 void write_encrypted_profile_dat(const std::filesystem::path& path,
                                  std::string_view private_key_base64,
                                  std::string_view profile,
-                                 const std::filesystem::path& profile_data_dir) {
+                                 const std::filesystem::path& profile_data_dir,
+                                 std::string_view password) {
+    if (!password.empty()) {
+        atomic_write_bytes(path, ByteView(encrypt_profile_dat_with_password(
+                                       private_key_base64, password)));
+        return;
+    }
     const WrapKeyLookup lookup = get_or_create_dat_wrap_key_impl(profile, profile_data_dir);
     const Bytes& wrap = lookup.key;
 

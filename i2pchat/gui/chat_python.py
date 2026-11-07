@@ -17,7 +17,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual import events
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, RadioSet, RichLog, Static, Switch, TextArea
@@ -29,7 +31,9 @@ from i2pchat.router.settings import (
     MAX_TUNNEL_LENGTH,
     MIN_TUNNEL_LENGTH,
     RouterSettings,
+    allow_remote_system_sam,
     bundled_i2pd_allowed,
+    system_sam_host_error,
     load_router_settings,
     normalize_router_settings,
     router_settings_path,
@@ -60,6 +64,15 @@ from i2pchat.core.transient_profile import (
 from i2pchat.presentation.compose_drafts import apply_compose_draft_peer_switch
 from i2pchat.presentation.reply_format import format_reply_quote
 from i2pchat.presentation.status_presentation import build_status_presentation
+from i2pchat.presentation.i18n import tr
+from i2pchat.presentation.readiness import ReadinessTracker
+from i2pchat.presentation.notices import (
+    Notice,
+    NoticeLog,
+    classify_error,
+    classify_notice,
+    render_notice,
+)
 from i2pchat.protocol.message_delivery import (
     DELIVERY_STATE_DELIVERED,
     delivery_state_label,
@@ -169,6 +182,41 @@ class TransferEventRef:
     timestamp: str
 
 
+# Core service kinds that go through notice filtering instead of straight into the chat log.
+_SERVICE_MESSAGE_KINDS = frozenset({"info", "success", "disconnect", "system"})
+
+
+class ComposeTextArea(TextArea):
+    """Compose box: Enter sends, newline via Shift/Ctrl/Alt+Enter or Ctrl+J.
+
+    Most terminals send the same byte for Enter and Ctrl+Enter, so Ctrl+Enter
+    only inserts a newline where the terminal reports it as a distinct key
+    (kitty keyboard protocol); Ctrl+J and Alt+Enter work everywhere.
+    """
+
+    NEWLINE_KEYS = frozenset({"shift+enter", "ctrl+enter", "alt+enter", "ctrl+j"})
+
+    class Submitted(Message):
+        def __init__(self, text_area: "ComposeTextArea") -> None:
+            super().__init__()
+            self.text_area = text_area
+
+    async def _on_key(self, event: events.Key) -> None:
+        if not self.read_only:
+            if event.key == "enter":
+                event.stop()
+                event.prevent_default()
+                self.post_message(self.Submitted(self))
+                return
+            if event.key in self.NEWLINE_KEYS:
+                event.stop()
+                event.prevent_default()
+                start, end = self.selection
+                self._replace_via_keyboard("\n", start, end)
+                return
+        await super()._on_key(event)
+
+
 class I2PChat(App):
     """Textual TUI frontend for I2PChatCore with command-driven parity features."""
 
@@ -176,7 +224,6 @@ class I2PChat(App):
         ("q", "quit", "Quit"),
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+s", "send_message", "Send"),
-        ("ctrl+enter", "send_message", "Send"),
         ("f1", "show_actions", "Actions"),
         ("f2", "show_contacts", "Contacts"),
         ("f3", "show_media", "Media"),
@@ -185,6 +232,7 @@ class I2PChat(App):
         ("f6", "show_router", "Router"),
         ("f7", "show_history_screen", "History"),
         ("f8", "show_diagnostics_screen", "Diagnostics"),
+        ("f9", "show_status_screen", "Status"),
         ("ctrl+b", "show_contacts", "Contacts"),
         ("ctrl+d", "show_actions", "Actions"),
         ("ctrl+p", "show_media", "Media"),
@@ -258,6 +306,9 @@ class I2PChat(App):
         self._active_sam_address: Optional[tuple[str, int]] = None
         self._active_http_proxy_address: Optional[tuple[str, int]] = None
         self._core_init_task: Optional[asyncio.Task[bool]] = None
+        self._notice_log = NoticeLog()
+        self._readiness = ReadinessTracker()
+        self._verbose_log_enabled = self._load_ui_prefs().get("verbose_log") is True
         self._active_group_id: Optional[str] = None
         self._loaded_group_history_id: Optional[str] = None
 
@@ -287,14 +338,11 @@ class I2PChat(App):
         yield Static(id="status_bar")
         yield RichLog(id="chat_window", highlight=False, markup=True)
         with Vertical(id="compose_wrap"):
-            yield TextArea(
+            yield ComposeTextArea(
                 "",
                 id="compose_box",
                 soft_wrap=True,
-                placeholder=(
-                    "Compose message. Enter = newline, Ctrl+S / Ctrl+Enter = send. "
-                    "Type /help for commands."
-                ),
+                placeholder=tr("tui.compose_placeholder"),
             )
         yield Footer()
 
@@ -318,6 +366,10 @@ class I2PChat(App):
 
     def action_send_message(self) -> None:
         self.run_worker(self._submit_compose(), exclusive=True)
+
+    def on_compose_text_area_submitted(self, event: ComposeTextArea.Submitted) -> None:
+        event.stop()
+        self.action_send_message()
 
     def action_show_launcher(self) -> None:
         self._show_launcher_screen()
@@ -354,6 +406,18 @@ class I2PChat(App):
 
     def action_show_groups_screen(self) -> None:
         self.push_screen(TuiGroupsScreen())
+
+    def action_show_status_screen(self) -> None:
+        if isinstance(self.screen, TuiStatusScreen):
+            self.screen.dismiss(None)
+            return
+        self.push_screen(TuiStatusScreen())
+
+    def set_verbose_log(self, enabled: bool) -> None:
+        self._verbose_log_enabled = bool(enabled)
+        data = self._load_ui_prefs()
+        data["verbose_log"] = self._verbose_log_enabled
+        self._save_ui_prefs(data)
 
     async def _submit_compose(self) -> None:
         raw = self._compose_text_snapshot()
@@ -511,7 +575,18 @@ class I2PChat(App):
             "on_outbound_delivery_update",
             self.handle_outbound_delivery_update,
         )
+        core.on_profile_password = self._ask_profile_password
         return core
+
+    async def _ask_profile_password(self) -> str:
+        value = await self.push_screen_wait(
+            TuiSavePathScreen(
+                filename=self.profile,
+                prompt="Password for this profile. Cancel leaves it closed.",
+                password=True,
+            )
+        )
+        return value or ""
 
     async def _ensure_router_backend_ready(self) -> tuple[str, int]:
         settings = normalize_router_settings(self._router_settings)
@@ -545,33 +620,23 @@ class I2PChat(App):
         host, port = self._active_http_proxy_address
         return f"http://{host}:{port}"
 
-    async def handle_file_offer(self, filename: str, size: int) -> bool:
-        """Ask before a peer's file touches the disk, same as the Qt GUI does."""
+    async def handle_file_offer(self, filename: str, size: int) -> str | bool:
+        """Ask before a peer's file touches the disk.
+
+        Returns a path to save this one file elsewhere, ``True`` for the
+        configured folder, or ``False`` to reject.
+        """
         from i2pchat.core.i2p_chat_core import sanitize_filename
 
-        shown_name = escape(sanitize_filename(filename))
-        loop = asyncio.get_running_loop()
-        decision_future: asyncio.Future[bool] = loop.create_future()
-
-        def _done(result: bool | None) -> None:
-            if not decision_future.done():
-                decision_future.set_result(bool(result))
-
-        self.post("system", f"Incoming file offer: {shown_name} ({size:,} bytes).")
-        self.push_screen(
-            TuiTrustDecisionScreen(
-                title="Accept incoming file?",
-                peer_addr=self._active_peer_label(),
-                body_lines=[
-                    f"File: {shown_name}",
-                    f"Size: {size:,} bytes",
-                    "It will be saved to the downloads folder. Reject if you were not expecting it.",
-                ],
-                confirm_label="Accept",
-            ),
-            callback=_done,
+        shown_name = sanitize_filename(filename)
+        self.post("system", f"Incoming file offer: {escape(shown_name)} ({size:,} bytes).")
+        choice = await self.push_screen_wait(
+            TuiFileOfferScreen(filename=shown_name, size=size)
         )
-        return await decision_future
+        if choice == "saveas":
+            path = await self.push_screen_wait(TuiSavePathScreen(filename=shown_name))
+            return path or False
+        return bool(choice)
 
     def _active_peer_label(self) -> str:
         core = getattr(self, "core", None)
@@ -828,6 +893,9 @@ class I2PChat(App):
                 f"[green]{self._short_peer(self.core.my_dest.base32 if self.core.my_dest else None)}[/]"
                 f" [white]→[/] [cyan]{self._short_peer(self._current_target_peer())}[/]"
             )
+            target = self._current_target_peer()
+            if target:
+                right += f" {self._peer_link_markup(target)}"
         if self._last_status_snapshot.ack_total > 0:
             right += f" [dim]ACKdrop:{self._last_status_snapshot.ack_total}[/]"
 
@@ -844,6 +912,17 @@ class I2PChat(App):
             self.query_one("#status_bar").update(status_panel)
         except Exception:
             pass
+
+    def _peer_link_markup(self, peer: str) -> str:
+        try:
+            link = self.core.peer_link_state(peer)
+        except Exception:
+            link = "offline"
+        if link == "secure":
+            return f"[green]● {escape(tr('peer_link.secure'))}[/]"
+        if link == "connecting":
+            return f"[yellow]● {escape(tr('peer_link.connecting'))}[/]"
+        return f"[dim]○ {escape(tr('peer_link.offline'))}[/]"
 
     # ----- rendering helpers -----
 
@@ -1398,15 +1477,37 @@ class I2PChat(App):
             self._append_history_entry(msg)
             self._refresh_status_bar()
             return
-        self.post(msg.kind, msg.text)
+        if msg.kind in _SERVICE_MESSAGE_KINDS:
+            self._post_notice(classify_notice(msg.text, kind=msg.kind, peer=msg.source_peer))
+        else:
+            self.post(msg.kind, msg.text)
         self._refresh_status_bar()
 
+    def _post_notice(self, notice: Notice, *, kind: Optional[str] = None) -> None:
+        """Log a core notice; the chat shows user-level ones, technical ones only in verbose mode."""
+        self._notice_log.add(notice)
+        if self._verbose_log_enabled:
+            self.post(kind or ("error" if notice.severity == "error" else "system"), notice.text)
+        elif notice.is_user:
+            if notice.severity == "error":
+                style = "error"
+            elif notice.severity == "success":
+                style = "success"
+            else:
+                style = "info"
+            self.post(style, render_notice(notice))
+
     def handle_system(self, text: str) -> None:
-        self.post("system", text)
+        self._post_notice(classify_notice(text))
         self._refresh_status_bar()
 
     def handle_error(self, text: str) -> None:
-        self.post("error", text)
+        notice = classify_error(text)
+        if notice.code == "error.other":
+            self._notice_log.add(notice)
+            self.post("error", text)
+        else:
+            self._post_notice(notice, kind="error")
         self._refresh_status_bar()
 
     def handle_file_event(self, info: FileTransferInfo) -> None:
@@ -1543,6 +1644,7 @@ class I2PChat(App):
         if self.selected_peer:
             self.post("system", f"Selected peer: {self.selected_peer}")
         self._start_core_session_init_background()
+        self.push_screen(TuiStatusScreen())
 
     async def on_unmount(self) -> None:
         if self._core_init_task is not None and not self._core_init_task.done():
@@ -1550,6 +1652,9 @@ class I2PChat(App):
         self._save_history_if_needed()
         self._flush_compose_drafts_to_disk()
         self._save_contacts_book()
+        from i2pchat.storage.media_prefs import clear_ephemeral_media
+
+        clear_ephemeral_media()
         await self.core.shutdown()
         await self._shutdown_router_backend()
 
@@ -1709,6 +1814,9 @@ class I2PChat(App):
         self._save_history_if_needed()
         self._flush_compose_drafts_to_disk()
         self._save_contacts_book()
+        from i2pchat.storage.media_prefs import clear_ephemeral_media
+
+        clear_ephemeral_media()
         await self.core.shutdown()
 
         self.profile = target
@@ -1752,13 +1860,30 @@ class I2PChat(App):
         self._core_init_task = asyncio.create_task(_runner())
 
     async def _initialize_core_session(self) -> bool:
+        self._readiness.session_starting()
         try:
             sam_address = await self._ensure_router_backend_ready()
             if self._active_sam_address != sam_address:
                 self._active_sam_address = sam_address
                 self.core = self._create_core(self.profile, sam_address)
+            dat_path = self.core._profile_path()
+            if (
+                not is_transient_profile_name(self.profile)
+                and not os.path.exists(dat_path)
+                and not self.core.profile_password
+            ):
+                chosen = await self.push_screen_wait(
+                    TuiSavePathScreen(
+                        filename=self.profile,
+                        prompt="Optional password for this new profile. Leave empty to skip.",
+                        password=True,
+                    )
+                )
+                if chosen:
+                    self.core.profile_password = chosen
             await self.core.init_session()
         except Exception as exc:
+            self._readiness.session_failed(str(exc).strip() or type(exc).__name__, self._router_settings)
             self.post("error", str(exc))
             self.post(
                 "system",
@@ -1789,7 +1914,8 @@ class I2PChat(App):
         )
         self.post(
             "success",
-            f"Profile backup exported: {summary.file_count} file(s), {summary.history_files} history file(s).",
+            "Profile backup exported. This file moves the address and contacts between a computer and a phone. "
+            f"{summary.file_count} file(s), {summary.history_files} history file(s).",
         )
 
     async def _import_profile_backup_ui(self, path: str, passphrase: str) -> None:
@@ -1799,7 +1925,12 @@ class I2PChat(App):
             get_profiles_dir(),
             passphrase,
         )
-        self.post("success", f"Profile backup imported as '{summary.target_profile}'.")
+        self.post(
+            "success",
+            f"Profile backup imported as '{summary.target_profile}'. "
+            "The address and contacts came from the other device. "
+            "A profile password, if it had one, is asked again on open.",
+        )
         await self._switch_profile(summary.target_profile)
 
     async def _export_history_backup_ui(self, path: str, passphrase: str) -> None:
@@ -2214,6 +2345,13 @@ class I2PChat(App):
         elif cmd == "unlock":
             self.post("system", "Lock to peer is removed; use /save to add peers to Saved peers.")
             self._refresh_status_bar()
+
+        elif cmd == "verbose":
+            choice = (args[0].lower() if args else "")
+            if choice not in ("on", "off"):
+                choice = "off" if self._verbose_log_enabled else "on"
+            self.set_verbose_log(choice == "on")
+            self.post("success", tr("tui.verbose_on" if choice == "on" else "tui.verbose_off"))
 
         elif cmd == "status":
             snap = self._build_status_snapshot()
@@ -2925,10 +3063,11 @@ class I2PChat(App):
         self.chat_log.write(Align(panel, align="left"), expand=True)
 
     def show_help(self) -> None:
-        self.post("help", "Compose: Enter = newline, Ctrl+S / Ctrl+Enter = send current compose buffer.")
-        self.post("help", "Primary function keys: F1 actions, F2 contacts, F3 media, F4 settings, F5 history, F6 diagnostics, F8 groups.")
+        self.post("help", tr("tui.compose_help"))
+        self.post("help", "Function keys: F1 actions, F2 contacts, F3 media, F4 groups, F5 settings, F6 router, F7 history, F8 diagnostics, F9 status.")
         self.post("help", "Groups: F8 or /group list|create|open|close|info|members|topology|invite|join|send. Compose box sends to active group when open.")
         self.post("help", "Connection: /connect <addr>, /disconnect, /save, /unlock, /status")
+        self.post("help", "Status: F9 opens readiness and service notices; /verbose on|off shows technical messages in the chat.")
         self.post("help", "Messaging/media: /sendfile <path> (/send-file), /sendpic <path> (/send-picture), /img <path>, /img-bw <path>, /recent [count], /reply <ref>")
         self.post("help", "Launcher: optional via /launcher (/menu) if you want the quick launcher overlay.")
         self.post("help", "Contacts: F2 / Ctrl+B or /contacts to view the book. Also: /contacts use|add|edit|remove|info … (legacy /contact-* commands still work).")
@@ -3552,6 +3691,12 @@ class TuiRouterScreen(ModalScreen[None]):
             yield Input("", id="router_system_host")
             yield Static("System SAM port", classes="router_label")
             yield Input("", id="router_system_port")
+            yield Switch(False, id="router_allow_remote")
+            yield Static(
+                "Router on another machine (local network or Yggdrasil). The SAM connection is not encrypted.",
+                id="router_allow_remote_hint",
+            )
+            yield Static("", id="router_host_error")
             yield Static("Bundled SAM host", classes="router_label")
             yield Input("", id="router_bundled_host")
             yield Static("Bundled SAM port", classes="router_label")
@@ -3588,6 +3733,9 @@ class TuiRouterScreen(ModalScreen[None]):
         self.query_one("#router_tunnel_length", Input).value = str(settings.tunnel_length)
         self.query_one("#router_system_host", Input).value = settings.system_sam_host
         self.query_one("#router_system_port", Input).value = str(settings.system_sam_port)
+        self.query_one("#router_allow_remote", Switch).value = (
+            settings.allow_remote_sam or allow_remote_system_sam()
+        )
         self.query_one("#router_bundled_host", Input).value = settings.bundled_sam_host
         self.query_one("#router_bundled_sam_port", Input).value = str(settings.bundled_sam_port)
         self.query_one("#router_bundled_http_port", Input).value = str(settings.bundled_http_proxy_port)
@@ -3641,6 +3789,7 @@ class TuiRouterScreen(ModalScreen[None]):
                 self.host._router_settings,
                 system_sam_host=self.query_one("#router_system_host", Input).value.strip() or "127.0.0.1",
                 system_sam_port=int(self.query_one("#router_system_port", Input).value.strip()),
+                allow_remote_sam=self.query_one("#router_allow_remote", Switch).value,
                 bundled_sam_host=self.query_one("#router_bundled_host", Input).value.strip() or "127.0.0.1",
                 bundled_sam_port=int(self.query_one("#router_bundled_sam_port", Input).value.strip()),
                 bundled_http_proxy_port=int(self.query_one("#router_bundled_http_port", Input).value.strip()),
@@ -3676,6 +3825,15 @@ class TuiRouterScreen(ModalScreen[None]):
         if settings is None:
             return
         backend = self._selected_backend()
+        if backend == "system":
+            error = system_sam_host_error(
+                settings.system_sam_host,
+                allow_remote=settings.allow_remote_sam,
+            )
+            if error:
+                self.query_one("#router_host_error", Static).update(f"[red]{error}[/]")
+                return
+        self.query_one("#router_host_error", Static).update("")
         self.dismiss(None)
         asyncio.create_task(
             self.host._apply_router_settings(
@@ -4287,8 +4445,27 @@ class TuiSettingsScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="settings_dialog"):
             yield Static("Settings / history / profile import")
+            yield Static(
+                "A profile backup moves the address and contacts between a computer and a phone. Its passphrase is separate from the profile password."
+            )
             yield Static("Save local history", classes="settings_label")
             yield Switch(False, id="settings_history_enabled")
+            yield Static(tr("status.verbose"), classes="settings_label")
+            yield Switch(False, id="settings_verbose_log")
+            yield Static("Files folder (empty = downloads/)", classes="settings_label")
+            yield Input("", id="settings_files_dir")
+            yield Static("Images folder (empty = images/)", classes="settings_label")
+            yield Input("", id="settings_images_dir")
+            yield Static(
+                "Do not keep received files. Closing I2PChat or switching profile deletes them. Save as… can keep one file.",
+                classes="settings_label",
+            )
+            yield Switch(False, id="settings_ephemeral_media")
+            yield Static(
+                "New profile password. Leave empty to keep the current one; type - to remove it.",
+                classes="settings_label",
+            )
+            yield Input("", placeholder="leave blank to keep", password=True, id="settings_profile_password")
             yield Static("History max messages", classes="settings_label")
             yield Input("", id="settings_history_max")
             yield Static("History retention days", classes="settings_label")
@@ -4318,6 +4495,7 @@ class TuiSettingsScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.query_one("#settings_history_enabled", Switch).value = self.host._history_enabled
+        self.query_one("#settings_verbose_log", Switch).value = self.host._verbose_log_enabled
         self.query_one("#settings_history_max", Input).value = str(
             self.host._load_history_max_messages()
         )
@@ -4325,6 +4503,12 @@ class TuiSettingsScreen(ModalScreen[None]):
             self.host._load_history_retention_days()
         )
         self.query_one("#settings_profile_name", Input).value = self.host.profile
+        from i2pchat.storage.media_prefs import load_media_prefs
+
+        files_dir, images_dir, ephemeral = load_media_prefs()
+        self.query_one("#settings_files_dir", Input).value = files_dir
+        self.query_one("#settings_images_dir", Input).value = images_dir
+        self.query_one("#settings_ephemeral_media", Switch).value = ephemeral
         self.query_one("#settings_history_max", Input).focus()
 
     def action_close(self) -> None:
@@ -4342,6 +4526,25 @@ class TuiSettingsScreen(ModalScreen[None]):
             max_messages=max_messages,
             max_days=max_days,
         )
+        self.host.set_verbose_log(self.query_one("#settings_verbose_log", Switch).value)
+        from i2pchat.storage.media_prefs import save_media_prefs
+
+        save_media_prefs(
+            files_dir=self.query_one("#settings_files_dir", Input).value,
+            images_dir=self.query_one("#settings_images_dir", Input).value,
+            ephemeral=self.query_one("#settings_ephemeral_media", Switch).value,
+        )
+        password = self.query_one("#settings_profile_password", Input).value
+        if password:
+            try:
+                self.host.core.set_profile_password("" if password == "-" else password)
+            except Exception as exc:
+                self.host.post("error", f"Profile password was not changed: {exc}")
+                return
+            self.host.post(
+                "success",
+                "Profile password removed." if password == "-" else "Profile password updated.",
+            )
         self.host.post("success", "Settings applied.")
         self.dismiss(None)
 
@@ -4521,6 +4724,130 @@ class TuiHistoryScreen(ModalScreen[None]):
             handler()
 
 
+class TuiStatusScreen(ModalScreen[None]):
+    """Readiness checklist, router advice and recent notices; shown on startup."""
+
+    BINDINGS = [
+        ("escape", "close", "Chat"),
+        ("f9", "close", "Chat"),
+        ("v", "toggle_verbose", "Verbose"),
+        ("r", "show_router", "Router"),
+    ]
+
+    CSS = """
+    TuiStatusScreen {
+        align: center middle;
+    }
+    #tui_status_dialog {
+        width: 96;
+        height: auto;
+        max-height: 90%;
+        border: heavy $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #tui_status_events {
+        height: 12;
+        margin-top: 1;
+        border: round $panel;
+    }
+    #tui_status_help {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    _MARKS = {
+        "ok": ("✓", "green"),
+        "failed": ("✗", "red"),
+        "pending": ("…", "yellow"),
+        "off": ("–", "grey62"),
+    }
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="tui_status_dialog"):
+            yield Static("", id="tui_status_summary")
+            yield RichLog(id="tui_status_events", highlight=False, markup=True, wrap=True)
+            yield Static("", id="tui_status_help")
+
+    @property
+    def host(self) -> I2PChat:
+        app = self.app
+        assert isinstance(app, I2PChat)
+        return app
+
+    def on_mount(self) -> None:
+        self._events_sig: tuple[int, str, bool] = (-1, "", False)
+        self._refresh()
+        self.set_interval(2.0, self._refresh)
+
+    def _refresh(self) -> None:
+        host = self.host
+        readiness = host._readiness.evaluate(
+            core=host.core,
+            router_settings=host._router_settings,
+            bundled_manager=host._bundled_router_manager,
+            active_sam=host._active_sam_address,
+        )
+        title = tr("status.ready") if readiness.ready else tr("status.not_ready")
+        color = "green" if readiness.ready else "yellow"
+        table = Table.grid(padding=(0, 2))
+        table.add_column(width=1)
+        table.add_column()
+        table.add_column()
+        table.add_column()
+        for check in readiness.checks:
+            mark, col = self._MARKS.get(check.state, ("–", "grey62"))
+            table.add_row(
+                f"[{col}]{mark}[/]",
+                f"[bold]{escape(check.label)}[/]",
+                escape(check.value or "—"),
+                f"[{col}]{escape(tr('status.state.' + check.state))}[/]",
+            )
+        parts: list[object] = [Text.from_markup(f"[bold {color}]{escape(title)}[/]\n")]
+        if readiness.issue_text:
+            parts.append(
+                Panel(
+                    escape(readiness.issue_text),
+                    title=f"[bold red]{escape(tr('status.problem'))}[/]",
+                    border_style="red",
+                    box=box.ROUNDED,
+                )
+            )
+        parts.append(table)
+        from rich.console import Group
+
+        self.query_one("#tui_status_summary", Static).update(Group(*parts))
+        verbose = host._verbose_log_enabled
+        source = host._notice_log.verbose if verbose else host._notice_log.user
+        sig = (len(source), source[-1][1].text if source else "", verbose)
+        if sig != self._events_sig:
+            self._events_sig = sig
+            log = self.query_one("#tui_status_events", RichLog)
+            log.clear()
+            if not source:
+                log.write(f"[dim]{escape(tr('status.no_events'))}[/]")
+            for ts, notice in list(source)[-200:]:
+                text = notice.text if verbose else render_notice(notice)
+                style = {"error": "red", "warning": "yellow", "success": "green"}.get(notice.severity, "white")
+                log.write(f"[dim]{ts}[/] [{style}]{escape(strip_terminal_controls(text))}[/]")
+        verbose_label = tr("status.verbose") + (": on" if verbose else ": off")
+        self.query_one("#tui_status_help", Static).update(
+            f"{escape(tr('tui.status_hint'))} · R: {escape(tr('status.router_settings'))} · {escape(verbose_label)}"
+        )
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def action_toggle_verbose(self) -> None:
+        self.host.set_verbose_log(not self.host._verbose_log_enabled)
+        self._refresh()
+
+    def action_show_router(self) -> None:
+        self.dismiss(None)
+        self.host._show_router_screen()
+
+
 class TuiDiagnosticsScreen(ModalScreen[None]):
     BINDINGS = [
         ("escape", "close", "Close"),
@@ -4686,6 +5013,75 @@ class TuiConfirmScreen(ModalScreen[bool]):
             self.action_confirm()
         else:
             self.action_cancel()
+
+
+class TuiFileOfferScreen(ModalScreen[object]):
+    """Accept into the configured folder, pick a path, or reject."""
+
+    BINDINGS = [("escape", "reject", "Reject")]
+
+    def __init__(self, *, filename: str, size: int) -> None:
+        super().__init__()
+        self._filename = filename
+        self._size = size
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="trust_dialog"):
+            yield Static("Accept incoming file?")
+            yield Static(f"{self._filename}\n{self._size:,} bytes")
+            yield Static(
+                "Accept uses the folder from Settings. Save as… asks for a path for this file only."
+            )
+            with Horizontal():
+                yield Button("Reject", id="file_offer_reject")
+                yield Button("Save as…", id="file_offer_saveas")
+                yield Button("Accept", id="file_offer_accept", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "file_offer_accept":
+            self.dismiss(True)
+        elif event.button.id == "file_offer_saveas":
+            self.dismiss("saveas")
+        else:
+            self.dismiss(False)
+
+    def action_reject(self) -> None:
+        self.dismiss(False)
+
+
+class TuiSavePathScreen(ModalScreen[str]):
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, *, filename: str, prompt: str = "", password: bool = False) -> None:
+        super().__init__()
+        self._filename = filename
+        self._prompt = prompt
+        self._password = password
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="trust_dialog"):
+            yield Static(self._prompt or f"Save {self._filename} to")
+            yield Input(
+                "",
+                placeholder="password" if self._password else "/path/to/file",
+                password=self._password,
+                id="save_path_input",
+            )
+            with Horizontal():
+                yield Button("Cancel", id="save_path_cancel")
+                yield Button("Save", id="save_path_ok", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#save_path_input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save_path_ok":
+            self.dismiss(self.query_one("#save_path_input", Input).value.strip())
+        else:
+            self.dismiss("")
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
 
 
 class TuiTrustDecisionScreen(ModalScreen[bool]):

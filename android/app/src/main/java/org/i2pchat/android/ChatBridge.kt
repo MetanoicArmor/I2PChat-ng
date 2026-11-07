@@ -95,6 +95,27 @@ fun resolveChatFilePath(text: String, appRoot: File): String =
     resolveMediaPath(text, "[file] ", appRoot, listOf("downloads", "data/downloads", "files"))
 
 
+/**
+ * A service notice. `level` is "user" (shown on the Status screen),
+ * "verbose" (only with the Verbose log setting) or "peer_state" (drives the
+ * contact badge). `text` is the English fallback for unknown codes.
+ */
+data class NoticeUi(
+    val code: String,
+    val level: String,
+    val arg: String = "",
+    val text: String = "",
+    val ts: String = "",
+) {
+    val isUser: Boolean get() = level == LEVEL_USER
+
+    companion object {
+        const val LEVEL_USER = "user"
+        const val LEVEL_VERBOSE = "verbose"
+        const val LEVEL_PEER_STATE = "peer_state"
+    }
+}
+
 data class TofuPrompt(
     val kind: String,
     val peer: String,
@@ -113,13 +134,18 @@ data class ChatUiState(
     val profile: String = "",
     val running: Boolean = false,
     val starting: Boolean = false,
-    val status: String = "Stopped",
+    val status: String = "",
     val localAddr: String = "",
-    val transport: String = "Stopped",
+    val transport: String = "stopped",
     val contacts: List<ContactUi> = emptyList(),
     val groups: List<ContactUi> = emptyList(),
     val messages: List<MessageUi> = emptyList(),
-    val sessionNotices: List<MessageUi> = emptyList(),
+    val notices: List<NoticeUi> = emptyList(),
+    val verboseLog: List<NoticeUi> = emptyList(),
+    /** Raw peer link state from the engine: connecting / handshaking / secure / disconnected / failed / stale. */
+    val peerStates: Map<String, String> = emptyMap(),
+    val samReady: Boolean = false,
+    val routerIssue: RouterIssue? = null,
     val selectedId: String = "",
     val selectedIsGroup: Boolean = false,
     val compose: String = "",
@@ -139,7 +165,23 @@ data class ChatUiState(
 ) {
     val conversations: List<ContactUi>
         get() = (groups + contacts).sortedByDescending { it.lastActivityTs }
+
+    val tunnelsReady: Boolean
+        get() = running && transport == "ready"
+
+    /** secure / connecting / offline for the contact badge. */
+    fun peerLink(addr: String): String {
+        if (contacts.firstOrNull { it.addr == addr }?.live == true) return "secure"
+        return when (peerStates[addr]) {
+            "secure" -> "secure"
+            "connecting", "handshaking" -> "connecting"
+            else -> "offline"
+        }
+    }
 }
+
+private const val MAX_NOTICES = 200
+private const val MAX_VERBOSE = 500
 
 class ChatBridge(application: Application) : AndroidViewModel(application), NativeEngine.Listener {
     val appRoot: File = File(application.filesDir, "i2pchat").apply { mkdirs() }
@@ -160,7 +202,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             _state.update {
                 it.copy(
                     nativeLoaded = false,
-                    error = "libi2pchat_jni.so is missing for this ABI. Rebuild after Gradle sync (x86_64 emulator or arm64 phone).",
+                    error = str(R.string.native_missing_abi),
                 )
             }
         } else {
@@ -171,7 +213,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 _state.update {
                     it.copy(
                         nativeLoaded = false,
-                        error = error.message ?: "Failed to load native library",
+                        error = error.message ?: str(R.string.native_load_failed),
                     )
                 }
             }
@@ -197,10 +239,44 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         _state.update { it.copy(theme = theme, uiPrefs = prefs) }
     }
 
-    fun saveRouter(prefs: RouterPrefs) {
+    fun setVerboseLog(enabled: Boolean) {
+        val prefs = _state.value.uiPrefs.copy(verboseLog = enabled)
+        prefs.save(appRoot)
+        _state.update { it.copy(uiPrefs = prefs) }
+    }
+
+    /** Saves router settings. Returns why the SAM host was rejected, without changing anything. */
+    fun saveRouter(prefs: RouterPrefs): SamHostProblem? {
+        prefs.systemSamProblem()?.let { return it }
         val normalized = prefs.normalized()
         normalized.save(appRoot)
         _state.update { it.copy(router = normalized) }
+        return null
+    }
+
+    fun setProfilePassword(password: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val error = runCatching { NativeEngine.nativeSetProfilePassword(password) }.getOrElse {
+                it.message.orEmpty()
+            }
+            onMain {
+                if (error.isNullOrBlank()) {
+                    _state.update { it.copy(error = "", status = str(R.string.profile_password_saved)) }
+                } else {
+                    _state.update { it.copy(error = error) }
+                }
+            }
+        }
+    }
+
+    fun saveMedia(filesDir: String, imagesDir: String, ephemeral: Boolean) {
+        val prefs = _state.value.uiPrefs.copy(
+            filesDir = filesDir.trim(),
+            imagesDir = imagesDir.trim(),
+            ephemeralMedia = ephemeral,
+        )
+        prefs.save(appRoot)
+        _state.update { it.copy(uiPrefs = prefs) }
     }
 
     fun saveRetention(maxMessages: Int, days: Int) {
@@ -220,12 +296,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (!router.usingBundled) return
         monitorRouterWarmup()
         if (samProbe(router.samHost, router.samPort)) {
-            I2pdForegroundService.start(
-                getApplication(),
-                appRoot,
-                true,
-                "SAM ready on ${router.samPort}",
-            )
+            I2pdForegroundService.start(getApplication(), appRoot, true, str(R.string.svc_running))
             return
         }
         if (I2pdForegroundService.isAlive(appRoot)) {
@@ -236,7 +307,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 I2pdForegroundService.readStatus(appRoot),
             )
         } else {
-            I2pdForegroundService.start(getApplication(), appRoot, true, "Starting bundled i2pd…")
+            I2pdForegroundService.start(getApplication(), appRoot, true, str(R.string.svc_starting))
         }
     }
 
@@ -252,21 +323,22 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 if (samProbe(router.samHost, router.samPort)) {
                     onMain {
                         _state.update {
-                            it.copy(status = "SAM ready — tap Open (first run can take 1–2 min)")
+                            it.copy(
+                                status = str(R.string.status_router_ready_tap_open),
+                                samReady = true,
+                                routerIssue = null,
+                            )
                         }
                     }
                     return@launch
                 }
                 val sec = (System.currentTimeMillis() - t0) / 1000
-                val msg = I2pdForegroundService.readStatus(appRoot)
+                val issue = bundledIssue(sec)
                 onMain {
                     _state.update {
                         it.copy(
-                            status = if (msg.isNotBlank()) {
-                                "Waiting for SAM ${router.samPort}… ${sec}s — $msg"
-                            } else {
-                                "Starting bundled i2pd… ${sec}s"
-                            },
+                            status = str(R.string.status_waiting_router, sec.toInt()),
+                            routerIssue = issue,
                         )
                     }
                 }
@@ -279,110 +351,111 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             val router = RouterPrefs.load(appRoot)
             if (!router.usingBundled) {
-                onMain { _state.update { it.copy(error = "Bundled router is disabled in settings") } }
                 return@launch
             }
             runCatching { NativeEngine.nativeStop() }
             I2pdForegroundService.restartBundled(getApplication(), appRoot)
+            pollJob?.cancel()
+            tunnelWatchJob?.cancel()
             onMain {
                 _state.update {
                     it.copy(
                         running = false,
                         starting = false,
-                        status = "Restarting bundled i2pd…",
+                        samReady = false,
+                        routerIssue = null,
+                        status = str(R.string.svc_restarting),
                         error = "",
                     )
                 }
+                monitorRouterWarmup()
             }
         }
     }
 
-    fun start(profile: String) {
+    private var saveAsUri: Uri? = null
+
+    private fun incomingCache(): File = File(getApplication<Application>().cacheDir, "incoming")
+
+    private fun clearIncomingCache() {
+        runCatching { incomingCache().deleteRecursively() }
+    }
+
+    /** Empty strings keep the core defaults. Ephemeral mode uses a cache deleted on exit. */
+    private fun mediaDirs(ui: UiPrefs): Pair<String, String> {
+        if (!ui.ephemeralMedia) {
+            return ui.filesDir.trim() to ui.imagesDir.trim()
+        }
+        val files = File(incomingCache(), "files")
+        val images = File(incomingCache(), "images")
+        files.mkdirs()
+        images.mkdirs()
+        return files.absolutePath to images.absolutePath
+    }
+
+    fun start(profile: String, profilePassword: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
             val router = RouterPrefs.load(appRoot)
             val ui = UiPrefs.load(appRoot)
+            val sam = "${router.samHost}:${router.samPort}"
             _state.update {
                 it.copy(
                     starting = true,
                     profile = profile,
                     error = "",
-                    status = "Starting I2P…",
-                    sessionNotices = listOf(
-                        MessageUi(
-                            "system",
-                            if (router.usingBundled) {
-                                "Starting bundled i2pd…"
-                            } else {
-                                "Starting I2P session, please wait…"
-                            },
-                            "",
-                        ),
-                    ),
+                    routerIssue = null,
+                    status = str(R.string.status_starting),
+                    notices = emptyList(),
+                    verboseLog = emptyList(),
+                    peerStates = emptyMap(),
                 )
             }
             routerMonitorJob?.cancel()
             var ready = samProbe(router.samHost, router.samPort)
             if (!ready) {
                 if (router.usingBundled) {
+                    appendNotice("router.starting", NoticeUi.LEVEL_USER)
                     if (!I2pdForegroundService.isAlive(appRoot)) {
-                        I2pdForegroundService.start(
-                            getApplication(),
-                            appRoot,
-                            true,
-                            "Starting bundled i2pd…",
-                        )
+                        I2pdForegroundService.start(getApplication(), appRoot, true, str(R.string.svc_starting))
                     }
                 } else {
-                    I2pdForegroundService.start(
-                        getApplication(),
-                        appRoot,
-                        false,
-                        "Using external SAM ${router.samHost}:${router.samPort}",
-                    )
+                    I2pdForegroundService.start(getApplication(), appRoot, false, str(R.string.svc_external))
                 }
-                appendNotice("system", "Waiting for SAM ${router.samHost}:${router.samPort}…")
+                appendNotice("router.waiting", NoticeUi.LEVEL_VERBOSE, sam)
                 val timeout = if (router.usingBundled) 90_000 else 8_000
                 ready = waitForSam(router.samHost, router.samPort, timeout) { elapsedSec ->
-                    val msg = I2pdForegroundService.readStatus(appRoot)
+                    val issue = if (router.usingBundled) bundledIssue(elapsedSec.toLong()) else null
                     _state.update {
-                        it.copy(
-                            status = buildString {
-                                append("Waiting for SAM ${router.samHost}:${router.samPort}… ${elapsedSec}s")
-                                if (msg.isNotBlank()) append(" — ").append(msg)
-                            },
-                        )
+                        it.copy(status = str(R.string.status_waiting_router, elapsedSec), routerIssue = issue)
                     }
                 }
-                if (!ready && router.usingBundled) {
-                    appendNotice("system", "SAM not ready — restarting bundled i2pd…")
+                val known = if (router.usingBundled) bundledIssue(0) else null
+                if (!ready && router.usingBundled && (known == null || known.offersRestart)) {
+                    appendNotice("router.restarting", NoticeUi.LEVEL_USER)
                     I2pdForegroundService.restartBundled(getApplication(), appRoot)
                     ready = waitForSam(router.samHost, router.samPort, 75_000) { elapsedSec ->
-                        val msg = I2pdForegroundService.readStatus(appRoot)
                         _state.update {
                             it.copy(
-                                status = buildString {
-                                    append("Restarting i2pd, waiting for SAM… ${elapsedSec}s")
-                                    if (msg.isNotBlank()) append(" — ").append(msg)
-                                },
+                                status = str(R.string.status_restarting_router, elapsedSec),
+                                routerIssue = bundledIssue(elapsedSec.toLong()),
                             )
                         }
                     }
                 }
-            } else {
-                appendNotice("system", "SAM already ready on ${router.samHost}:${router.samPort}")
             }
             if (!ready) {
-                val routerStatus = I2pdForegroundService.readStatus(appRoot)
-                failStart(
-                    "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus " +
-                        if (router.usingBundled) {
-                            "Try Router settings → Restart bundled i2pd, or wait a minute and Open again."
-                        } else {
-                            "Start i2pd on this phone and check Router settings → external SAM ${router.samHost}:${router.samPort}."
-                        },
-                )
+                val issue = if (router.usingBundled) {
+                    bundledIssue(Long.MAX_VALUE) ?: RouterIssue(RouterIssueCode.ROUTER_CRASHED)
+                } else {
+                    RouterDiagnostics.diagnoseSystemRouter(router.samHost, router.samPort, false)
+                }
+                failStart(issue?.let { issueText(it) } ?: str(R.string.status_failed), issue)
                 return@launch
             }
+            appendNotice("router.sam_ready", NoticeUi.LEVEL_VERBOSE, sam)
+            _state.update { it.copy(samReady = true, routerIssue = null) }
+            clearIncomingCache()
+            val (filesDir, imagesDir) = mediaDirs(ui)
             val result = runCatching {
                 JSONObject(
                     NativeEngine.nativeStart(
@@ -393,14 +466,17 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                         ui.historyMaxMessages,
                         ui.historyRetentionDays,
                         router.tunnelLength,
+                        filesDir,
+                        imagesDir,
+                        profilePassword,
                     ),
                 )
             }.getOrElse { ex ->
-                failStart("Cannot start I2P session: ${ex.message}")
+                failStart(str(R.string.notice_start_failed, ex.message.orEmpty()), null)
                 return@launch
             }
             if (!result.optBoolean("ok", false)) {
-                failStart(result.optString("error", "Failed to start"))
+                failStart(str(R.string.notice_start_failed, result.optString("error")), null)
                 return@launch
             }
             val drafts = runCatching {
@@ -417,16 +493,64 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     running = true,
                     localAddr = addr,
                     drafts = drafts,
-                    status = if (addr.isBlank()) "I2P is warming tunnels…" else "Online",
+                    status = str(R.string.status_warming),
                     error = "",
                 )
             }
             startPolling()
+            startTunnelWatch(router)
         }
+    }
+
+    private var tunnelWatchJob: Job? = null
+
+    /** While tunnels are not ready, keep looking for a router problem the user can fix. */
+    private fun startTunnelWatch(router: RouterPrefs) {
+        tunnelWatchJob?.cancel()
+        tunnelWatchJob = viewModelScope.launch(Dispatchers.IO) {
+            val t0 = System.currentTimeMillis()
+            while (isActive && _state.value.running) {
+                delay(5_000)
+                if (_state.value.tunnelsReady) {
+                    onMain { _state.update { it.copy(routerIssue = null) } }
+                    return@launch
+                }
+                val sec = (System.currentTimeMillis() - t0) / 1000
+                val issue = if (router.usingBundled) {
+                    bundledIssue(sec)
+                } else if (!samProbe(router.samHost, router.samPort)) {
+                    RouterDiagnostics.diagnoseSystemRouter(router.samHost, router.samPort, false)
+                } else {
+                    null
+                }
+                onMain { _state.update { it.copy(routerIssue = issue) } }
+            }
+        }
+    }
+
+    private fun bundledIssue(warmingSeconds: Long): RouterIssue? {
+        val log = RouterDiagnostics.readLogTail(I2pdForegroundService.logFile(appRoot))
+        return RouterDiagnostics.diagnoseBundledRouter(
+            log,
+            processAlive = !I2pdForegroundService.hasFailed(appRoot),
+            networkReady = false,
+            warmingSeconds = warmingSeconds,
+        )
+    }
+
+    fun issueText(issue: RouterIssue): String = when (issue.code) {
+        RouterIssueCode.SYSTEM_SAM_UNREACHABLE -> str(R.string.diag_system_sam_unreachable, issue.arg)
+        RouterIssueCode.RESEED_FAILED -> str(R.string.diag_reseed_failed)
+        RouterIssueCode.CLOCK_SKEW -> str(R.string.diag_clock_skew)
+        RouterIssueCode.PORT_IN_USE -> str(R.string.diag_port_in_use)
+        RouterIssueCode.NO_NETWORK -> str(R.string.diag_no_network)
+        RouterIssueCode.TUNNELS_SLOW -> str(R.string.diag_tunnels_slow)
+        RouterIssueCode.ROUTER_CRASHED -> str(R.string.diag_router_crashed)
     }
 
     fun stop() {
         pollJob?.cancel()
+        tunnelWatchJob?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { NativeEngine.nativeStop() }
             I2pdForegroundService.stop(getApplication())
@@ -434,12 +558,17 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 it.copy(
                     running = false,
                     starting = false,
-                    status = "Stopped",
+                    samReady = false,
+                    routerIssue = null,
+                    transport = "stopped",
+                    status = str(R.string.status_stopped),
                     localAddr = "",
                     contacts = emptyList(),
                     groups = emptyList(),
                     messages = emptyList(),
-                    sessionNotices = emptyList(),
+                    notices = emptyList(),
+                    verboseLog = emptyList(),
+                    peerStates = emptyMap(),
                 )
             }
         }
@@ -502,31 +631,35 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     /** Dial only when sending and not live; native side waits for inbound if tie-break says so. */
     private suspend fun ensureLiveForSend(addr: String) {
         if (peerLiveInSnapshot(addr)) return
-        onMain { appendNotice("system", "Подключаемся для отправки…") }
+        onMain { setPeerState(addr, "connecting") }
         val ok = runCatching { NativeEngine.nativeConnectPeer(addr) }.getOrDefault(false)
-        if (!ok) return
+        if (!ok) {
+            onMain { setPeerState(addr, "failed") }
+            return
+        }
         val deadline = System.currentTimeMillis() + 45_000
         while (System.currentTimeMillis() < deadline) {
             delay(250)
             refreshSnapshot()
             if (peerLiveInSnapshot(addr)) {
-                onMain { appendNotice("system", "Канал готов, отправляем сообщение.") }
+                onMain { setPeerState(addr, "secure") }
                 return
             }
         }
+        onMain { if (_state.value.peerStates[addr] == "connecting") setPeerState(addr, "failed") }
     }
 
     fun connectSelected() {
         val id = _state.value.selectedId
         if (id.isBlank() || _state.value.selectedIsGroup) return
         viewModelScope.launch(Dispatchers.IO) {
-            val ok = runCatching { NativeEngine.nativeConnectPeer(id) }
-                .getOrElse { ex ->
-                    onMain { _state.update { it.copy(error = "Connect failed: ${ex.message}") } }
-                    false
-                }
+            onMain { setPeerState(id, "connecting") }
+            val ok = runCatching { NativeEngine.nativeConnectPeer(id) }.getOrDefault(false)
             if (!ok) {
-                onMain { appendNotice("error", "Could not connect to $id") }
+                onMain {
+                    setPeerState(id, "failed")
+                    appendNotice("peer.connect_failed", NoticeUi.LEVEL_USER, id)
+                }
             }
             refreshSnapshot()
         }
@@ -577,12 +710,18 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    /** Accept and, once the file is complete, copy it into the document the user created. */
+    fun answerFileOfferSavingTo(uri: Uri) {
+        saveAsUri = uri
+        answerFileOffer(true)
+    }
+
     fun answerFileOffer(accept: Boolean) {
         val offer = _state.value.fileOffer ?: return
         _state.update { it.copy(fileOffer = null) }
         viewModelScope.launch(Dispatchers.IO) {
             if (!NativeEngine.nativeFileRespond(offer.peer, accept)) {
-                onMain { appendNotice("system", "Предложение файла «${offer.name}» уже неактуально") }
+                onMain { appendNotice("file.offer_stale", NoticeUi.LEVEL_USER, offer.name) }
             }
         }
     }
@@ -698,7 +837,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             _state.update {
                 it.copy(
                     error = if (result.optBoolean("ok")) "" else result.optString("error"),
-                    status = if (result.optBoolean("ok")) "Backup ok" else it.status,
+                    status = if (result.optBoolean("ok")) str(R.string.status_backup_ok) else it.status,
                 )
             }
         }
@@ -806,7 +945,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 ContactUi(
                     addr = o.getString("groupId"),
                     displayName = o.optString("title"),
-                    lastPreview = "${members.size} members",
+                    lastPreview = str(R.string.group_members, members.size),
                     isGroup = true,
                     members = members,
                     epoch = o.optLong("epoch"),
@@ -899,43 +1038,69 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
     }
 
-    private fun failStart(message: String) {
+    private fun failStart(message: String, issue: RouterIssue?) {
         onMain {
             _state.update {
                 it.copy(
                     starting = false,
                     running = false,
-                    transport = "Failed",
-                    status = "Failed",
+                    transport = "failed",
+                    status = str(R.string.status_failed),
                     error = message,
+                    routerIssue = issue,
                 )
             }
-            appendNotice("error", message)
+            if (issue == null) appendNotice("error.other", NoticeUi.LEVEL_USER, text = message)
         }
     }
 
-    private fun appendNotice(kind: String, text: String) {
-        val noticeKind = if (text.startsWith("Online! My Address:")) "success" else kind
+    private fun str(id: Int, vararg args: Any): String = getApplication<Application>().getString(id, *args)
+
+    private fun setPeerState(addr: String, state: String) {
+        if (addr.isBlank()) return
+        _state.update { it.copy(peerStates = it.peerStates + (addr to state)) }
+    }
+
+    private fun appendNotice(code: String, level: String, arg: String = "", text: String = "") {
+        val notice = NoticeUi(code, level, arg, text, noticeTimestamp())
         _state.update {
-            val notices = if (it.sessionNotices.lastOrNull()?.text == text) {
-                it.sessionNotices
+            val notices = if (notice.isUser && it.notices.lastOrNull()?.let { last ->
+                    last.code == code && last.arg == arg && last.text == text
+                } != true
+            ) {
+                (it.notices + notice).takeLast(MAX_NOTICES)
             } else {
-                it.sessionNotices + MessageUi(noticeKind, text, "")
+                it.notices
             }
-            it.copy(sessionNotices = notices, status = text)
+            it.copy(notices = notices, verboseLog = (it.verboseLog + notice).takeLast(MAX_VERBOSE))
+        }
+    }
+
+    private fun noticeTimestamp(): String =
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())
+
+    override fun onNotice(json: String) = onMain {
+        val o = runCatching { JSONObject(json) }.getOrNull() ?: return@onMain
+        val code = o.optString("code")
+        val level = o.optString("level", NoticeUi.LEVEL_VERBOSE)
+        val arg = o.optString("arg")
+        appendNotice(code, level, arg, o.optString("text"))
+        when (code) {
+            "peer.connecting" -> setPeerState(arg, "connecting")
+            "peer.secure" -> setPeerState(arg, "secure")
+            "peer.disconnected" -> {
+                setPeerState(arg, "disconnected")
+                viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
+            }
         }
     }
 
     override fun onSystem(message: String) = onMain {
-        appendNotice("system", message)
-        if (message.startsWith("Disconnected from")) {
-            viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
-        }
+        appendNotice("system.other", NoticeUi.LEVEL_VERBOSE, text = message)
     }
 
     override fun onError(message: String) = onMain {
-        appendNotice("error", message)
-        _state.update { it.copy(error = message) }
+        appendNotice("error.other", NoticeUi.LEVEL_USER, text = message)
     }
 
     override fun onHistory(peer: String, json: String) = onMain {
@@ -964,28 +1129,50 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     override fun onDelivery(json: String) = onMain { loadHistory() }
 
     override fun onPeerState(peer: String, state: String, reason: String) = onMain {
+        setPeerState(peer, state)
         viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
     }
 
     override fun onTransportState(state: String, reason: String) = onMain {
-        _state.update { it.copy(transport = state, status = reason.ifBlank { state }) }
+        _state.update {
+            it.copy(
+                transport = state,
+                status = when (state) {
+                    "ready" -> str(R.string.status_online)
+                    "failed" -> str(R.string.status_failed)
+                    else -> str(R.string.status_warming)
+                },
+                routerIssue = if (state == "ready") null else it.routerIssue,
+            )
+        }
     }
 
     override fun onTransfer(peer: String, json: String) = onMain { }
 
     override fun onFileReceived(peer: String, path: String) = onMain {
-        NotificationHelper.notifyMessage(getApplication(), peer, "File received: ${File(path).name}")
+        val dest = saveAsUri
+        saveAsUri = null
+        if (dest != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver.openOutputStream(dest)?.use { out ->
+                        File(path).inputStream().use { input -> input.copyTo(out) }
+                    }
+                }
+            }
+        }
+        NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, File(path).name))
         if (peer == _state.value.selectedId) loadHistory()
     }
 
     override fun onImageReceived(peer: String, path: String) = onMain {
-        NotificationHelper.notifyMessage(getApplication(), peer, "Image received")
+        NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_image))
         if (peer == _state.value.selectedId) loadHistory()
         else {
             _state.update {
                 it.copy(
                     contacts = it.contacts.map { c ->
-                        if (c.addr == peer) c.copy(unread = c.unread + 1, lastPreview = "📷 Image") else c
+                        if (c.addr == peer) c.copy(unread = c.unread + 1, lastPreview = str(R.string.image_preview)) else c
                     },
                 )
             }
@@ -1024,16 +1211,16 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         // pins the key and reconnects.
         _state.update { it.copy(tofu = TofuPrompt(kind, peer, newKey, oldKey)) }
         NotificationHelper.notifyTrustPrompt(getApplication(), peer)
-        appendNotice("system", "Нужно подтвердить ключ $peer для handshake")
+        appendNotice("trust.prompt", NoticeUi.LEVEL_USER, peer)
     }
 
     override fun onFileOffer(peer: String, name: String, size: Long) = onMain {
         // Bytes spool to a .pending file meanwhile; the dialog is the only way to say yes.
         _state.update { it.copy(fileOffer = FileOfferPrompt(peer, name, size)) }
-        appendNotice("system", "$peer предлагает файл «$name» (${formatSize(size)})")
+        appendNotice("file.offer", NoticeUi.LEVEL_VERBOSE, peer, "$name (${formatSize(size)})")
     }
 
-    private fun formatSize(size: Long): String = when {
+    fun formatSize(size: Long): String = when {
         size >= 1L shl 30 -> "%.1f GiB".format(size / (1L shl 30).toDouble())
         size >= 1L shl 20 -> "%.1f MiB".format(size / (1L shl 20).toDouble())
         size >= 1L shl 10 -> "%.1f KiB".format(size / (1L shl 10).toDouble())
@@ -1045,13 +1232,16 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             it.copy(
                 running = true,
                 starting = false,
-                status = if (it.localAddr.isBlank()) "I2P is warming tunnels…" else "Online",
+                status = str(R.string.status_warming),
             )
         }
     }
 
     override fun onStartFailed(message: String) = onMain {
-        _state.update { it.copy(running = false, starting = false, error = message, status = "Failed") }
+        _state.update {
+            it.copy(running = false, starting = false, error = message, status = str(R.string.status_failed))
+        }
+        appendNotice("error.other", NoticeUi.LEVEL_USER, text = message)
     }
 
     fun consumeOpenIntent(intent: Intent?) {
@@ -1060,6 +1250,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onCleared() {
+        clearIncomingCache()
         NativeEngine.nativeSetListener(null)
         runCatching { NativeEngine.nativeStop() }
         super.onCleared()

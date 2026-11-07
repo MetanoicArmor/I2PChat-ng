@@ -26,6 +26,7 @@
 #include "i2pchat/session/peer_session.hpp"
 #include "i2pchat/storage/contacts.hpp"
 #include "i2pchat/storage/keyring.hpp"
+#include "i2pchat/storage/profile_dat.hpp"
 
 namespace i2pchat::runtime {
 namespace {
@@ -88,6 +89,12 @@ struct ChatService::Peer {
     /// Cancelled to wake a `connect_peer` that is waiting on the handshake.
     std::shared_ptr<asio::steady_timer> connect_waiter;
     bool connect_succeeded = false;
+    /// Set once a secure channel existed this run. Cleared only by the user hanging up.
+    bool had_secure = false;
+    bool user_disconnected = false;
+    bool auto_reconnect_inflight = false;
+    unsigned auto_attempt = 0;
+    std::shared_ptr<asio::steady_timer> auto_reconnect;
 };
 
 std::string_view delivery_state_name(DeliveryState state) {
@@ -154,11 +161,11 @@ asio::awaitable<void> ChatService::start() {
 
     emit_system("Initializing Profile: " + config_.profile);
     if (config_.profile == kTransientProfile) {
-        emit_system(
-            "Security note: TRANSIENT profile does not persist TOFU trust pins between restarts.");
+        emit_notice("profile.transient", "user", {},
+                    "Security note: TRANSIENT profile does not persist TOFU trust pins between restarts.");
         emit_system("Use a named profile for persistent peer-key trust continuity.");
     }
-    const bool had_destination = load_destination(paths_).has_value();
+    const bool had_destination = load_destination(paths_, config_.profile_password).has_value();
     const bool had_keyring =
         storage::keyring::get(storage::kKeyringService, config_.profile).has_value();
     if (had_keyring) {
@@ -185,7 +192,8 @@ asio::awaitable<void> ChatService::start() {
     sessions_.set_transport_state(session::TransportState::Starting, "start");
 
     const Bytes signing_seed = load_or_create_signing_seed(paths_);
-    if (const std::optional<sam::Destination> existing = load_destination(paths_)) {
+    if (const std::optional<sam::Destination> existing =
+            load_destination(paths_, config_.profile_password)) {
         identity_ = identity_from(config_.profile, *existing, ByteView(signing_seed));
         contacts_ = storage::load_contact_book(paths_.contacts(),
                                               ByteView(identity_.identity_key));
@@ -201,11 +209,11 @@ asio::awaitable<void> ChatService::start() {
         emit_system("Identity will be saved encrypted to " + paths_.identity_dat().string());
     }
 
-    emit_system("Starting I2P session, please wait…");
+    emit_notice("session.starting", "user", {}, "Starting I2P session, please wait…");
     sam_ = std::make_shared<sam::SamSession>(executor_, config_.sam);
     try {
         if (identity_.destination_base64.empty()) {
-            identity_ = co_await load_identity(*sam_, paths_);
+            identity_ = co_await load_identity(*sam_, paths_, config_.profile_password);
             contacts_ = storage::load_contact_book(paths_.contacts(),
                                                   ByteView(identity_.identity_key));
             if (events_.on_local_address) {
@@ -265,7 +273,7 @@ asio::awaitable<void> ChatService::start() {
     if (events_.on_local_address) {
         events_.on_local_address(identity_.local_addr);
     }
-    emit_system("Building I2P tunnels (may take 1–2 min)...");
+    emit_notice("tunnels.building", "user", {}, "Building I2P tunnels (may take 1–2 min)...");
     sessions_.set_transport_state(session::TransportState::WarmingTunnels, "tunnel-warmup");
 
     asio::co_spawn(executor_, [this] { return accept_loop(); }, asio::detached);
@@ -301,12 +309,14 @@ asio::awaitable<void> ChatService::start() {
     if (stopping_) {
         co_return;
     }
-    emit_system("Online! My Address: " + identity_.local_addr);
+    emit_notice("session.online", "user", identity_.local_addr,
+                "Online! My Address: " + identity_.local_addr);
     if (tunnels_ready) {
-        emit_system("Tunnels ready. Waiting for incoming connections...");
+        emit_notice("tunnels.ready", "user", {}, "Tunnels ready. Waiting for incoming connections...");
         sessions_.set_transport_state(session::TransportState::Ready, "tunnels-ready");
     } else {
-        emit_system("Tunnels may still be building. Wait 1–2 min before connecting.");
+        emit_notice("tunnels.slow", "user", {},
+                    "Tunnels may still be building. Wait 1–2 min before connecting.");
         sessions_.set_transport_state(session::TransportState::Degraded, "tunnels-pending");
     }
 }
@@ -323,6 +333,9 @@ asio::awaitable<void> ChatService::stop() {
     sessions_.set_transport_state(session::TransportState::ShuttingDown, "stop");
 
     for (auto& [addr, peer] : peers_) {
+        if (peer->auto_reconnect) {
+            peer->auto_reconnect->cancel();
+        }
         if (peer->link && !peer->link->closed()) {
             peer->link->close_gracefully();
         }
@@ -597,8 +610,9 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     // Tie-break for simultaneous dials is handled in on_established (prefer inbound).
     // Do not wait here — that delayed the first message by up to 15s when the peer
     // was not dialling us.
-    emit_system("Connecting to " + peer_addr.substr(0, 16) +
-                "… (first contact may take 30–90s while I2P builds tunnels)");
+    emit_notice("peer.connecting", "peer_state", peer_addr,
+                "Connecting to " + peer_addr.substr(0, 16) +
+                    "… (first contact may take 30–90s while I2P builds tunnels)");
     sessions_.on_connecting(peer_addr);
     sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
     try {
@@ -649,10 +663,81 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     co_return true;
 }
 
+void ChatService::set_profile_password(std::string password) {
+    if (identity_.destination_base64.empty() || config_.profile == kTransientProfile) {
+        throw std::runtime_error("The profile is not open");
+    }
+    config_.profile_password = std::move(password);
+    storage::write_encrypted_profile_dat(paths_.identity_dat(), identity_.destination_base64,
+                                         config_.profile, paths_.data_dir(),
+                                         config_.profile_password);
+}
+
 void ChatService::disconnect_peer(std::string_view peer) {
-    if (Peer* entry = find_peer(peer); entry != nullptr && entry->link) {
+    Peer* entry = find_peer(peer);
+    if (entry == nullptr) {
+        return;
+    }
+    entry->user_disconnected = true;
+    entry->had_secure = false;
+    if (entry->auto_reconnect) {
+        entry->auto_reconnect->cancel();
+        entry->auto_reconnect.reset();
+    }
+    if (entry->link) {
         entry->link->close_gracefully();
     }
+}
+
+void ChatService::schedule_auto_reconnect(Peer& peer) {
+    if (stopping_ || !peer.had_secure || peer.user_disconnected || peer.auto_reconnect ||
+        peer.auto_reconnect_inflight) {
+        return;
+    }
+    if (live_link(peer.link.get(), sessions_, peer.addr)) {
+        peer.auto_attempt = 0;
+        return;
+    }
+    const unsigned next = peer.auto_attempt + 1;
+    peer.auto_attempt = next;
+    const int seconds = std::min(60, 10 * static_cast<int>(next));
+    peer.auto_reconnect = std::make_shared<asio::steady_timer>(executor_);
+    peer.auto_reconnect->expires_after(std::chrono::seconds(seconds));
+    sessions_.on_connecting(peer.addr);
+    const std::string addr = peer.addr;
+    std::shared_ptr<asio::steady_timer> timer = peer.auto_reconnect;
+    timer->async_wait([this, addr, timer](const boost::system::error_code& error) {
+        if (error || stopping_) {
+            return;
+        }
+        Peer* current = find_peer(addr);
+        if (current == nullptr || current->auto_reconnect != timer || current->user_disconnected ||
+            !current->had_secure) {
+            return;
+        }
+        current->auto_reconnect.reset();
+        if (live_link(current->link.get(), sessions_, addr)) {
+            current->auto_attempt = 0;
+            return;
+        }
+        current->auto_reconnect_inflight = true;
+        asio::co_spawn(
+            executor_,
+            [this, addr]() -> asio::awaitable<void> {
+                const bool ok = co_await connect_peer(addr);
+                Peer* settled = find_peer(addr);
+                if (settled != nullptr) {
+                    settled->auto_reconnect_inflight = false;
+                    if (ok || live_link(settled->link.get(), sessions_, addr)) {
+                        settled->auto_attempt = 0;
+                    } else if (!settled->user_disconnected) {
+                        schedule_auto_reconnect(*settled);
+                    }
+                }
+                co_return;
+            },
+            asio::detached);
+    });
 }
 
 void ChatService::on_established(PeerLink& link) {
@@ -680,11 +765,20 @@ void ChatService::on_established(PeerLink& link) {
         attach_link(peer, established);
     }
     peer.connect_succeeded = true;
+    peer.had_secure = true;
+    peer.user_disconnected = false;
+    peer.auto_attempt = 0;
+    peer.auto_reconnect_inflight = false;
+    if (peer.auto_reconnect) {
+        peer.auto_reconnect->cancel();
+        peer.auto_reconnect.reset();
+    }
     if (peer.connect_waiter) {
         peer.connect_waiter->cancel();
     }
     remember_contact(addr, {});
-    emit_system("Secure channel with " + addr.substr(0, 16) + "… established");
+    emit_notice("peer.secure", "peer_state", addr,
+                "Secure channel with " + addr.substr(0, 16) + "… established");
     offer_blindbox_root(addr);
 }
 
@@ -737,7 +831,11 @@ void ChatService::on_link_closed(const std::string& peer_addr, const std::string
     if (entry->connect_waiter) {
         entry->connect_waiter->cancel();
     }
-    emit_system("Disconnected from " + peer_addr.substr(0, 16) + "…: " + reason);
+    emit_notice("peer.disconnected", "peer_state", peer_addr,
+                "Disconnected from " + peer_addr.substr(0, 16) + "…: " + reason);
+    if (entry->had_secure && !entry->user_disconnected && !stopping_) {
+        schedule_auto_reconnect(*entry);
+    }
     if (events_.on_contacts_changed) {
         events_.on_contacts_changed();
     }
@@ -1889,8 +1987,15 @@ std::uint64_t ChatService::next_msg_id() {
 }
 
 void ChatService::emit_system(const std::string& message) const {
-    if (events_.on_system) {
-        events_.on_system(message);
+    emit_notice("system.other", "verbose", {}, message);
+}
+
+void ChatService::emit_notice(const std::string& code, const std::string& level,
+                              const std::string& arg, const std::string& text) const {
+    if (events_.on_notice) {
+        events_.on_notice(Notice{code, level, arg, text});
+    } else if (events_.on_system) {
+        events_.on_system(text);
     }
 }
 

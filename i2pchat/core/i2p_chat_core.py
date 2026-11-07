@@ -25,6 +25,7 @@ from PIL import Image
 from i2pchat import crypto
 from i2pchat.blindbox.blindbox_blob import decrypt_blindbox_blob, encrypt_blindbox_blob
 from i2pchat.blindbox.blindbox_client import BlindBoxClient
+from i2pchat.presentation.notices import Notice, classify_notice
 from i2pchat.blindbox.blindbox_key_schedule import (
     derive_blindbox_message_keys,
     derive_group_blindbox_message_keys,
@@ -93,7 +94,9 @@ from i2pchat.storage.profile_blindbox_replicas import (
     save_profile_blindbox_replicas_bundle,
 )
 from i2pchat.storage.profile_dat import (
+    ProfilePasswordError,
     is_encrypted_profile_dat,
+    profile_dat_needs_password,
     read_profile_dat_file,
     write_encrypted_profile_dat,
 )
@@ -123,6 +126,7 @@ from i2pchat.core.transient_profile import (
     is_transient_profile_name,
 )
 from i2pchat.core.session_manager import (
+    AutoReconnectBook,
     OutboundPolicy,
     PeerState,
     SessionManager,
@@ -601,31 +605,17 @@ def get_profiles_dir() -> str:
 
 
 def get_downloads_dir() -> str:
-    """
-    Безопасная директория для входящих файлов (sandbox).
-    Изолирована внутри profiles директории для предотвращения path traversal.
-    """
-    base = os.path.join(get_profiles_dir(), "downloads")
-    os.makedirs(base, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    return base
+    """Directory for incoming files: the saved path, or ``downloads/`` when unset."""
+    from i2pchat.storage.media_prefs import incoming_files_dir
+
+    return incoming_files_dir()
 
 
 def get_images_dir() -> str:
-    """
-    Безопасная директория для входящих изображений (sandbox).
-    Изолирована внутри profiles директории для предотвращения path traversal.
-    """
-    base = os.path.join(get_profiles_dir(), "images")
-    os.makedirs(base, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    return base
+    """Directory for incoming images: the saved path, or ``images/`` when unset."""
+    from i2pchat.storage.media_prefs import incoming_images_dir
+
+    return incoming_images_dir()
 
 
 def get_profile_data_dir(
@@ -1361,6 +1351,7 @@ class I2PChatCore:
         on_peer_changed: Optional[PeerChangedCallback] = None,
         on_system: Optional[SimpleCallback] = None,
         on_error: Optional[SimpleCallback] = None,
+        on_notice: Optional[Callable[[Notice], Any]] = None,
         on_file_event: Optional[FileEventCallback] = None,
         on_file_offer: Optional[FileOfferCallback] = None,
         on_image_received: Optional[Callable[[str], Any]] = None,
@@ -1391,6 +1382,9 @@ class I2PChatCore:
         self.on_peer_changed = on_peer_changed
         self.on_system = on_system
         self.on_error = on_error
+        # When set, service messages (system / info / success) arrive here as
+        # classified Notices instead of on_system / on_message.
+        self.on_notice = on_notice
         self.on_file_event = on_file_event
         self.on_file_offer = on_file_offer
         self.on_image_received = on_image_received
@@ -1401,6 +1395,8 @@ class I2PChatCore:
         self.on_trust_decision = on_trust_decision
         self.on_trust_mismatch_decision = on_trust_mismatch_decision
         self.on_saved_contacts_changed = on_saved_contacts_changed
+        self.profile_password = ""
+        self.on_profile_password: Optional[Callable[[], Any]] = None
         self._trust_auto = (
             os.environ.get("I2PCHAT_TRUST_AUTO", "").strip().lower() in TRUTHY_ENV_VALUES
         )
@@ -1485,6 +1481,8 @@ class I2PChatCore:
             "expired_or_state": 0,
         }
         self.session_manager = SessionManager()
+        self._auto_reconnect = AutoReconnectBook()
+        self._auto_reconnect_task: Optional[asyncio.Task] = None
         self.group_manager = GroupManager(
             session_manager=self.session_manager,
             send_live=self._send_group_envelope_live,
@@ -1976,10 +1974,26 @@ class I2PChatCore:
                 pass
 
     def _emit_system(self, text: str) -> None:
-        if self.on_system:
+        self._emit_notice(text)
+
+    def _emit_notice(
+        self,
+        text: str,
+        *,
+        kind: str = "system",
+        code: Optional[str] = None,
+        peer: Optional[str] = None,
+    ) -> None:
+        if self.on_notice:
+            try:
+                self.on_notice(classify_notice(text, kind=kind, code=code, peer=peer))
+            except Exception:
+                logger.exception("on_notice callback failed")
+            return
+        if kind == "system" and self.on_system:
             self.on_system(text)
         else:
-            self._emit_message("system", text)
+            self._emit_message(kind, text)
 
     def _emit_error(self, text: str) -> None:
         if self.on_error:
@@ -1995,18 +2009,25 @@ class I2PChatCore:
         if self.on_file_event:
             self.on_file_event(info)
 
-    async def _request_file_offer_decision(self, filename: str, size: int) -> bool:
-        """Запросить у UI согласие на входящий файл до старта записи на диск."""
+    async def _request_file_offer_decision(self, filename: str, size: int) -> Optional[str]:
+        """Ask the UI before writing an incoming file.
+
+        ``None`` rejects. An empty string accepts into the incoming-files
+        directory. Any other string is the full path the user picked.
+        A boolean ``True`` from an older callback means the default directory.
+        """
         if self.on_file_offer is None:
-            return True
+            return ""
         try:
             result = self.on_file_offer(filename, size)
             if asyncio.isfuture(result) or asyncio.iscoroutine(result):
-                return bool(await result)
-            return bool(result)
+                result = await result
         except Exception as e:
             self._emit_error(f"Incoming file decision callback failed: {e}")
-            return False
+            return None
+        if isinstance(result, str):
+            return result
+        return "" if result else None
 
     def _emit_inline_image(self, path: str, is_from_me: bool, sent_filename: Optional[str] = None) -> None:
         if self.on_inline_image_received:
@@ -2340,6 +2361,27 @@ class I2PChatCore:
             self._heal_session_manager_secure(k)
             return True
         return False
+
+    def peer_link_state(self, peer_id: str) -> str:
+        """``secure`` | ``connecting`` | ``offline`` for a contact status badge."""
+        try:
+            k = self._normalize_peer_addr(peer_id) if peer_id else ""
+        except ValueError:
+            return "offline"
+        if not k:
+            return "offline"
+        if self._live_session_secure_ready(k):
+            return "secure"
+        ls = self._live_sessions.get(k)
+        if ls is not None and ls.conn is not None:
+            return "connecting"
+        peer = self.session_manager.get_peer_transport(k)
+        if peer is not None and peer.peer_state in (
+            PeerState.CONNECTING,
+            PeerState.HANDSHAKING,
+        ):
+            return "connecting"
+        return "offline"
 
     def list_secure_live_peers(self) -> list[str]:
         """Canonical peer ids with an active finished secure live session."""
@@ -5016,6 +5058,27 @@ class I2PChatCore:
             return bool(cur)
         return bool(cur) and self.peer_in_saved_contacts(cur)
 
+    async def _profile_password_for_dat(self, path: str) -> str:
+        if self.profile_password or not profile_dat_needs_password(path):
+            return self.profile_password
+        prompt = self.on_profile_password
+        if prompt is None:
+            raise ProfilePasswordError("A password is required to open this profile.")
+        result = prompt()
+        if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+            result = await result
+        self.profile_password = str(result or "")
+        if not self.profile_password:
+            raise ProfilePasswordError("A password is required to open this profile.")
+        return self.profile_password
+
+    def set_profile_password(self, password: str) -> None:
+        """Seal the open profile with a new password, or remove it when empty."""
+        self.profile_password = (password or "").strip()
+        if self.my_dest is None:
+            raise RuntimeError("The profile is not open")
+        self._write_profile_dat(self.my_dest.private_key.base64, None)
+
     def _write_profile_dat(
         self,
         private_key_base64: Optional[str],
@@ -5034,6 +5097,7 @@ class I2PChatCore:
             key,
             profile=self.profile,
             profile_data_dir=self.get_profile_data_dir(create=True),
+            password=self.profile_password,
         )
 
     def save_stored_peer(self, peer_addr: str) -> None:
@@ -5436,7 +5500,10 @@ class I2PChatCore:
                         profile=self.profile,
                         profile_data_dir=self.get_profile_data_dir(create=True),
                         is_probable_peer=self._is_probable_peer_addr,
+                        password=await self._profile_password_for_dat(key_file),
                     )
+                except ProfilePasswordError:
+                    raise
                 except Exception as e:
                     logger.warning("Failed to read profile .dat %s: %s", key_file, e)
                     file_key, stored_line, was_plaintext = None, None, False
@@ -5556,14 +5623,14 @@ class I2PChatCore:
 
         if tunnels_ready:
             self._emit_status("visible")
-            self._emit_message("success", f"Online! My Address: {my_addr_display}")
+            self._emit_notice(f"Online! My Address: {my_addr_display}", kind="success")
             self._emit_system("Tunnels ready. Waiting for incoming connections...")
             self.session_manager.transition_transport(
                 TransportState.READY, reason="tunnels-ready"
             )
         else:
             self._emit_status("local_ok")
-            self._emit_message("success", f"Online! My Address: {my_addr_display}")
+            self._emit_notice(f"Online! My Address: {my_addr_display}", kind="success")
             self._emit_system(
                 "Tunnels may still be building. Wait 1–2 min before connecting."
             )
@@ -8090,9 +8157,10 @@ class I2PChatCore:
                 if activate_as_current:
                     self.activate_peer_context(normalized_target)
                     if announce_to_ui:
-                        self._emit_system(
+                        self._emit_notice(
                             f"Connecting to {normalized_target[:24]}... "
-                            "(may take 1–2 min while I2P builds tunnels)"
+                            "(may take 1–2 min while I2P builds tunnels)",
+                            peer=normalized_target,
                         )
                     else:
                         logger.info(
@@ -8181,8 +8249,10 @@ class I2PChatCore:
                 )
                 self._activate_ack_session(normalized_target)
                 if extra_ls.announce_lifecycle:
-                    self._emit_message(
-                        "info", "Handshake sent. Establishing secure channel... Wait"
+                    self._emit_notice(
+                        "Handshake sent. Establishing secure channel... Wait",
+                        kind="info",
+                        peer=normalized_target,
                     )
 
                 loop = asyncio.get_running_loop()
@@ -9206,7 +9276,7 @@ class I2PChatCore:
         if self.active_live_peer_id == k:
             self.active_live_peer_id = None
         if ls.announce_lifecycle:
-            self._emit_message("info", f"You disconnected from {k[:16]}...")
+            self._emit_notice(f"You disconnected from {k[:16]}...", kind="info", peer=k)
         self._notify_group_mesh_manager()
         await self._maybe_stop_keepalive_if_idle()
         if self._any_live_stream() and (
@@ -9244,9 +9314,65 @@ class I2PChatCore:
             if cur and self._has_active_session_for_peer(cur):
                 ap = cur
         if ap and self._has_active_session_for_peer(ap):
+            self._auto_reconnect.note_user_disconnect(ap)
             await self.disconnect_peer(ap)
             return
+        cur = self._normalize_peer_addr(self.current_peer_addr or "")
+        if cur:
+            self._auto_reconnect.note_user_disconnect(cur)
         await self.disconnect_peer(None)
+
+    def _ensure_auto_reconnect(self) -> None:
+        task = self._auto_reconnect_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._auto_reconnect_task = loop.create_task(self._auto_reconnect_loop())
+
+    async def _auto_reconnect_loop(self) -> None:
+        """Redial peers that already had a secure channel and were not hung up."""
+        try:
+            while self.session_manager.transport_state not in {
+                TransportState.SHUTTING_DOWN,
+                TransportState.STOPPED,
+            }:
+                await asyncio.sleep(1.0)
+                secure = set(self.list_secure_live_peers())
+                for peer in self._auto_reconnect.tick(time.monotonic(), secure=secure):
+                    self._mark_reconnecting(peer)
+                    asyncio.get_running_loop().create_task(self._auto_reconnect_once(peer))
+                for peer in self._auto_reconnect.tracked():
+                    if self._auto_reconnect.waiting(peer):
+                        self._mark_reconnecting(peer)
+        except asyncio.CancelledError:
+            return
+
+    async def _auto_reconnect_once(self, peer: str) -> None:
+        try:
+            await self.connect_to_peer(
+                peer, activate_as_current=False, announce_to_ui=False
+            )
+        except Exception:
+            logger.exception("Auto-reconnect to %s failed", peer[:24])
+        finally:
+            self._auto_reconnect.finished(
+                peer, secure=self._live_session_secure_ready(peer)
+            )
+
+    def _mark_reconnecting(self, peer: str) -> None:
+        transport = self.session_manager.get_peer_transport(peer)
+        if transport is None:
+            return
+        if transport.peer_state in {
+            PeerState.SECURE,
+            PeerState.CONNECTING,
+            PeerState.HANDSHAKING,
+        }:
+            return
+        transport.peer_state = PeerState.CONNECTING
 
     async def _keepalive_loop(self) -> None:
         """Отправляет Ping каждые 15 секунд для всех live-потоков."""
@@ -10507,9 +10633,13 @@ class I2PChatCore:
                 peer_id=peer_addr_norm,
             )
             self.session_manager.mark_live_healthy(peer_id=peer_addr_norm)
+            self._auto_reconnect.note_secure(peer_addr_norm)
+            self._ensure_auto_reconnect()
         if sess.announce_lifecycle:
-            self._emit_message("info", "Secure channel with PFS established")
-            self._emit_system("✔ Ready! You can now send messages.")
+            self._emit_notice(
+                "Secure channel with PFS established", kind="info", peer=peer_addr_norm
+            )
+            self._emit_notice("✔ Ready! You can now send messages.", peer=peer_addr_norm)
         self._trigger_blindbox_hot_poll("peer-online")
         self._notify_group_mesh_manager()
         if peer_addr_norm:
@@ -10530,6 +10660,9 @@ class I2PChatCore:
         self.session_manager.transition_transport(
             TransportState.SHUTTING_DOWN, reason="shutdown"
         )
+        if self._auto_reconnect_task is not None and not self._auto_reconnect_task.done():
+            self._auto_reconnect_task.cancel()
+            self._auto_reconnect_task = None
         if self._group_mesh_task is not None and not self._group_mesh_task.done():
             self.group_mesh_manager.stop()
             self._group_mesh_task.cancel()
@@ -10655,8 +10788,10 @@ class I2PChatCore:
                     extra_ls.peer_identity_binding_verified = True
                     self._live_sessions[peer_addr_norm] = extra_ls
 
-                    self._emit_message(
-                        "info", f"Connection accepted from {peer_addr[:12]}..."
+                    self._emit_notice(
+                        f"Connection accepted from {peer_addr[:12]}...",
+                        kind="info",
+                        peer=peer_addr_norm,
                     )
                     # Отдельное событие для системного уведомления о входящем подключении.
                     self._emit_notify("connect", peer_addr)
@@ -11163,24 +11298,42 @@ class I2PChatCore:
                             sess.incoming_info = None
                             continue
                         safe_name = os.path.basename(filename)
-                        safe_path = allocate_unique_filename(get_downloads_dir(), safe_name)
-                        final_name = os.path.basename(safe_path)
-                        accepted = await self._request_file_offer_decision(
-                            final_name, size
-                        )
-                        if not accepted:
+                        decision = await self._request_file_offer_decision(safe_name, size)
+                        if decision is None:
                             prj = peer_id or self._normalize_peer_addr(
                                 self.current_peer_addr or ""
                             )
                             await self.reject_incoming_file(
-                                final_name, peer_for_route=prj
+                                safe_name, peer_for_route=prj
                             )
                             self._emit_system(
-                                f"Incoming file rejected by user: {final_name}"
+                                f"Incoming file rejected by user: {safe_name}"
                             )
                             sess.incoming_file = None
                             sess.incoming_info = None
                             continue
+                        from i2pchat.storage.media_prefs import resolve_save_as
+
+                        chosen = resolve_save_as(decision) if decision else None
+                        if decision and chosen is None:
+                            self._emit_error(f"Cannot save the file to {decision}")
+                            await self.reject_incoming_file(
+                                safe_name,
+                                peer_for_route=peer_id
+                                or self._normalize_peer_addr(self.current_peer_addr or ""),
+                            )
+                            sess.incoming_file = None
+                            sess.incoming_info = None
+                            continue
+                        if chosen and os.path.exists(chosen):
+                            safe_path = allocate_unique_filename(
+                                os.path.dirname(chosen) or ".", os.path.basename(chosen)
+                            )
+                        elif chosen:
+                            safe_path = chosen
+                        else:
+                            safe_path = allocate_unique_filename(get_downloads_dir(), safe_name)
+                        final_name = os.path.basename(safe_path)
                         if final_name != safe_name:
                             self._emit_system(
                                 f"Filename collision detected: saved as {final_name}"
@@ -11531,8 +11684,8 @@ class I2PChatCore:
                                 break
                             if sess.handshake_complete:
                                 self.peer_b32 = new_peer
-                                self._emit_message(
-                                    "info", f"Peer Identity: {self.peer_b32}"
+                                self._emit_notice(
+                                    f"Peer Identity: {self.peer_b32}", kind="info"
                                 )
                                 self._emit_peer_changed(self.peer_b32)
                         except Exception:
@@ -11592,7 +11745,9 @@ class I2PChatCore:
                     peer_id=peer_before_cleanup,
                 )
                 if sess.announce_lifecycle:
-                    self._emit_message("info", "Peer disconnected.")
+                    self._emit_notice(
+                        "Peer disconnected.", kind="info", peer=peer_before_cleanup
+                    )
                 self.peer_b32 = "Waiting for incoming connections..."
                 if sess.announce_lifecycle:
                     self._emit_system("Waiting for incoming connections...")
@@ -11630,9 +11785,8 @@ class I2PChatCore:
                 )
                 if self.network_status != "visible":
                     self._emit_status("visible")
-                    self._emit_message(
-                        "success",
-                        "Tunnels confirmed. You are now VISIBLE.",
+                    self._emit_notice(
+                        "Tunnels confirmed. You are now VISIBLE.", kind="success"
                     )
                 self.session_manager.transition_transport(
                     TransportState.READY, reason="tunnel-watch-ok"

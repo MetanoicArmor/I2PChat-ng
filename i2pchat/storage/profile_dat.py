@@ -38,15 +38,41 @@ logger = logging.getLogger("i2pchat.storage.profile_dat")
 
 PROFILE_DAT_MAGIC = b"I2PK"
 PROFILE_DAT_VERSION = 1
+PROFILE_DAT_VERSION_PASSWORD = 2
 PROFILE_DAT_SALT_SIZE = 32
+PROFILE_DAT_PASSWORD_SALT_SIZE = 16
 PROFILE_DAT_HEADER_SIZE = 4 + 2 + PROFILE_DAT_SALT_SIZE
+
+
+class ProfilePasswordError(ValueError):
+    """The profile is sealed and the password is missing or wrong."""
 
 DAT_WRAP_KEYRING_SUFFIX = "__dat_wrap__"
 KEYRING_SERVICE = "i2pchat"
 
 
+def profile_dat_version(raw: bytes) -> int:
+    if len(raw) < 6 or raw[:4] != PROFILE_DAT_MAGIC:
+        return 0
+    return struct.unpack(">H", raw[4:6])[0]
+
+
 def is_encrypted_profile_dat(raw: bytes) -> bool:
-    return len(raw) >= PROFILE_DAT_HEADER_SIZE and raw[:4] == PROFILE_DAT_MAGIC
+    version = profile_dat_version(raw)
+    if version == PROFILE_DAT_VERSION:
+        return len(raw) >= PROFILE_DAT_HEADER_SIZE
+    if version == PROFILE_DAT_VERSION_PASSWORD:
+        return len(raw) >= 4 + 2 + PROFILE_DAT_PASSWORD_SALT_SIZE
+    return False
+
+
+def profile_dat_needs_password(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(6)
+    except OSError:
+        return False
+    return profile_dat_version(raw) == PROFILE_DAT_VERSION_PASSWORD
 
 
 def profile_dat_wrap_path(profile_data_dir: str, profile: str) -> str:
@@ -171,9 +197,52 @@ def encrypt_profile_dat(private_key_base64: str, wrap_key: bytes) -> bytes:
     return PROFILE_DAT_MAGIC + struct.pack(">H", PROFILE_DAT_VERSION) + salt + ciphertext
 
 
+def encrypt_profile_dat_with_password(private_key_base64: str, password: str) -> bytes:
+    """I2PK v2: the file key is Argon2id(password), with the salt in the file."""
+    if not crypto.NACL_AVAILABLE:
+        raise RuntimeError("PyNaCl is required to encrypt profile .dat")
+    key = (private_key_base64 or "").strip()
+    if not key or not password:
+        raise ValueError("A profile password and a private key are both required")
+    from i2pchat.storage.profile_export import _derive_key
+
+    salt = secrets.token_bytes(PROFILE_DAT_PASSWORD_SALT_SIZE)
+    file_key = _derive_key(password, salt)
+    ciphertext = crypto.encrypt_message(file_key, (key + "\n").encode("utf-8"))
+    return (
+        PROFILE_DAT_MAGIC
+        + struct.pack(">H", PROFILE_DAT_VERSION_PASSWORD)
+        + salt
+        + ciphertext
+    )
+
+
+def decrypt_profile_dat_with_password(raw: bytes, password: str) -> str:
+    if profile_dat_version(raw) != PROFILE_DAT_VERSION_PASSWORD:
+        raise ValueError("Not a password-protected profile .dat")
+    if not password:
+        raise ProfilePasswordError("A password is required to open this profile.")
+    if not crypto.NACL_AVAILABLE:
+        raise RuntimeError("PyNaCl is required to decrypt profile .dat")
+    from i2pchat.storage.profile_export import _derive_key
+
+    salt = raw[6 : 6 + PROFILE_DAT_PASSWORD_SALT_SIZE]
+    ciphertext = raw[6 + PROFILE_DAT_PASSWORD_SALT_SIZE :]
+    file_key = _derive_key(password, salt)
+    plaintext = crypto.decrypt_message(file_key, ciphertext)
+    if plaintext is None:
+        raise ProfilePasswordError("Wrong profile password.")
+    lines = [ln.strip() for ln in plaintext.decode("utf-8").splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("Decrypted profile .dat is empty")
+    return lines[0]
+
+
 def decrypt_profile_dat(raw: bytes, wrap_key: bytes) -> str:
     if not is_encrypted_profile_dat(raw):
         raise ValueError("Not an encrypted profile .dat")
+    if profile_dat_version(raw) == PROFILE_DAT_VERSION_PASSWORD:
+        raise ProfilePasswordError("A password is required to open this profile.")
     if not crypto.NACL_AVAILABLE:
         raise RuntimeError("PyNaCl is required to decrypt profile .dat")
     version = struct.unpack(">H", raw[4:6])[0]
@@ -221,6 +290,7 @@ def read_profile_dat_file(
     profile_data_dir: str,
     is_probable_peer: Optional[Callable[[str], bool]] = None,
     create_wrap_key: bool = True,
+    password: str = "",
 ) -> tuple[Optional[str], Optional[str], bool]:
     """
     Read a profile ``.dat``.
@@ -235,6 +305,9 @@ def read_profile_dat_file(
         raw = f.read()
     if not raw:
         return None, None, False
+    if profile_dat_version(raw) == PROFILE_DAT_VERSION_PASSWORD:
+        key = decrypt_profile_dat_with_password(raw, password)
+        return key, None, False
     if is_encrypted_profile_dat(raw):
         wrap = (
             get_or_create_dat_wrap_key(profile, profile_data_dir)
@@ -265,8 +338,12 @@ def write_encrypted_profile_dat(
     *,
     profile: str,
     profile_data_dir: str,
+    password: str = "",
 ) -> None:
     """Encrypt and atomically write the identity key; creates wrap key if needed."""
+    if password:
+        atomic_write_bytes(path, encrypt_profile_dat_with_password(private_key_base64, password))
+        return
     if not crypto.NACL_AVAILABLE:
         # Last-resort fallback: keep previous plaintext behaviour so the app
         # remains usable without PyNaCl (should be rare in real installs).

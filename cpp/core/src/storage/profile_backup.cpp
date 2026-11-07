@@ -376,7 +376,8 @@ std::tuple<std::map<std::string, Bytes>, std::size_t, std::size_t> collect_profi
     if (!profile_dat) {
         fail("Profile data file not found: " + profile + ".dat");
     }
-    if (is_encrypted_profile_dat(ByteView(*profile_dat))) {
+    if (is_encrypted_profile_dat(ByteView(*profile_dat)) &&
+        profile_dat_version(ByteView(*profile_dat)) != kProfileDatVersionPassword) {
         const ProfileDatContents contents =
             read_profile_dat_file(dat_path, profile, pdir, {}, false);
         if (!contents.private_key_base64) {

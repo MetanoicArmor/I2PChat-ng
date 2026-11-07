@@ -1,0 +1,221 @@
+<resources>
+    <string name="router_channel">Роутер I2P</string>
+    <string name="messages_channel">Сообщения</string>
+    <string name="router_notification">I2PChat подключён к I2P. Пока туннели активны, расходуется батарея.</string>
+
+    <string name="action_cancel">Отмена</string>
+    <string name="action_open">Открыть</string>
+    <string name="action_save">Сохранить</string>
+    <string name="action_accept">Принять</string>
+    <string name="action_save_as">Сохранить как…</string>
+    <string name="action_reject">Отклонить</string>
+    <string name="cd_emoji">Эмодзи</string>
+    <string name="cd_file">Файл</string>
+    <string name="cd_image">Изображение</string>
+    <string name="cd_send">Отправить</string>
+    <string name="cd_new_chat">Новый чат</string>
+    <string name="address_copied">Адрес скопирован</string>
+    <string name="none_value">нет</string>
+    <string name="yes_value">да</string>
+    <string name="no_value">нет</string>
+
+    <string name="native_failed_title">Не удалось загрузить нативную библиотеку</string>
+    <string name="native_failed_hint">Пересоберите приложение после синхронизации Gradle. Эмулятору нужна библиотека x86_64, телефону — arm64-v8a.</string>
+    <string name="native_missing_abi">Для этой архитектуры нет libi2pchat_jni.so. Пересоберите после синхронизации Gradle (эмулятор x86_64 или телефон arm64).</string>
+    <string name="native_load_failed">Не удалось загрузить нативную библиотеку</string>
+
+    <string name="open_file_title">Открыть файл?</string>
+    <string name="open_file_body">Файл «%1$s» получен от собеседника. Открывайте только если доверяете отправителю — вложенные файлы могут быть вредоносными.</string>
+    <string name="tap_to_open">Нажмите, чтобы открыть</string>
+    <string name="incoming_file">Входящий файл</string>
+    <string name="file_offer_body">%1$s хочет отправить\n%2$s\n(%3$s)\n\n«Принять» кладёт файл в папку из настроек. «Сохранить как…» оставляет этот файл в выбранном месте.</string>
+    <string name="incoming_folders">Входящие файлы</string>
+    <string name="incoming_folders_hint">Пусто — обычные папки приложения. Обе могут указывать в одно место. Свой путь применяется при следующем запуске чата.</string>
+    <string name="files_folder">Папка для файлов</string>
+    <string name="images_folder">Папка для изображений</string>
+    <string name="ephemeral_media">Не хранить файлы</string>
+    <string name="ephemeral_media_hint">Принятое попадает в кэш и удаляется при закрытии I2PChat или смене профиля. «Сохранить как…» может оставить один файл.</string>
+
+    <string name="tofu_key_changed">Ключ подписи изменился</string>
+    <string name="tofu_new_key">Новый ключ контакта</string>
+    <string name="tofu_body">Контакт %1$s\nНовый: %2$s\nСтарый: %3$s\n\nПринимайте, только если ожидали эту личность.</string>
+    <string name="tofu_no_old_key">(нет)</string>
+
+    <string name="profile_title">Выберите профиль</string>
+    <string name="profile_intro">random_address — одноразовая сессия, доверенные ключи контактов в этом режиме не сохраняются. На телефоне I2P работает как постоянная фоновая служба и расходует батарею. Встроенный роутер запускается при открытии этого экрана; первый запуск может занять 1–2 минуты.</string>
+    <string name="profile_label">Профиль</string>
+    <string name="profile_password">Пароль профиля</string>
+    <string name="profile_password_hint">Необязательно. С паролем профиль не откроется, а контакты и история останутся нечитаемыми, пока пароль не введён. Пароль архива — это другой пароль.</string>
+    <string name="profile_password_change_hint">Новый пароль, или пустое поле и сохранение, чтобы снять его. Действует для открытого профиля.</string>
+    <string name="profile_password_save">Сохранить пароль профиля</string>
+    <string name="profile_password_saved">Пароль профиля обновлён.</string>
+    <string name="backup_transfer_hint">Этот файл переносит адрес и контакты между телефоном и компьютером. Пароль ниже закрывает сам файл. Профиль, у которого уже есть свой пароль, спросит его снова при входе.</string>
+    <string name="profile_starting">Запуск I2P…</string>
+    <string name="router_settings">Настройки роутера</string>
+
+    <string name="tab_status">Статус</string>
+    <string name="tab_chats">Чаты</string>
+    <string name="tab_settings">Настройки</string>
+
+    <string name="title_with_profile">I2PChat @ %1$s</string>
+    <string name="menu_new_chat">Новый чат</string>
+    <string name="menu_new_group">Новая группа</string>
+    <string name="menu_switch_profile">Сменить профиль</string>
+    <string name="open_chat_title">Открыть чат</string>
+    <string name="i2p_address">Адрес I2P</string>
+    <string name="search">Поиск</string>
+    <string name="group_default_title">Группа</string>
+    <string name="group_preview">Группа · %1$s</string>
+    <string name="group_members">Участников: %1$d</string>
+    <string name="network_not_ready">Сеть ещё не готова. Нажмите, чтобы открыть «Статус».</string>
+    <string name="image_preview">📷 Изображение</string>
+
+    <string name="peer_online">на связи</string>
+    <string name="peer_connecting">подключаюсь…</string>
+    <string name="peer_offline">не в сети</string>
+    <string name="peer_offline_blindbox">не в сети · доставка через BlindBox</string>
+
+    <string name="menu_rename">Переименовать</string>
+    <string name="menu_connect">Подключиться</string>
+    <string name="menu_disconnect">Отключиться</string>
+    <string name="menu_forget_pin">Забыть доверенный ключ</string>
+    <string name="menu_clear_history">Очистить историю</string>
+    <string name="menu_remove">Удалить</string>
+    <string name="menu_edit_group">Изменить группу</string>
+    <string name="menu_copy_invite">Скопировать приглашение</string>
+    <string name="menu_topology">Топология</string>
+    <string name="menu_delete_group">Удалить группу</string>
+    <string name="display_name">Отображаемое имя</string>
+    <string name="name">Имя</string>
+    <string name="find_in_chat">Поиск в чате</string>
+    <string name="message_hint">Сообщение</string>
+
+    <string name="theme">Тема</string>
+    <string name="theme_system">системная</string>
+    <string name="theme_light">светлая</string>
+    <string name="theme_dark">тёмная</string>
+    <string name="your_address">Ваш адрес</string>
+    <string name="waiting_for_address">Ожидание роутера…</string>
+    <string name="copy_address">Скопировать адрес</string>
+    <string name="i2p_router">Роутер I2P</string>
+    <string name="blindbox">BlindBox</string>
+    <string name="backup_restore">Резервная копия</string>
+    <string name="check_offline_now">Проверить офлайн-сообщения</string>
+    <string name="history_retention">Хранение истории</string>
+    <string name="max_messages">Максимум сообщений</string>
+    <string name="max_age_days">Максимальный возраст (дней, 0 — без ограничения)</string>
+    <string name="save_retention">Сохранить</string>
+    <string name="foreground_note">I2P работает на телефоне как постоянная фоновая служба. Это нужно, чтобы туннели оставались активными; расходуется батарея.</string>
+    <string name="verbose_log">Подробный лог</string>
+    <string name="verbose_log_hint">Показывать на экране «Статус» технические сообщения: рукопожатия, BlindBox, подключения и отключения.</string>
+
+    <string name="bundled_i2pd">Встроенный i2pd</string>
+    <string name="router_external_hint">Внешний роутер — любой роутер I2P с включённым SAM: на этом телефоне, на другом компьютере в локальной сети или по IPv6, например Yggdrasil. Встроенному нужен libi2pd.so в jniLibs/arm64-v8a.</string>
+    <string name="router_no_bundled">В этой 32-битной сборке нет встроенного роутера. Установите i2pd отдельно, включите в нём SAM и укажите его адрес. Это может быть сам телефон (127.0.0.1:7656), другой компьютер в локальной сети или IPv6-адрес.</string>
+    <string name="router_allow_remote">Роутер на другом компьютере (локальная сеть или Yggdrasil). Соединение с SAM не шифруется.</string>
+    <string name="router_host_empty">Введите адрес SAM.</string>
+    <string name="router_host_invalid">Адрес SAM должен быть IPv4, IPv6 или именем хоста.</string>
+    <string name="router_host_remote">Этот адрес не на этом телефоне. Включите «Роутер на другом компьютере», чтобы указать роутер в локальной сети или Yggdrasil.</string>
+    <string name="router_saved">Настройки роутера сохранены.</string>
+    <string name="tunnel_length">Длина туннеля, узлов (%1$d–%2$d)</string>
+    <string name="tunnel_length_hint">Больше узлов — анонимнее, но медленнее. По умолчанию %1$d. Применится при следующем открытии.</string>
+    <string name="external_host">Адрес внешнего роутера</string>
+    <string name="external_sam_port">Порт SAM внешнего роутера</string>
+    <string name="bundled_sam_port">Порт SAM встроенного роутера</string>
+    <string name="http_proxy">HTTP-прокси</string>
+    <string name="socks_proxy">SOCKS-прокси</string>
+    <string name="control_http">HTTP-консоль</string>
+    <string name="restart_bundled">Перезапустить встроенный i2pd</string>
+    <string name="restart_bundled_hint">Используйте, если роутер не запускается или предыдущий i2pd не завершился.</string>
+
+    <string name="blindbox_state">Готов: %1$s · источник: %2$s</string>
+    <string name="replicas_label">Адреса реплик, по одному на строку</string>
+    <string name="save_replicas">Сохранить реплики</string>
+    <string name="check_now">Проверить сейчас</string>
+
+    <string name="backup_title">Резервная копия</string>
+    <string name="passphrase">Пароль</string>
+    <string name="include_history">Включить историю</string>
+    <string name="export_profile">Экспорт профиля</string>
+    <string name="export_history">Экспорт истории</string>
+    <string name="import_profile">Импорт профиля</string>
+    <string name="import_history">Импорт истории</string>
+
+    <string name="new_group">Новая группа</string>
+    <string name="edit_group">Изменить группу</string>
+    <string name="group_title">Название</string>
+    <string name="group_members_hint">Участники, по одному адресу на строку</string>
+    <string name="join_token">Вступить по приглашению</string>
+    <string name="join">Вступить</string>
+    <string name="group_map">Карта группы</string>
+    <string name="no_topology">Топологии пока нет</string>
+
+    <string name="status_ready">Готово к работе</string>
+    <string name="status_not_ready">Ещё не готово</string>
+    <string name="status_stopped">Остановлено</string>
+    <string name="status_online">В сети</string>
+    <string name="status_warming">I2P строит туннели…</string>
+    <string name="status_failed">Ошибка</string>
+    <string name="status_starting">Запуск I2P…</string>
+    <string name="status_waiting_router">Запуск роутера… %1$d с</string>
+    <string name="status_restarting_router">Перезапуск роутера… %1$d с</string>
+    <string name="status_router_ready_tap_open">Роутер готов. Нажмите «Открыть».</string>
+    <string name="status_backup_ok">Резервное копирование выполнено</string>
+    <string name="check_router">Роутер I2P</string>
+    <string name="check_sam">Связь с роутером (SAM)</string>
+    <string name="check_tunnels">Туннели</string>
+    <string name="check_address">Ваш адрес</string>
+    <string name="check_blindbox">Офлайн-доставка (BlindBox)</string>
+    <string name="router_kind_bundled">встроенный i2pd</string>
+    <string name="router_kind_system">системный роутер %1$s</string>
+    <string name="state_ok">готово</string>
+    <string name="state_pending">в процессе</string>
+    <string name="state_failed">проблема</string>
+    <string name="state_off">выключено</string>
+    <string name="status_problem">Что сделать</string>
+    <string name="status_events">События</string>
+    <string name="status_no_events">Событий пока нет.</string>
+    <string name="status_choose_profile">Выбрать профиль</string>
+
+    <string name="diag_system_sam_unreachable">Не могу подключиться к системному i2pd по адресу %1$s. Проверьте, что роутер запущен, в нём включён SAM, а адрес и порт указаны верно.</string>
+    <string name="diag_reseed_failed">Не удалось загрузить начальный список узлов I2P (ресид). Проверьте подключение к интернету и синхронизацию часов на устройстве, используйте прокси при первом запуске или выполните ресид вручную доступным вам способом, если ваш провайдер блокирует доступ.</string>
+    <string name="diag_clock_skew">Время на устройстве сильно расходится с сетевым. Включите автоматическую установку даты и времени и перезапустите роутер.</string>
+    <string name="diag_port_in_use">Порт роутера уже занят — вероятно, старым процессом i2pd. Перезапустите встроенный i2pd или смените порты в настройках роутера.</string>
+    <string name="diag_no_network">У роутера нет доступа к сети. Проверьте подключение к интернету.</string>
+    <string name="diag_tunnels_slow">Сеть I2P прогревается. При первом запуске это обычно занимает 1–2 минуты.</string>
+    <string name="diag_router_crashed">Встроенный роутер i2pd неожиданно остановился. Перезапустите его.</string>
+
+    <string name="notice_session_starting">Запускаем сессию I2P…</string>
+    <string name="notice_tunnels_building">Строим туннели I2P, обычно это занимает 1–2 минуты…</string>
+    <string name="notice_session_online">В сети. Ваш адрес готов, им можно делиться.</string>
+    <string name="notice_tunnels_ready">Туннели готовы. Можно общаться.</string>
+    <string name="notice_tunnels_slow">Туннели ещё строятся. Подождите 1–2 минуты перед подключением.</string>
+    <string name="notice_profile_transient">Одноразовый профиль: доверенные ключи контактов не сохранятся после перезапуска.</string>
+    <string name="notice_router_starting">Запускаем встроенный роутер i2pd…</string>
+    <string name="notice_router_restarting">Роутер не отвечает, перезапускаем встроенный i2pd…</string>
+    <string name="notice_router_waiting">Ждём роутер (SAM %1$s)…</string>
+    <string name="notice_router_sam_ready">Роутер готов (SAM %1$s).</string>
+    <string name="notice_start_failed">Не удалось запустить сессию I2P: %1$s</string>
+    <string name="notice_trust_prompt">Подтвердите ключ %1$s, чтобы начать переписку.</string>
+    <string name="notice_file_offer">%1$s предлагает файл.</string>
+    <string name="notice_file_offer_stale">Предложение файла «%1$s» уже неактуально.</string>
+    <string name="notice_connect_failed">Не удалось подключиться к %1$s. Возможно, собеседник не в сети или туннели ещё не готовы.</string>
+    <string name="notice_peer_connecting">Подключаемся к %1$s…</string>
+    <string name="notice_peer_secure">Зашифрованный канал с %1$s установлен.</string>
+    <string name="notice_peer_disconnected">%1$s отключился.</string>
+
+    <string name="svc_starting">Запуск встроенного i2pd…</string>
+    <string name="svc_restarting">Перезапуск встроенного i2pd…</string>
+    <string name="svc_running">Роутер I2P работает</string>
+    <string name="svc_waiting_sam">i2pd запущен, ожидание SAM %1$d</string>
+    <string name="svc_external">Используется внешний роутер I2P</string>
+    <string name="svc_stopped">Остановлено</string>
+    <string name="svc_crashed">i2pd аварийно завершился: %1$s</string>
+    <string name="svc_load_failed">Не удалось загрузить libi2pd.so: %1$s. Переустановите актуальный APK или выберите внешний роутер в настройках.</string>
+    <string name="svc_start_failed">i2pd: %1$s</string>
+    <string name="svc_config_failed">Не удалось настроить роутер</string>
+
+    <string name="notify_trust">Подтвердите ключ собеседника: %1$s…</string>
+    <string name="notify_file">Получен файл: %1$s</string>
+    <string name="notify_image">Получено изображение</string>
+</resources>

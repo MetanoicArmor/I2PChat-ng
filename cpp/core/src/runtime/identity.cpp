@@ -78,7 +78,8 @@ Bytes load_or_create_signing_seed(const storage::ProfilePaths& paths) {
     return seed;
 }
 
-std::optional<sam::Destination> load_destination(const storage::ProfilePaths& paths) {
+std::optional<sam::Destination> load_destination(const storage::ProfilePaths& paths,
+                                                     std::string_view password) {
     const std::filesystem::path path = paths.identity_dat();
     if (!std::filesystem::exists(path)) {
         return std::nullopt;
@@ -88,7 +89,7 @@ std::optional<sam::Destination> load_destination(const storage::ProfilePaths& pa
         path, paths.profile(), paths.data_dir(),
         // Legacy files stored a peer address on one of the lines; a private key
         // is far longer than any address, which is how the two are told apart.
-        [](const std::string& line) { return line.size() < 600; });
+        [](const std::string& line) { return line.size() < 600; }, true, password);
     if (!contents.private_key_base64.has_value()) {
         return std::nullopt;
     }
@@ -97,20 +98,21 @@ std::optional<sam::Destination> load_destination(const storage::ProfilePaths& pa
         sam::Destination::from_private_base64(*contents.private_key_base64);
     if (contents.was_plaintext) {
         storage::write_encrypted_profile_dat(path, *contents.private_key_base64,
-                                             paths.profile(), paths.data_dir());
+                                             paths.profile(), paths.data_dir(), password);
     }
     return destination;
 }
 
 asio::awaitable<sam::Destination> create_destination(sam::SamSession& session,
                                                      const storage::ProfilePaths& paths,
-                                                     bool persist) {
+                                                     bool persist,
+                                                     std::string_view password) {
     const sam::Destination destination = co_await session.generate_destination();
     if (persist && paths.profile() != kTransientProfile) {
         std::filesystem::create_directories(paths.data_dir());
         storage::write_encrypted_profile_dat(paths.identity_dat(),
                                              destination.private_key_base64(),
-                                             paths.profile(), paths.data_dir());
+                                             paths.profile(), paths.data_dir(), password);
     }
     co_return destination;
 }
@@ -130,11 +132,12 @@ ProfileIdentity identity_from(std::string profile, const sam::Destination& desti
 }
 
 asio::awaitable<ProfileIdentity> load_identity(sam::SamSession& session,
-                                               const storage::ProfilePaths& paths) {
+                                               const storage::ProfilePaths& paths,
+                                               std::string_view password) {
     const Bytes seed = load_or_create_signing_seed(paths);
-    std::optional<sam::Destination> destination = load_destination(paths);
+    std::optional<sam::Destination> destination = load_destination(paths, password);
     if (!destination.has_value()) {
-        destination = co_await create_destination(session, paths);
+        destination = co_await create_destination(session, paths, true, password);
     }
     co_return identity_from(paths.profile(), *destination, ByteView(seed));
 }

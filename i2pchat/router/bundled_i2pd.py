@@ -18,6 +18,7 @@ logger = logging.getLogger("i2pchat.router.bundled_i2pd")
 
 from .runtime import is_tcp_open, pick_free_tcp_port, probe_sam_hello, wait_for_sam_ready
 from .settings import RouterSettings, require_loopback_host, router_runtime_dir
+from .diagnostics import RouterIssue, diagnose_bundled_router, diagnose_log_text, read_log_tail
 
 
 @dataclass
@@ -246,6 +247,11 @@ def verify_bundled_i2pd_integrity(binary: str) -> None:
             "tampered router. Reinstall from a verified release."
         )
     logger.info("Bundled i2pd integrity verified against pinned checksum")
+
+
+def _with_log_advice(log_path: str, message: str) -> str:
+    issue = diagnose_log_text(read_log_tail(log_path))
+    return f"{issue.message}\n\n{message}" if issue is not None else message
 
 
 def _tighten_permissions(path: str, mode: int) -> None:
@@ -1051,6 +1057,22 @@ class BundledI2pdManager:
             f"--pidfile={rt.pidfile_path}",
         ]
 
+    def is_running(self) -> bool:
+        proc = self._proc
+        return proc is not None and proc.returncode is None
+
+    def diagnose(self, *, network_ready: bool, warming_seconds: float = 0.0) -> Optional[RouterIssue]:
+        """User-facing advice for the current router state, or ``None``."""
+        rt = self._runtime
+        proc = self._proc
+        alive = proc is None or proc.returncode is None
+        return diagnose_bundled_router(
+            rt.log_path if rt is not None else None,
+            process_alive=alive,
+            network_ready=network_ready,
+            warming_seconds=warming_seconds,
+        )
+
     async def _wait_for_bundled_sam_ready(self, rt: BundledI2pdRuntime, timeout: float) -> None:
         """Like wait_for_sam_ready but fail fast if the i2pd child exits (e.g. missing .so on Linux)."""
         loop = asyncio.get_running_loop()
@@ -1080,8 +1102,11 @@ class BundledI2pdManager:
                         "or missing shared library."
                     )
                 raise RuntimeError(
-                    "Bundled i2pd exited before SAM was ready "
-                    f"(exit code {rc}). {hint}"
+                    _with_log_advice(
+                        rt.log_path,
+                        "Bundled i2pd exited before SAM was ready "
+                        f"(exit code {rc}). {hint}",
+                    )
                 )
             try:
                 await probe_sam_hello(rt.sam_host, rt.sam_port, timeout=2.0)
@@ -1090,7 +1115,10 @@ class BundledI2pdManager:
                 last_err = e
                 await asyncio.sleep(0.25)
         raise TimeoutError(
-            f"SAM did not become ready on {rt.sam_host}:{rt.sam_port}: {last_err}"
+            _with_log_advice(
+                rt.log_path,
+                f"SAM did not become ready on {rt.sam_host}:{rt.sam_port}: {last_err}",
+            )
         )
 
     async def start(self) -> tuple[str, int]:

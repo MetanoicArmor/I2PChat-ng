@@ -271,7 +271,15 @@ def _collect_profile_bundle_files(
     # Export a portable plaintext key line inside the passphrase-protected
     # bundle so restore works without the local wrap key / OS keyring. The
     # restored .dat is re-encrypted on next profile init.
-    if is_encrypted_profile_dat(profile_dat):
+    from i2pchat.storage.profile_dat import (
+        PROFILE_DAT_VERSION_PASSWORD,
+        profile_dat_version,
+    )
+
+    if (
+        is_encrypted_profile_dat(profile_dat)
+        and profile_dat_version(profile_dat) != PROFILE_DAT_VERSION_PASSWORD
+    ):
         try:
             profile_dat = plaintext_key_bytes_for_backup(
                 profile_dat_path,

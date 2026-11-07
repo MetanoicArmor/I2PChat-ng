@@ -9,6 +9,8 @@ object NativeEngine {
     }
 
     interface Listener {
+        /** JSON `{code, level, arg, text}`; replaces [onSystem] for service messages. */
+        fun onNotice(json: String)
         fun onSystem(message: String)
         fun onError(message: String)
         fun onHistory(peer: String, json: String)
@@ -57,6 +59,9 @@ object NativeEngine {
         maxMessages: Int,
         maxAgeDays: Int,
         tunnelLength: Int,
+        filesDir: String,
+        imagesDir: String,
+        profilePassword: String,
     ): String
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeTrustRespond(peer: String, keyHex: String, accept: Boolean)
@@ -92,4 +97,6 @@ object NativeEngine {
     @JvmStatic external fun nativeComposeDrafts(save: Boolean, json: String): String
     @JvmStatic external fun nativeSaveReplicas(json: String)
     @JvmStatic external fun nativeSetRetention(maxMessages: Int, maxAgeDays: Int)
+    /** Empty string removes the password. Returns an error message, or empty on success. */
+    @JvmStatic external fun nativeSetProfilePassword(password: String): String
 }

@@ -382,7 +382,8 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j_root,
                                                   jstring j_profile, jstring j_host, jint port,
                                                   jint max_messages, jint max_age_days,
-                                                  jint tunnel_length) {
+                                                  jint tunnel_length, jstring j_files,
+                                                  jstring j_images, jstring j_password) {
     try {
         if (g_engine.thread.joinable()) {
             g_engine.join_io();
@@ -404,11 +405,27 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         }
         config.retention.max_messages = static_cast<std::size_t>(std::max(0, max_messages));
         config.retention.max_age_days = static_cast<unsigned>(std::max(0, max_age_days));
+        const std::string files_dir = jstring_to_utf8(env, j_files);
+        const std::string images_dir = jstring_to_utf8(env, j_images);
+        if (!files_dir.empty()) {
+            config.downloads_dir = files_dir;
+        }
+        if (!images_dir.empty()) {
+            config.images_dir = images_dir;
+        }
+        config.profile_password = jstring_to_utf8(env, j_password);
         // An unknown peer stays out until the Trust dialog accepts the key.
         config.trust_auto_accept_first_sighting = false;
         fs::create_directories(config.app_root / "profiles" / config.profile);
 
         ChatEvents events;
+        events.on_notice = [](const i2pchat::runtime::Notice& notice) {
+            nlohmann::json json = {{"code", notice.code},
+                                   {"level", notice.level},
+                                   {"arg", notice.arg},
+                                   {"text", notice.text}};
+            g_engine.emit_string("onNotice", json.dump());
+        };
         events.on_system = [](const std::string& message) {
             g_engine.emit_string("onSystem", message);
         };
@@ -1120,5 +1137,20 @@ Java_org_i2pchat_android_NativeEngine_nativeSetRetention(JNIEnv*, jclass, jint m
     try {
         g_engine.on_core<void>([policy] { g_engine.service->set_retention(policy); });
     } catch (...) {
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetProfilePassword(JNIEnv* env, jclass,
+                                                              jstring j_password) {
+    if (!g_engine.service) {
+        return utf8_to_jstring(env, "The profile is not open");
+    }
+    try {
+        const std::string password = jstring_to_utf8(env, j_password);
+        g_engine.on_core<void>([password] { g_engine.service->set_profile_password(password); });
+        return utf8_to_jstring(env, "");
+    } catch (const std::exception& ex) {
+        return utf8_to_jstring(env, ex.what());
     }
 }

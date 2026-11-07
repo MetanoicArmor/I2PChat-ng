@@ -52,6 +52,8 @@ struct ChatServiceConfig {
     /// Application root that holds `profiles/`.
     std::filesystem::path app_root;
     std::string profile = "default";
+    /// Seals a new or rewritten identity. Empty keeps the keyring wrap (I2PK v1).
+    std::string profile_password;
     sam::SamEndpoint sam;
     /// Where received files and images land. Defaults are placed under the
     /// profile directory when left empty.
@@ -110,7 +112,21 @@ struct DeliveryReport {
     std::string reason;
 };
 
+/// Structured service notice. `level` is "user" (actionable, always shown),
+/// "verbose" (technical, only in the detailed log) or "peer_state" (drives the
+/// contact status badge instead of a chat line). `arg` carries the one
+/// variable part of the message (peer or local address), `text` is the
+/// English fallback.
+struct Notice {
+    std::string code;
+    std::string level;
+    std::string arg;
+    std::string text;
+};
+
 struct ChatEvents {
+    /// When set, every service message goes here instead of `on_system`.
+    std::function<void(const Notice& notice)> on_notice;
     std::function<void(const std::string& message)> on_system;
     std::function<void(const std::string& message)> on_error;
     /// A history entry was appended for `peer`, incoming or outgoing. The entry
@@ -177,6 +193,8 @@ public:
     /// refused; the reason is reported through `on_error`.
     asio::awaitable<bool> connect_peer(std::string peer);
     void disconnect_peer(std::string_view peer);
+    /// Seal the open identity with a new password. An empty password removes it.
+    void set_profile_password(std::string password);
 
     /// Send a chat message, splitting it into protocol-sized parts.
     ///
@@ -261,6 +279,8 @@ private:
     void ensure_group_coordinator();
     void emit_group_message(const std::string& group_id) const;
     void on_established(PeerLink& link);
+    /// Redial a peer that already had a secure channel, 10s then 20… up to 60s.
+    void schedule_auto_reconnect(Peer& peer);
     /// Offer the peer a BlindBox root if this side is the one that offers and
     /// the channel has none, or the current one is due for replacement.
     void offer_blindbox_root(const std::string& peer_addr);
@@ -285,6 +305,8 @@ private:
                                        const std::string& reason = {});
     void remember_contact(const std::string& peer_addr, const std::string& preview);
     void emit_system(const std::string& message) const;
+    void emit_notice(const std::string& code, const std::string& level, const std::string& arg,
+                     const std::string& text) const;
     void emit_error(const std::string& message) const;
     [[nodiscard]] std::uint64_t next_msg_id();
     [[nodiscard]] blindbox::PeerSnapshot& blindbox_snapshot(const std::string& peer_addr);

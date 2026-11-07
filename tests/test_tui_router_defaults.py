@@ -133,10 +133,11 @@ def test_tui_primary_function_key_order_is_sequential() -> None:
     from i2pchat.gui.chat_python import I2PChat
 
     bindings = {key: action for key, action, _label in I2PChat.BINDINGS}
-    labels = [label for _key, _action, label in I2PChat.BINDINGS[:4]]
+    labels = [label for _key, _action, label in I2PChat.BINDINGS[:3]]
 
-    assert labels[:3] == ["Quit", "Quit", "Send"]
-    assert labels[3] == "Send"
+    assert labels == ["Quit", "Quit", "Send"]
+    # Ctrl+Enter inserts a newline in the compose box (Enter sends).
+    assert "ctrl+enter" not in bindings
 
     assert "ctrl+r" not in bindings
     assert "ctrl+shift+c" not in bindings

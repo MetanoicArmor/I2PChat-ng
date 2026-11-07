@@ -55,16 +55,18 @@ struct ProfileIdentity {
 /// Load the destination from `{profile}.dat`, or nothing when the profile has no
 /// identity yet. A legacy plaintext `.dat` is re-encrypted in place.
 [[nodiscard]] std::optional<sam::Destination> load_destination(
-    const storage::ProfilePaths& paths);
+    const storage::ProfilePaths& paths, std::string_view password = {});
 
 /// Ask the router for a destination and store it. Only needed on first run,
 /// because generating a destination requires a router but reading one does not.
 [[nodiscard]] boost::asio::awaitable<sam::Destination> create_destination(
-    sam::SamSession& session, const storage::ProfilePaths& paths, bool persist = true);
+    sam::SamSession& session, const storage::ProfilePaths& paths, bool persist = true,
+    std::string_view password = {});
 
 /// Load the whole identity, generating whatever is missing.
 [[nodiscard]] boost::asio::awaitable<ProfileIdentity> load_identity(
-    sam::SamSession& session, const storage::ProfilePaths& paths);
+    sam::SamSession& session, const storage::ProfilePaths& paths,
+    std::string_view password = {});
 
 /// Assemble an identity from material already in hand, without touching the
 /// filesystem or the router.

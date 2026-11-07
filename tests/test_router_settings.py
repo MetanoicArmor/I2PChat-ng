@@ -156,6 +156,30 @@ class RouterSettingsTests(unittest.TestCase):
             )
             self.assertEqual(allowed.system_sam_host, "192.168.1.50")
 
+    def test_saved_flag_keeps_remote_and_ipv6_host(self) -> None:
+        from i2pchat.router.settings import system_sam_host_error
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("I2PCHAT_ALLOW_REMOTE_SAM", None)
+            self.assertIsNotNone(
+                system_sam_host_error("192.168.1.50", allow_remote=False)
+            )
+            self.assertIsNone(
+                system_sam_host_error("192.168.1.50", allow_remote=True)
+            )
+            self.assertIsNone(
+                system_sam_host_error("200:1234:5678::1", allow_remote=True)
+            )
+            kept = normalize_router_settings(
+                RouterSettings(
+                    backend="system",
+                    system_sam_host="200:1234:5678::1",
+                    allow_remote_sam=True,
+                )
+            )
+            self.assertEqual(kept.system_sam_host, "200:1234:5678::1")
+            self.assertTrue(kept.allow_remote_sam)
+
 
 class CoreTunnelOptionsTests(unittest.TestCase):
     def test_core_sam_options_follow_tunnel_length(self) -> None:

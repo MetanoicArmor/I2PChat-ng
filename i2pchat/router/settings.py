@@ -5,7 +5,7 @@ import ipaddress
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 from i2pchat.core.i2p_chat_core import get_profiles_dir
 from i2pchat.storage.blindbox_state import atomic_write_json
@@ -48,19 +48,67 @@ def _is_loopback_host(text: str) -> bool:
         return False
 
 
-def require_system_sam_host(value: Any, default: str = "127.0.0.1") -> str:
+def _acceptable_sam_host(text: str) -> bool:
+    """IPv4, IPv6 or a hostname. Rejects spaces and control characters."""
+    if not text or len(text) > 253 or any(ord(ch) < 33 for ch in text):
+        return False
+    if _is_loopback_host(text):
+        return True
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        pass
+    if ".." in text:
+        return False
+    labels = text.split(".")
+    return all(
+        label
+        and len(label) <= 63
+        and label.replace("-", "").isalnum()
+        and not label.startswith("-")
+        and not label.endswith("-")
+        for label in labels
+    )
+
+
+def system_sam_host_error(host: str, *, allow_remote: bool) -> Optional[str]:
+    """Why this host cannot be saved, or ``None`` when it can.
+
+    The UI calls this before saving so a rejected address stays on screen with
+    an explanation instead of being silently rewritten to loopback.
+    """
+    text = host.strip()
+    if not text:
+        return "Enter a SAM host."
+    if not _acceptable_sam_host(text):
+        return "SAM host must be an IPv4 address, an IPv6 address or a hostname."
+    if _is_loopback_host(text) or allow_remote or allow_remote_system_sam():
+        return None
+    return (
+        "This address is not on this computer. Turn on “Router on another machine” "
+        "to use a router on the local network or Yggdrasil. The SAM connection is not encrypted."
+    )
+
+
+def require_system_sam_host(
+    value: Any,
+    default: str = "127.0.0.1",
+    *,
+    allow_remote: bool = False,
+) -> str:
     """Constrain the system SAM host to loopback unless remote SAM is opted in.
 
-    A non-loopback host without the ``I2PCHAT_ALLOW_REMOTE_SAM`` opt-in is
-    coerced back to the loopback default (fail-safe) rather than trusting a
-    remote router, which would carry all traffic over the clearnet to a third
-    party.
+    A non-loopback host without the opt-in (the saved ``allow_remote_sam`` flag
+    or ``I2PCHAT_ALLOW_REMOTE_SAM``) is coerced back to the loopback default
+    (fail-safe for a file the user did not just confirm) rather than trusting a
+    remote router, which would carry all traffic in the clear to a third party.
     """
     text = _coerce_string_setting(value, default)
-    if allow_remote_system_sam() or _is_loopback_host(text):
+    if system_sam_host_error(text, allow_remote=allow_remote) is None:
         return text
     logger.warning(
-        "Ignoring non-loopback system SAM host %r (set %s=1 to allow); using %s",
+        "Ignoring system SAM host %r (enable allow_remote_sam or set %s=1); using %s",
         text,
         _ALLOW_REMOTE_SAM_ENV,
         default,
@@ -88,6 +136,10 @@ class RouterSettings:
     # Hops per inbound and outbound tunnel (I2CP inbound.length / outbound.length).
     tunnel_length: int = DEFAULT_TUNNEL_LENGTH
 
+    # System SAM may point at another machine (LAN or Yggdrasil). Off by default:
+    # SAM itself is not encrypted.
+    allow_remote_sam: bool = False
+
 
 def coerce_tunnel_length(value: Any) -> int:
     return _coerce_int_setting(
@@ -110,8 +162,12 @@ def normalize_router_settings(settings: RouterSettings) -> RouterSettings:
         **{
             **asdict(settings),
             "bundled_sam_host": require_loopback_host(settings.bundled_sam_host),
-            "system_sam_host": require_system_sam_host(settings.system_sam_host),
+            "system_sam_host": require_system_sam_host(
+                settings.system_sam_host,
+                allow_remote=settings.allow_remote_sam,
+            ),
             "tunnel_length": coerce_tunnel_length(settings.tunnel_length),
+            "allow_remote_sam": bool(settings.allow_remote_sam),
         }
     )
     if bundled_i2pd_allowed():
@@ -129,6 +185,7 @@ def normalize_router_settings(settings: RouterSettings) -> RouterSettings:
         bundled_control_http_port=settings.bundled_control_http_port,
         bundled_auto_start=False,
         tunnel_length=settings.tunnel_length,
+        allow_remote_sam=settings.allow_remote_sam,
     )
 
 
@@ -204,9 +261,11 @@ def _coerce_router_settings(raw: dict[str, Any]) -> RouterSettings:
         backend = defaults["backend"]
     return RouterSettings(
         backend=backend,
+        allow_remote_sam=_coerce_bool_setting(raw.get("allow_remote_sam"), False),
         system_sam_host=require_system_sam_host(
             raw.get("system_sam_host"),
             defaults["system_sam_host"],
+            allow_remote=_coerce_bool_setting(raw.get("allow_remote_sam"), False),
         ),
         system_sam_port=_coerce_int_setting(
             raw.get("system_sam_port"),

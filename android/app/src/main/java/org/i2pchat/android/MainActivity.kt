@@ -32,6 +32,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -58,6 +61,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -65,6 +69,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,6 +81,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -127,25 +136,33 @@ fun I2PChatRoot(bridge: ChatBridge) {
     if (state.tofu != null) {
         TofuDialog(state.tofu!!, onAccept = { bridge.answerTofu(true) }, onReject = { bridge.answerTofu(false) })
     }
+    val saveAsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri == null) bridge.answerFileOffer(false)
+        else bridge.answerFileOfferSavingTo(uri)
+    }
     if (state.fileOffer != null) {
+        val offer = state.fileOffer!!
         FileOfferDialog(
-            state.fileOffer!!,
+            offer,
+            bridge,
             onAccept = { bridge.answerFileOffer(true) },
             onReject = { bridge.answerFileOffer(false) },
+            onSaveAs = { saveAsLauncher.launch(offer.name) },
         )
     }
     if (!state.nativeLoaded) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
-            Text("Native library failed to load", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.native_failed_title), style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
-            Text(state.error.ifBlank {
-                "Rebuild the app after Gradle sync. The emulator needs the x86_64 native library; a phone needs arm64-v8a."
-            })
+            Text(state.error.ifBlank { stringResource(R.string.native_failed_hint) })
         }
         return
     }
-    NavHost(navController = nav, startDestination = if (state.running) "chats" else "profile") {
+    NavHost(navController = nav, startDestination = if (state.running) "status" else "profile") {
         composable("profile") { ProfileScreen(bridge, nav) }
+        composable("status") { StatusScreen(bridge, nav) }
         composable("chats") { ChatListScreen(bridge, nav) }
         composable("conversation") { ConversationScreen(bridge, nav) }
         composable("settings") { SettingsScreen(bridge, nav) }
@@ -160,6 +177,62 @@ fun I2PChatRoot(bridge: ChatBridge) {
             TopologyScreen(bridge, nav, bridge.state.value.selectedId)
         }
     }
+}
+
+/** Status, Chats and Settings are top-level tabs on top of "status" in the back stack. */
+fun NavHostController.goTab(route: String) {
+    navigate(route) {
+        popUpTo("status") { inclusive = route == "status" }
+        launchSingleTop = true
+    }
+}
+
+@Composable
+fun MainBottomBar(nav: NavHostController, current: String) {
+    NavigationBar {
+        NavigationBarItem(
+            selected = current == "status",
+            onClick = { nav.goTab("status") },
+            label = { Text(stringResource(R.string.tab_status)) },
+            icon = { Icon(Icons.Default.Info, null) },
+        )
+        NavigationBarItem(
+            selected = current == "chats",
+            onClick = { nav.goTab("chats") },
+            label = { Text(stringResource(R.string.tab_chats)) },
+            icon = { Text("💬") },
+        )
+        NavigationBarItem(
+            selected = current == "settings",
+            onClick = { nav.goTab("settings") },
+            label = { Text(stringResource(R.string.tab_settings)) },
+            icon = { Icon(Icons.Default.Settings, null) },
+        )
+    }
+}
+
+@Composable
+fun peerLinkLabel(state: ChatUiState, contact: ContactUi?): String {
+    val addr = contact?.addr ?: return ""
+    return when (state.peerLink(addr)) {
+        "secure" -> stringResource(R.string.peer_online)
+        "connecting" -> stringResource(R.string.peer_connecting)
+        else -> if (contact.offlineReady) {
+            stringResource(R.string.peer_offline_blindbox)
+        } else {
+            stringResource(R.string.peer_offline)
+        }
+    }
+}
+
+@Composable
+fun PeerLinkDot(link: String) {
+    val color = when (link) {
+        "secure" -> Color(0xFF50FA7B)
+        "connecting" -> Color(0xFFF1FA8C)
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Text("●", color = color, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
 }
 
 @Composable
@@ -247,75 +320,61 @@ fun OpenFileWarningDialog(
     val name = File(path).name
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Открыть файл?") },
-        text = {
-            Text(
-                "Файл «$name» получен от собеседника. Открывайте только если доверяете отправителю — вложенные файлы могут быть вредоносными.",
-            )
-        },
+        title = { Text(stringResource(R.string.open_file_title)) },
+        text = { Text(stringResource(R.string.open_file_body, name)) },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Открыть") }
+            TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_open)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
+    )
+}
+
+/** A non-message row stored in history (e.g. group membership changes). */
+@Composable
+fun HistoryNoticeRow(msg: MessageUi) {
+    Text(
+        msg.text,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = if (msg.kind == "error") {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
         },
     )
 }
 
 @Composable
-fun SessionNoticeRow(msg: MessageUi) {
+fun NoticeRow(notice: NoticeUi, technical: Boolean = false) {
     val context = LocalContext.current
-    val system = msg.kind == "system" || msg.kind == "info"
-    val success = msg.kind == "success"
-    val error = msg.kind == "error"
-    val onlinePrefix = "Online! My Address:"
-    val copyableAddress = if (success && msg.text.startsWith(onlinePrefix)) {
-        msg.text.removePrefix(onlinePrefix).trim()
-    } else {
-        ""
+    val color = when {
+        noticeIsError(notice) -> MaterialTheme.colorScheme.error
+        noticeIsSuccess(notice) && !technical -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    if (system) {
-        Text(
-            msg.text,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    val body = if (technical) {
+        listOf(notice.code, notice.text.ifBlank { notice.arg }).filter { it.isNotBlank() }.joinToString(" · ")
     } else {
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = when {
-                    success -> Color(0xFF50FA7B)
-                    error -> MaterialTheme.colorScheme.errorContainer
-                    else -> MaterialTheme.colorScheme.surfaceVariant
-                },
-                contentColor = when {
-                    success -> Color(0xFF282A36)
-                    error -> MaterialTheme.colorScheme.onErrorContainer
-                    else -> MaterialTheme.colorScheme.onSurface
-                },
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp)
-                .then(
-                    if (copyableAddress.isNotBlank()) {
-                        Modifier.clickable {
-                            val clipboard = context.getSystemService(ClipboardManager::class.java)
-                            clipboard.setPrimaryClip(ClipData.newPlainText("i2p", copyableAddress))
-                            Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
-                        }
-                    } else {
-                        Modifier
-                    },
-                ),
-        ) {
-            Text(
-                msg.text,
-                modifier = Modifier.padding(10.dp),
-                fontWeight = if (success) FontWeight.SemiBold else FontWeight.Normal,
-            )
-        }
+        renderNotice(context, notice)
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Text(
+            notice.ts,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(end = 8.dp),
+        )
+        Text(
+            body,
+            style = if (technical) {
+                MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+            } else {
+                MaterialTheme.typography.bodyMedium
+            },
+            color = color,
+        )
     }
 }
 
@@ -329,26 +388,31 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
         bridge.warmRouter()
     }
     LaunchedEffect(state.running, state.starting) {
-        if (state.running && !state.starting) {
-            nav.navigate("chats") { popUpTo("profile") { inclusive = true } }
+        if (state.running || state.starting) {
+            nav.navigate("status") { popUpTo("profile") { inclusive = true } }
         }
     }
-    Scaffold(topBar = { TopAppBar(title = { Text("I2PChat") }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { padding ->
         Column(Modifier.padding(padding).padding(20.dp).fillMaxSize()) {
-            Text("Choose profile", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.profile_title), style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
-            Text(
-                "Use random_address for a one-time session. TOFU pins are not stored in that mode. " +
-                    "I2P on a phone keeps a foreground service running and uses battery. " +
-                    "Bundled i2pd starts in the background when this screen opens; first SAM can take 1–2 minutes.",
-            )
+            Text(stringResource(R.string.profile_intro))
             Spacer(Modifier.height(16.dp))
+            var profilePassword by remember { mutableStateOf("") }
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Profile") },
+                label = { Text(stringResource(R.string.profile_label)) },
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = profilePassword,
+                onValueChange = { profilePassword = it },
+                label = { Text(stringResource(R.string.profile_password)) },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(stringResource(R.string.profile_password_hint), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             LazyColumn(Modifier.weight(1f, fill = false)) {
                 items(state.profiles) { profile ->
@@ -361,25 +425,199 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
                     )
                 }
             }
-            if (state.error.isNotBlank()) {
-                Text(state.error, color = MaterialTheme.colorScheme.error)
+            state.routerIssue?.let { issue ->
+                Text(bridge.issueText(issue), color = MaterialTheme.colorScheme.error)
             }
             Text(state.status, style = MaterialTheme.typography.bodySmall)
-            if (state.sessionNotices.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                LazyColumn(Modifier.weight(1f, fill = false)) {
-                    items(state.sessionNotices) { notice ->
-                        SessionNoticeRow(notice)
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { bridge.start(name.ifBlank { "random_address" }, profilePassword) },
+                enabled = !state.starting,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (state.starting) {
+                        stringResource(R.string.profile_starting)
+                    } else {
+                        stringResource(R.string.action_open)
+                    },
+                )
+            }
+            TextButton(onClick = { nav.navigate("router") }) { Text(stringResource(R.string.router_settings)) }
+        }
+    }
+}
+
+@Composable
+private fun CheckRow(label: String, value: String, check: String, onClick: (() -> Unit)? = null) {
+    val (mark, color) = when (check) {
+        "ok" -> "✓" to Color(0xFF50FA7B)
+        "failed" -> "✗" to MaterialTheme.colorScheme.error
+        "pending" -> "…" to Color(0xFFF1FA8C)
+        else -> "–" to MaterialTheme.colorScheme.outline
+    }
+    val stateText = when (check) {
+        "ok" -> stringResource(R.string.state_ok)
+        "failed" -> stringResource(R.string.state_failed)
+        "pending" -> stringResource(R.string.state_pending)
+        else -> stringResource(R.string.state_off)
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(mark, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 24.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, fontWeight = FontWeight.SemiBold)
+            if (value.isNotBlank()) Text(value, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(stateText, style = MaterialTheme.typography.labelMedium, color = color)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
+    val state by bridge.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val router = state.router
+    val active = state.running || state.starting
+    val issue = state.routerIssue
+    val routerCheck = when {
+        state.samReady -> "ok"
+        issue != null -> "failed"
+        state.starting -> "pending"
+        state.transport == "failed" -> "failed"
+        else -> "off"
+    }
+    val tunnelsCheck = when {
+        state.tunnelsReady -> "ok"
+        state.running -> if (issue != null && issue.code != RouterIssueCode.TUNNELS_SLOW) "failed" else "pending"
+        state.starting -> "pending"
+        else -> "off"
+    }
+    val copyAddress = {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("i2p", state.localAddr))
+        Toast.makeText(context, context.getString(R.string.address_copied), Toast.LENGTH_SHORT).show()
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        if (state.profile.isBlank()) {
+                            stringResource(R.string.tab_status)
+                        } else {
+                            stringResource(R.string.title_with_profile, state.profile)
+                        },
+                    )
+                },
+            )
+        },
+        bottomBar = { MainBottomBar(nav, "status") },
+    ) { padding ->
+        LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+            item {
+                Text(
+                    if (state.tunnelsReady) {
+                        stringResource(R.string.status_ready)
+                    } else {
+                        stringResource(R.string.status_not_ready)
+                    },
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = if (state.tunnelsReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                )
+                if (state.status.isNotBlank()) {
+                    Text(state.status, style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            if (issue != null || (!active && state.error.isNotBlank())) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(stringResource(R.string.status_problem), fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(4.dp))
+                            Text(if (issue != null) bridge.issueText(issue) else state.error)
+                            Spacer(Modifier.height(8.dp))
+                            if (issue?.offersRestart == true && router.usingBundled) {
+                                OutlinedButton(onClick = { bridge.restartBundledRouter() }, modifier = Modifier.fillMaxWidth()) {
+                                    Text(stringResource(R.string.restart_bundled))
+                                }
+                            }
+                            OutlinedButton(onClick = { nav.navigate("router") }, modifier = Modifier.fillMaxWidth()) {
+                                Text(stringResource(R.string.router_settings))
+                            }
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = { bridge.start(name.ifBlank { "random_address" }) },
-                enabled = !state.starting,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (state.starting) "Starting I2P…" else "Open") }
-            TextButton(onClick = { nav.navigate("router") }) { Text("Router settings") }
+            item {
+                CheckRow(
+                    stringResource(R.string.check_router),
+                    if (router.usingBundled) {
+                        stringResource(R.string.router_kind_bundled)
+                    } else {
+                        stringResource(R.string.router_kind_system, "${router.systemSamHost}:${router.systemSamPort}")
+                    },
+                    routerCheck,
+                )
+                CheckRow(
+                    stringResource(R.string.check_sam),
+                    "${router.samHost}:${router.samPort}",
+                    if (state.samReady) "ok" else routerCheck,
+                )
+                CheckRow(stringResource(R.string.check_tunnels), "", tunnelsCheck)
+                CheckRow(
+                    stringResource(R.string.check_address),
+                    if (state.localAddr.isBlank()) "" else state.localAddr.take(24) + "…",
+                    when {
+                        state.localAddr.isNotBlank() -> "ok"
+                        active -> "pending"
+                        else -> "off"
+                    },
+                    onClick = if (state.localAddr.isNotBlank()) copyAddress else null,
+                )
+                CheckRow(
+                    stringResource(R.string.check_blindbox),
+                    "",
+                    when {
+                        state.blindboxReady -> "ok"
+                        state.running && state.replicaSource != "none" -> "pending"
+                        else -> "off"
+                    },
+                )
+                if (!active) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { nav.navigate("profile") { popUpTo("status") { inclusive = true } } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.status_choose_profile)) }
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.status_events), fontWeight = FontWeight.SemiBold)
+                if (state.notices.isEmpty()) {
+                    Text(stringResource(R.string.status_no_events), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            items(state.notices.asReversed()) { notice -> NoticeRow(notice) }
+            if (state.uiPrefs.verboseLog) {
+                item {
+                    Spacer(Modifier.height(16.dp))
+                    Text(stringResource(R.string.verbose_log), fontWeight = FontWeight.SemiBold)
+                }
+                items(state.verboseLog.asReversed()) { notice -> NoticeRow(notice, technical = true) }
+            }
         }
     }
 }
@@ -398,57 +636,51 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (state.localAddr.isBlank()) "I2PChat" else "I2PChat @ ${state.profile}") },
+                title = {
+                    Text(
+                        if (state.profile.isBlank()) {
+                            stringResource(R.string.app_name)
+                        } else {
+                            stringResource(R.string.title_with_profile, state.profile)
+                        },
+                    )
+                },
                 actions = {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("New chat") }, onClick = {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_new_chat)) }, onClick = {
                             menu = false
                             newPeer = true
                         })
-                        DropdownMenuItem(text = { Text("New group") }, onClick = {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_new_group)) }, onClick = {
                             menu = false
                             nav.navigate("group")
                         })
-                        DropdownMenuItem(text = { Text("Settings") }, onClick = {
-                            menu = false
-                            nav.navigate("settings")
-                        })
-                        DropdownMenuItem(text = { Text("Switch profile") }, onClick = {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_switch_profile)) }, onClick = {
                             menu = false
                             bridge.stop()
-                            nav.navigate("profile") { popUpTo("chats") { inclusive = true } }
+                            nav.navigate("profile") { popUpTo("status") { inclusive = true } }
                         })
                     }
                 },
             )
         },
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(selected = true, onClick = {}, label = { Text("Chats") }, icon = { Text("💬") })
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { nav.navigate("settings") },
-                    label = { Text("Settings") },
-                    icon = { Icon(Icons.Default.Settings, null) },
-                )
-            }
-        },
+        bottomBar = { MainBottomBar(nav, "chats") },
         floatingActionButton = {
             FloatingActionButton(onClick = { newPeer = true }) {
-                Icon(Icons.Default.Add, contentDescription = "New chat")
+                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_new_chat))
             }
         },
     ) { padding ->
         if (newPeer) {
             AlertDialog(
                 onDismissRequest = { newPeer = false },
-                title = { Text("Open chat") },
+                title = { Text(stringResource(R.string.open_chat_title)) },
                 text = {
                     OutlinedTextField(
                         value = peerAddr,
                         onValueChange = { peerAddr = it },
-                        label = { Text("I2P address") },
+                        label = { Text(stringResource(R.string.i2p_address)) },
                     )
                 },
                 confirmButton = {
@@ -459,37 +691,31 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
                             bridge.selectConversation(addr, false)
                             nav.navigate("conversation")
                         }
-                    }) { Text("Open") }
+                    }) { Text(stringResource(R.string.action_open)) }
                 },
-                dismissButton = { TextButton(onClick = { newPeer = false }) { Text("Cancel") } },
+                dismissButton = {
+                    TextButton(onClick = { newPeer = false }) { Text(stringResource(R.string.action_cancel)) }
+                },
             )
         }
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (!state.tunnelsReady) {
+                Text(
+                    stringResource(R.string.network_not_ready),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { nav.goTab("status") }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth().padding(12.dp),
-                label = { Text("Search") },
+                label = { Text(stringResource(R.string.search)) },
             )
-            Text(
-                "${state.status} · ${state.transport}" +
-                    if (state.localAddr.isNotBlank()) " · ${state.localAddr.take(20)}…" else "",
-                modifier = Modifier.padding(horizontal = 16.dp),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (state.error.isNotBlank()) {
-                Text(
-                    state.error,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (state.sessionNotices.isNotEmpty()) {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    state.sessionNotices.takeLast(8).forEach { SessionNoticeRow(it) }
-                }
-            }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filtered, key = { it.addr }) { item ->
                     Column(
@@ -502,12 +728,24 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
                             .padding(16.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(item.title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            if (!item.isGroup) PeerLinkDot(state.peerLink(item.addr))
+                            Text(
+                                if (item.isGroup && item.displayName.isBlank()) {
+                                    stringResource(R.string.group_default_title)
+                                } else {
+                                    item.title
+                                },
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                            )
                             if (item.unread > 0) Text(item.unread.toString(), color = MaterialTheme.colorScheme.primary)
-                            if (item.live) Text(" live", color = MaterialTheme.colorScheme.primary)
                         }
                         Text(
-                            if (item.isGroup) "Group · ${item.lastPreview}" else item.lastPreview.ifBlank { item.addr },
+                            if (item.isGroup) {
+                                stringResource(R.string.group_preview, item.lastPreview)
+                            } else {
+                                item.lastPreview.ifBlank { peerLinkLabel(state, item) }
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -541,21 +779,23 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) list.scrollToItem(state.messages.lastIndex)
     }
-    val title = state.conversations.firstOrNull { it.addr == id }?.title ?: id.take(18)
+    val conversation = state.conversations.firstOrNull { it.addr == id }
+    val title = conversation?.title ?: id.take(18)
+    val contact = state.contacts.firstOrNull { it.addr == id } ?: ContactUi(addr = id).takeIf { !group }
     if (renaming) {
         AlertDialog(
             onDismissRequest = { renaming = false },
-            title = { Text("Display name") },
+            title = { Text(stringResource(R.string.display_name)) },
             text = {
-                OutlinedTextField(newName, { newName = it }, label = { Text("Name") })
+                OutlinedTextField(newName, { newName = it }, label = { Text(stringResource(R.string.name)) })
             },
             confirmButton = {
                 TextButton(onClick = {
                     bridge.setPeerProfile(id, newName, state.contacts.firstOrNull { it.addr == id }?.note.orEmpty())
                     renaming = false
-                }) { Text("Save") }
+                }) { Text(stringResource(R.string.action_save)) }
             },
-            dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { renaming = false }) { Text(stringResource(R.string.action_cancel)) } },
         )
     }
     pendingOpenPath?.let { path ->
@@ -571,7 +811,17 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(title) },
+                title = {
+                    Column {
+                        Text(title)
+                        if (!group) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                PeerLinkDot(state.peerLink(id))
+                                Text(peerLinkLabel(state, contact), style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -581,30 +831,30 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         if (!group) {
-                            DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; renaming = true })
-                            DropdownMenuItem(text = { Text("Connect") }, onClick = { menu = false; bridge.connectSelected() })
-                            DropdownMenuItem(text = { Text("Disconnect") }, onClick = { menu = false; bridge.disconnectSelected() })
-                            DropdownMenuItem(text = { Text("Forget TOFU pin") }, onClick = { menu = false; bridge.forgetPin(id) })
-                            DropdownMenuItem(text = { Text("Clear history") }, onClick = { menu = false; bridge.clearHistory(id) })
-                            DropdownMenuItem(text = { Text("Remove") }, onClick = {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_rename)) }, onClick = { menu = false; renaming = true })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_connect)) }, onClick = { menu = false; bridge.connectSelected() })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_disconnect)) }, onClick = { menu = false; bridge.disconnectSelected() })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_forget_pin)) }, onClick = { menu = false; bridge.forgetPin(id) })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_clear_history)) }, onClick = { menu = false; bridge.clearHistory(id) })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_remove)) }, onClick = {
                                 menu = false
                                 bridge.removePeer(id)
                                 nav.popBackStack()
                             })
                         } else {
-                            DropdownMenuItem(text = { Text("Edit group") }, onClick = {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_edit_group)) }, onClick = {
                                 menu = false
                                 nav.navigate("groupEdit")
                             })
-                            DropdownMenuItem(text = { Text("Copy invite") }, onClick = {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_copy_invite)) }, onClick = {
                                 menu = false
                                 bridge.encodeInvite(id)
                             })
-                            DropdownMenuItem(text = { Text("Topology") }, onClick = {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_topology)) }, onClick = {
                                 menu = false
                                 nav.navigate("topology")
                             })
-                            DropdownMenuItem(text = { Text("Delete group") }, onClick = {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_delete_group)) }, onClick = {
                                 menu = false
                                 bridge.deleteGroup(id)
                                 nav.popBackStack()
@@ -620,15 +870,21 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 value = search,
                 onValueChange = { search = it },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                label = { Text("Find in chat") },
+                label = { Text(stringResource(R.string.find_in_chat)) },
             )
             val shown = if (search.isBlank()) state.messages else state.messages.filter {
                 it.text.contains(search, true) || it.sender.contains(search, true)
             }
+            LaunchedEffect(shown.size) {
+                if (shown.isEmpty() || search.isNotBlank()) return@LaunchedEffect
+                val lastVisible = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+                val atBottom = lastVisible == null || lastVisible >= shown.lastIndex - 1
+                if (atBottom) list.animateScrollToItem(shown.lastIndex)
+            }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
                 items(shown) { msg ->
                     if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
-                        SessionNoticeRow(msg)
+                        HistoryNoticeRow(msg)
                     } else {
                         val mine = msg.kind == "out" || msg.kind == "me"
                         Column(
@@ -657,12 +913,12 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                                         )
                                         if (path.isNotBlank()) {
                                             Text(
-                                                "Нажмите, чтобы открыть",
+                                                stringResource(R.string.tap_to_open),
                                                 style = MaterialTheme.typography.labelSmall,
                                             )
                                         }
                                     } else {
-                                        Text(msg.text)
+                                        Text(msg.text, style = emojiSafeTextStyle())
                                     }
                                     Text(
                                         listOf(
@@ -689,28 +945,28 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     items(EmojiChars) { glyph ->
                         Text(
                             glyph,
-                            fontSize = 22.sp,
+                            style = emojiSafeTextStyle().copy(fontSize = 22.sp),
                             modifier = Modifier
                                 .clickable { bridge.setCompose(state.compose + glyph) }
-                                .padding(8.dp),
+                                .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 12.dp),
                         )
                     }
                 }
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-                IconButton(onClick = { emoji = !emoji }) { Icon(Icons.Default.EmojiEmotions, "Emoji") }
+                IconButton(onClick = { emoji = !emoji }) { Icon(Icons.Default.EmojiEmotions, stringResource(R.string.cd_emoji)) }
                 if (!group) {
-                    IconButton(onClick = { filePicker.launch("*/*") }) { Icon(Icons.Default.AttachFile, "File") }
-                    IconButton(onClick = { imagePicker.launch("image/*") }) { Icon(Icons.Default.Image, "Image") }
+                    IconButton(onClick = { filePicker.launch("*/*") }) { Icon(Icons.Default.AttachFile, stringResource(R.string.cd_file)) }
+                    IconButton(onClick = { imagePicker.launch("image/*") }) { Icon(Icons.Default.Image, stringResource(R.string.cd_image)) }
                 }
                 OutlinedTextField(
                     value = state.compose,
                     onValueChange = bridge::setCompose,
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") },
+                    placeholder = { Text(stringResource(R.string.message_hint)) },
                 )
                 IconButton(onClick = { bridge.send() }) {
-                    Icon(Icons.AutoMirrored.Filled.Send, "Send")
+                    Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.cd_send))
                 }
             }
             LaunchedEffect(state.inviteToken) {
@@ -731,51 +987,113 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     var maxMessages by remember { mutableStateOf(state.uiPrefs.historyMaxMessages.toString()) }
     var days by remember { mutableStateOf(state.uiPrefs.historyRetentionDays.toString()) }
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Settings") },
-                navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
-                    }
-                },
-            )
-        },
+        topBar = { TopAppBar(title = { Text(stringResource(R.string.tab_settings)) }) },
+        bottomBar = { MainBottomBar(nav, "settings") },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).padding(16.dp)) {
             item {
-                Text("Theme", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.theme), fontWeight = FontWeight.SemiBold)
                 Row {
-                    listOf("system", "light", "dark").forEach { value ->
+                    listOf(
+                        "system" to R.string.theme_system,
+                        "light" to R.string.theme_light,
+                        "dark" to R.string.theme_dark,
+                    ).forEach { (value, label) ->
                         FilterChip(
                             selected = state.theme == value,
                             onClick = { bridge.setTheme(value) },
-                            label = { Text(value) },
+                            label = { Text(stringResource(label)) },
                             modifier = Modifier.padding(end = 8.dp),
                         )
                     }
                 }
                 Spacer(Modifier.height(16.dp))
-                Text("Your address", fontWeight = FontWeight.SemiBold)
-                Text(state.localAddr.ifBlank { "Waiting for SAM…" })
+                Text(stringResource(R.string.your_address), fontWeight = FontWeight.SemiBold)
+                Text(state.localAddr.ifBlank { stringResource(R.string.waiting_for_address) })
                 TextButton(onClick = {
                     val clipboard = context.getSystemService(ClipboardManager::class.java)
                     clipboard.setPrimaryClip(ClipData.newPlainText("i2p", state.localAddr))
-                }) { Text("Copy address") }
+                }) { Text(stringResource(R.string.copy_address)) }
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { nav.navigate("router") }, modifier = Modifier.fillMaxWidth()) { Text("I2P router") }
-                Button(onClick = { nav.navigate("blindbox") }, modifier = Modifier.fillMaxWidth()) { Text("BlindBox") }
-                Button(onClick = { nav.navigate("backup") }, modifier = Modifier.fillMaxWidth()) { Text("Backup / restore") }
-                Button(onClick = { bridge.pollOffline() }, modifier = Modifier.fillMaxWidth()) { Text("Check offline now") }
+                Button(onClick = { nav.navigate("router") }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.i2p_router))
+                }
+                Button(onClick = { nav.navigate("blindbox") }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.blindbox))
+                }
+                Button(onClick = { nav.navigate("backup") }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.backup_restore))
+                }
+                Button(onClick = { bridge.pollOffline() }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.check_offline_now))
+                }
                 Spacer(Modifier.height(16.dp))
-                Text("History retention", fontWeight = FontWeight.SemiBold)
-                OutlinedTextField(value = maxMessages, onValueChange = { maxMessages = it }, label = { Text("Max messages") })
-                OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Max age (days, 0 = none)") })
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.verbose_log), fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.verbose_log_hint), style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(checked = state.uiPrefs.verboseLog, onCheckedChange = { bridge.setVerboseLog(it) })
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.incoming_folders), fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.incoming_folders_hint), style = MaterialTheme.typography.bodySmall)
+                var filesDir by remember { mutableStateOf(state.uiPrefs.filesDir) }
+                var imagesDir by remember { mutableStateOf(state.uiPrefs.imagesDir) }
+                var ephemeral by remember { mutableStateOf(state.uiPrefs.ephemeralMedia) }
+                OutlinedTextField(
+                    value = filesDir,
+                    onValueChange = { filesDir = it },
+                    label = { Text(stringResource(R.string.files_folder)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = imagesDir,
+                    onValueChange = { imagesDir = it },
+                    label = { Text(stringResource(R.string.images_folder)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.ephemeral_media), fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.ephemeral_media_hint), style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(checked = ephemeral, onCheckedChange = { ephemeral = it })
+                }
+                Button(onClick = { bridge.saveMedia(filesDir, imagesDir, ephemeral) }) {
+                    Text(stringResource(R.string.action_save))
+                }
+                Spacer(Modifier.height(16.dp))
+                var profilePassword by remember { mutableStateOf("") }
+                Text(stringResource(R.string.profile_password), fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.profile_password_change_hint), style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = profilePassword,
+                    onValueChange = { profilePassword = it },
+                    label = { Text(stringResource(R.string.profile_password)) },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(onClick = { bridge.setProfilePassword(profilePassword) }) {
+                    Text(stringResource(R.string.profile_password_save))
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.history_retention), fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(
+                    value = maxMessages,
+                    onValueChange = { maxMessages = it },
+                    label = { Text(stringResource(R.string.max_messages)) },
+                )
+                OutlinedTextField(
+                    value = days,
+                    onValueChange = { days = it },
+                    label = { Text(stringResource(R.string.max_age_days)) },
+                )
                 Button(onClick = {
                     bridge.saveRetention(maxMessages.toIntOrNull() ?: 1000, days.toIntOrNull() ?: 0)
-                }) { Text("Save retention") }
+                }) { Text(stringResource(R.string.save_retention)) }
                 Spacer(Modifier.height(16.dp))
-                Text("I2P stays in a foreground service on this phone. That is required to keep tunnels alive; it will use battery.")
+                Text(stringResource(R.string.foreground_note))
             }
         }
     }
@@ -786,10 +1104,19 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
 fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
     val state by bridge.state.collectAsStateWithLifecycle()
     var prefs by remember { mutableStateOf(state.router) }
+    var hostError by remember { mutableStateOf<String?>(null) }
+    var saved by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    LaunchedEffect(saved) {
+        if (saved) {
+            delay(700)
+            nav.popBackStack()
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("I2P router") },
+                title = { Text(stringResource(R.string.i2p_router)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -798,10 +1125,10 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).padding(16.dp)) {
+        Column(Modifier.padding(padding).padding(16.dp).verticalScroll(rememberScrollState())) {
             if (BuildConfig.BUNDLED_I2PD) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Bundled i2pd", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.bundled_i2pd), modifier = Modifier.weight(1f))
                     Switch(
                         checked = prefs.usingBundled,
                         onCheckedChange = { on ->
@@ -809,38 +1136,76 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
                         },
                     )
                 }
-                Text("External SAM is any I2P router on this phone (loopback only). Bundled needs libi2pd.so in jniLibs/arm64-v8a.")
+                Text(stringResource(R.string.router_external_hint))
             } else {
-                Text("This 32-bit build has no bundled router. Install i2pd separately and point SAM at it (loopback only, usually 127.0.0.1:7656).")
+                Text(stringResource(R.string.router_no_bundled))
             }
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 prefs.tunnelLength.toString(),
                 { prefs = prefs.copy(tunnelLength = it.toIntOrNull() ?: prefs.tunnelLength) },
-                label = { Text("Tunnel length, hops (${RouterPrefs.MIN_TUNNEL_LENGTH}-${RouterPrefs.MAX_TUNNEL_LENGTH})") },
-                supportingText = { Text("More hops are more anonymous but slower. Default ${RouterPrefs.DEFAULT_TUNNEL_LENGTH}. Applies on the next Open.") },
+                label = {
+                    Text(stringResource(R.string.tunnel_length, RouterPrefs.MIN_TUNNEL_LENGTH, RouterPrefs.MAX_TUNNEL_LENGTH))
+                },
+                supportingText = { Text(stringResource(R.string.tunnel_length_hint, RouterPrefs.DEFAULT_TUNNEL_LENGTH)) },
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(prefs.systemSamHost, { prefs = prefs.copy(systemSamHost = it) }, label = { Text("External host") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.systemSamPort.toString(), { prefs = prefs.copy(systemSamPort = it.toIntOrNull() ?: prefs.systemSamPort) }, label = { Text("External SAM port") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(prefs.systemSamHost, { prefs = prefs.copy(systemSamHost = it); hostError = null }, label = { Text(stringResource(R.string.external_host)) }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(prefs.systemSamPort.toString(), { prefs = prefs.copy(systemSamPort = it.toIntOrNull() ?: prefs.systemSamPort) }, label = { Text(stringResource(R.string.external_sam_port)) }, modifier = Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.router_allow_remote), modifier = Modifier.weight(1f))
+                Switch(
+                    checked = prefs.allowRemoteSam,
+                    onCheckedChange = { on ->
+                        prefs = prefs.copy(allowRemoteSam = on)
+                        hostError = null
+                    },
+                )
+            }
             if (BuildConfig.BUNDLED_I2PD) {
-                OutlinedTextField(prefs.bundledSamPort.toString(), { prefs = prefs.copy(bundledSamPort = it.toIntOrNull() ?: prefs.bundledSamPort) }, label = { Text("Bundled SAM port") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledHttpProxyPort.toString(), { prefs = prefs.copy(bundledHttpProxyPort = it.toIntOrNull() ?: prefs.bundledHttpProxyPort) }, label = { Text("HTTP proxy") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledSocksProxyPort.toString(), { prefs = prefs.copy(bundledSocksProxyPort = it.toIntOrNull() ?: prefs.bundledSocksProxyPort) }, label = { Text("SOCKS proxy") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text("Control HTTP") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledSamPort.toString(), { prefs = prefs.copy(bundledSamPort = it.toIntOrNull() ?: prefs.bundledSamPort) }, label = { Text(stringResource(R.string.bundled_sam_port)) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledHttpProxyPort.toString(), { prefs = prefs.copy(bundledHttpProxyPort = it.toIntOrNull() ?: prefs.bundledHttpProxyPort) }, label = { Text(stringResource(R.string.http_proxy)) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledSocksProxyPort.toString(), { prefs = prefs.copy(bundledSocksProxyPort = it.toIntOrNull() ?: prefs.bundledSocksProxyPort) }, label = { Text(stringResource(R.string.socks_proxy)) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text(stringResource(R.string.control_http)) }, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = { bridge.saveRouter(prefs) }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            hostError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.height(8.dp))
+            }
+            if (saved) {
+                Text(stringResource(R.string.router_saved))
+                Spacer(Modifier.height(8.dp))
+            }
+            Button(
+                onClick = {
+                    val problem = bridge.saveRouter(prefs)
+                    if (problem == null) {
+                        hostError = null
+                        saved = true
+                    } else {
+                        saved = false
+                        hostError = when (problem) {
+                            SamHostProblem.EMPTY -> context.getString(R.string.router_host_empty)
+                            SamHostProblem.INVALID -> context.getString(R.string.router_host_invalid)
+                            SamHostProblem.REMOTE_NOT_ALLOWED -> context.getString(R.string.router_host_remote)
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.action_save))
+            }
             if (BuildConfig.BUNDLED_I2PD && prefs.usingBundled) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { bridge.restartBundledRouter() },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Restart bundled i2pd")
+                    Text(stringResource(R.string.restart_bundled))
                 }
                 Text(
-                    "Use this if Open fails with SAM not ready or a previous i2pd did not shut down.",
+                    stringResource(R.string.restart_bundled_hint),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -856,7 +1221,7 @@ fun BlindBoxScreen(bridge: ChatBridge, nav: NavHostController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("BlindBox") },
+                title = { Text(stringResource(R.string.blindbox)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -866,18 +1231,24 @@ fun BlindBoxScreen(bridge: ChatBridge, nav: NavHostController) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).padding(16.dp)) {
-            Text("Ready: ${state.blindboxReady} · source: ${state.replicaSource.ifBlank { "none" }}")
+            Text(
+                stringResource(
+                    R.string.blindbox_state,
+                    stringResource(if (state.blindboxReady) R.string.yes_value else R.string.no_value),
+                    state.replicaSource.ifBlank { stringResource(R.string.none_value) },
+                ),
+            )
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 modifier = Modifier.fillMaxWidth().height(180.dp),
-                label = { Text("Replica endpoints, one per line") },
+                label = { Text(stringResource(R.string.replicas_label)) },
             )
             Button(onClick = {
                 bridge.saveReplicas(text.lines().map { it.trim() }.filter { it.isNotBlank() }, emptyMap())
-            }) { Text("Save replicas") }
-            Button(onClick = { bridge.pollOffline() }) { Text("Check now") }
+            }) { Text(stringResource(R.string.save_replicas)) }
+            Button(onClick = { bridge.pollOffline() }) { Text(stringResource(R.string.check_now)) }
         }
     }
 }
@@ -902,7 +1273,7 @@ fun BackupScreen(bridge: ChatBridge, nav: NavHostController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Backup") },
+                title = { Text(stringResource(R.string.backup_title)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -911,16 +1282,24 @@ fun BackupScreen(bridge: ChatBridge, nav: NavHostController) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).padding(16.dp)) {
-            OutlinedTextField(passphrase, { passphrase = it }, label = { Text("Passphrase") }, modifier = Modifier.fillMaxWidth())
+        val backupState by bridge.state.collectAsStateWithLifecycle()
+        Column(Modifier.padding(padding).padding(16.dp).verticalScroll(rememberScrollState())) {
+            Text(stringResource(R.string.backup_transfer_hint))
+            Spacer(Modifier.height(8.dp))
+            if (backupState.error.isNotBlank()) {
+                Text(backupState.error, color = MaterialTheme.colorScheme.error)
+            } else if (backupState.status.isNotBlank()) {
+                Text(backupState.status)
+            }
+            OutlinedTextField(passphrase, { passphrase = it }, label = { Text(stringResource(R.string.passphrase)) }, modifier = Modifier.fillMaxWidth())
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Include history", modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.include_history), modifier = Modifier.weight(1f))
                 Switch(checked = includeHistory, onCheckedChange = { includeHistory = it })
             }
-            Button(onClick = { exportProfile.launch("i2pchat-profile.i2pbk") }, modifier = Modifier.fillMaxWidth()) { Text("Export profile") }
-            Button(onClick = { exportHistory.launch("i2pchat-history.i2pbk") }, modifier = Modifier.fillMaxWidth()) { Text("Export history") }
-            Button(onClick = { importProfile.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) { Text("Import profile") }
-            Button(onClick = { importHistory.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) { Text("Import history") }
+            Button(onClick = { exportProfile.launch("i2pchat-profile.i2pbk") }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.export_profile)) }
+            Button(onClick = { exportHistory.launch("i2pchat-history.i2pbk") }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.export_history)) }
+            Button(onClick = { importProfile.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.import_profile)) }
+            Button(onClick = { importHistory.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.import_history)) }
         }
     }
 }
@@ -936,7 +1315,7 @@ fun GroupEditScreen(bridge: ChatBridge, nav: NavHostController, existingId: Stri
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (existingId == null) "New group" else "Edit group") },
+                title = { Text(stringResource(if (existingId == null) R.string.new_group else R.string.edit_group)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -946,24 +1325,24 @@ fun GroupEditScreen(bridge: ChatBridge, nav: NavHostController, existingId: Stri
         },
     ) { padding ->
         Column(Modifier.padding(padding).padding(16.dp)) {
-            OutlinedTextField(title, { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(title, { title = it }, label = { Text(stringResource(R.string.group_title)) }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(
                 members,
                 { members = it },
-                label = { Text("Members, one address per line") },
+                label = { Text(stringResource(R.string.group_members_hint)) },
                 modifier = Modifier.fillMaxWidth().height(160.dp),
             )
             Button(onClick = {
                 val list = members.lines().map { it.trim() }.filter { it.isNotBlank() }
                 if (existingId == null) bridge.createGroup(title, list) else bridge.updateGroup(existingId, title, list)
                 nav.popBackStack()
-            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.action_save)) }
             Spacer(Modifier.height(16.dp))
-            OutlinedTextField(join, { join = it }, label = { Text("Join with invite token") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(join, { join = it }, label = { Text(stringResource(R.string.join_token)) }, modifier = Modifier.fillMaxWidth())
             Button(onClick = {
                 bridge.joinGroup(join)
                 nav.popBackStack()
-            }, modifier = Modifier.fillMaxWidth()) { Text("Join") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.join)) }
         }
     }
 }
@@ -976,7 +1355,7 @@ fun TopologyScreen(bridge: ChatBridge, nav: NavHostController, id: String) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Group map") },
+                title = { Text(stringResource(R.string.group_map)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -986,7 +1365,7 @@ fun TopologyScreen(bridge: ChatBridge, nav: NavHostController, id: String) {
         },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).padding(16.dp)) {
-            item { Text(state.topologyJson.ifBlank { "No topology yet" }) }
+            item { Text(state.topologyJson.ifBlank { stringResource(R.string.no_topology) }) }
         }
     }
 }
@@ -995,29 +1374,50 @@ fun TopologyScreen(bridge: ChatBridge, nav: NavHostController, id: String) {
 fun TofuDialog(prompt: TofuPrompt, onAccept: () -> Unit, onReject: () -> Unit) {
     AlertDialog(
         onDismissRequest = onReject,
-        title = { Text(if (prompt.kind == "keyChanged") "Signing key changed" else "New peer key") },
+        title = {
+            Text(stringResource(if (prompt.kind == "keyChanged") R.string.tofu_key_changed else R.string.tofu_new_key))
+        },
         text = {
             Text(
-                "Peer ${prompt.peer}\nNew: ${prompt.newKey}\nOld: ${prompt.oldKey.ifBlank { "(none)" }}\n\nAccept only if you expected this identity.",
+                stringResource(
+                    R.string.tofu_body,
+                    prompt.peer,
+                    prompt.newKey,
+                    prompt.oldKey.ifBlank { stringResource(R.string.tofu_no_old_key) },
+                ),
             )
         },
-        confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },
-        dismissButton = { TextButton(onClick = onReject) { Text("Reject") } },
+        confirmButton = { TextButton(onClick = onAccept) { Text(stringResource(R.string.action_accept)) } },
+        dismissButton = { TextButton(onClick = onReject) { Text(stringResource(R.string.action_reject)) } },
     )
 }
 
+/** Extra line height so emoji glyphs are not clipped by the font metrics. */
+private fun emojiSafeTextStyle(): TextStyle = TextStyle(
+    platformStyle = PlatformTextStyle(includeFontPadding = true),
+    lineHeight = 24.sp,
+)
+
 @Composable
-fun FileOfferDialog(prompt: FileOfferPrompt, onAccept: () -> Unit, onReject: () -> Unit) {
+fun FileOfferDialog(
+    prompt: FileOfferPrompt,
+    bridge: ChatBridge,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+    onSaveAs: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onReject,
-        title = { Text("Incoming file") },
+        title = { Text(stringResource(R.string.incoming_file)) },
         text = {
-            Text(
-                "Peer ${prompt.peer} wants to send\n${prompt.name}\n(${prompt.size} bytes)\n\n" +
-                    "Accept only if you expected this file from this contact.",
-            )
+            Text(stringResource(R.string.file_offer_body, prompt.peer, prompt.name, bridge.formatSize(prompt.size)))
         },
-        confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },
-        dismissButton = { TextButton(onClick = onReject) { Text("Reject") } },
+        confirmButton = {
+            Row {
+                TextButton(onClick = onSaveAs) { Text(stringResource(R.string.action_save_as)) }
+                TextButton(onClick = onAccept) { Text(stringResource(R.string.action_accept)) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onReject) { Text(stringResource(R.string.action_reject)) } },
     )
 }

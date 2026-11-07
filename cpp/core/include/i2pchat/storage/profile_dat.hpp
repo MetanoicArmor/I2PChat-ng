@@ -20,7 +20,10 @@ namespace i2pchat::storage {
 
 inline constexpr std::string_view kProfileDatMagic = "I2PK";
 inline constexpr std::uint16_t kProfileDatVersion = 1;
+/// Argon2id of a user password. The 16-byte salt is in the file; there is no wrap key.
+inline constexpr std::uint16_t kProfileDatVersionPassword = 2;
 inline constexpr std::size_t kProfileDatSaltSize = 32;
+inline constexpr std::size_t kProfileDatPasswordSaltSize = 16;
 inline constexpr std::size_t kProfileDatHeaderSize = 4 + 2 + kProfileDatSaltSize;
 inline constexpr std::string_view kDatWrapKeyringSuffix = "__dat_wrap__";
 inline constexpr std::string_view kProfileDatDomain = "I2PCHAT-PROFILE-DAT";
@@ -42,6 +45,7 @@ struct ProfileDatContents {
     bool was_plaintext = false;
 };
 
+[[nodiscard]] std::uint16_t profile_dat_version(ByteView raw);
 [[nodiscard]] bool is_encrypted_profile_dat(ByteView raw);
 
 [[nodiscard]] std::filesystem::path profile_dat_wrap_path(
@@ -64,8 +68,11 @@ std::optional<Bytes> load_dat_wrap_key(std::string_view profile,
 Bytes derive_profile_dat_file_key(ByteView wrap_key, ByteView salt);
 
 Bytes encrypt_profile_dat(std::string_view private_key_base64, ByteView wrap_key);
+Bytes encrypt_profile_dat_with_password(std::string_view private_key_base64,
+                                       std::string_view password);
 
 std::string decrypt_profile_dat(ByteView raw, ByteView wrap_key);
+std::string decrypt_profile_dat_with_password(ByteView raw, std::string_view password);
 
 /// Decides whether a line is a peer address rather than a private key. Supplied
 /// by the caller because legacy files stored the two without a marker.
@@ -78,11 +85,13 @@ ProfileDatContents read_profile_dat_file(const std::filesystem::path& path,
                                          std::string_view profile,
                                          const std::filesystem::path& profile_data_dir,
                                          const PeerAddressPredicate& is_peer = {},
-                                         bool create_wrap_key = true);
+                                         bool create_wrap_key = true,
+                                         std::string_view password = {});
 
 void write_encrypted_profile_dat(const std::filesystem::path& path,
                                  std::string_view private_key_base64,
                                  std::string_view profile,
-                                 const std::filesystem::path& profile_data_dir);
+                                 const std::filesystem::path& profile_data_dir,
+                                 std::string_view password = {});
 
 }  // namespace i2pchat::storage

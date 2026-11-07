@@ -24,8 +24,10 @@ from i2pchat.router.settings import (
     MAX_TUNNEL_LENGTH,
     MIN_TUNNEL_LENGTH,
     RouterSettings,
+    allow_remote_system_sam,
     bundled_i2pd_allowed,
     load_router_settings,
+    system_sam_host_error,
     normalize_router_settings,
     router_runtime_dir,
     save_router_settings,
@@ -65,6 +67,15 @@ from i2pchat.presentation.reply_format import format_reply_quote
 from i2pchat.core.live_peer_session import max_concurrent_live_sessions
 from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _should_start_auto_connect_retry
 from i2pchat.presentation.status_presentation import build_status_presentation
+from i2pchat.presentation.i18n import set_language, tr
+from i2pchat.presentation.readiness import ReadinessTracker
+from i2pchat.presentation.notices import (
+    Notice,
+    NoticeLog,
+    classify_error,
+    classify_notice,
+    render_notice,
+)
 from i2pchat.presentation.notification_prefs import (
     notification_body_for_display,
     should_play_notification_sound,
@@ -2000,6 +2011,16 @@ def load_compose_enter_sends() -> bool:
 def save_compose_enter_sends(enter_sends: bool) -> None:
     data = _load_ui_prefs()
     data["compose_enter_sends"] = bool(enter_sends)
+    _save_ui_prefs(data)
+
+
+def load_verbose_log_enabled() -> bool:
+    return _load_ui_prefs().get("verbose_log") is True
+
+
+def save_verbose_log_enabled(enabled: bool) -> None:
+    data = _load_ui_prefs()
+    data["verbose_log"] = bool(enabled)
     _save_ui_prefs(data)
 
 
@@ -5251,6 +5272,7 @@ class ContactRowWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._addr = record.addr
         self._badges = ""
+        self._link_state = ""
         self._display_name = record.display_name.strip()
         self._base_sub = _sidebar_row_preview_one_line(
             (record.last_preview or record.note or "").strip()
@@ -5278,7 +5300,16 @@ class ContactRowWidget(QtWidgets.QWidget):
         sf = self._subtitle.font()
         sf.setPointSize(max(9, sf.pointSize() - 1))
         self._subtitle.setFont(sf)
-        layout.addWidget(self._title)
+        self._link_dot = QtWidgets.QLabel("", self)
+        self._link_dot.setObjectName("ContactRowLinkDot")
+        self._link_dot.setFixedWidth(12)
+        self._link_dot.hide()
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(4)
+        title_row.addWidget(self._link_dot, 0)
+        title_row.addWidget(self._title, 1)
+        layout.addLayout(title_row)
         layout.addWidget(self._subtitle)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         # Одна фиксированная высота строки: иначе QListWidget и элипсис при узкой панели дают «прыгающие» строки.
@@ -5320,7 +5351,8 @@ class ContactRowWidget(QtWidgets.QWidget):
     def _sync_row_tooltip(self) -> None:
         addr = (self._addr or "").strip()
         name = self._display_name
-        badge_text = f"\n{self._badges}" if self._badges else ""
+        bits = [b for b in (self._link_caption(), self._badges) if b]
+        badge_text = "\n" + " · ".join(bits) if bits else ""
         if name:
             self.setToolTip(f"{name}\n{addr}{badge_text}")
         else:
@@ -5333,9 +5365,10 @@ class ContactRowWidget(QtWidgets.QWidget):
         hm = getattr(self, "_sidebar_row_h_margin", 10)
         # −1: запас от субпиксельного клиппинга QLabel по горизонтали.
         w = max(1, self.width() - 2 * hm - 1)
+        title_w = w - (16 if self._link_dot.isVisible() else 0)
         fm = self._title.fontMetrics()
         self._title.setText(
-            fm.elidedText(self._full_title, QtCore.Qt.TextElideMode.ElideMiddle, w)
+            fm.elidedText(self._full_title, QtCore.Qt.TextElideMode.ElideMiddle, max(1, title_w))
         )
         fm2 = self._subtitle.fontMetrics()
         sub_text = self._full_sub if self._full_sub else " "
@@ -5373,6 +5406,29 @@ class ContactRowWidget(QtWidgets.QWidget):
             self._full_sub = f"{sub_text} · {self._badges}" if sub_text else self._badges
         else:
             self._full_sub = sub_text
+        self._sync_row_tooltip()
+        self._apply_elide()
+
+    _LINK_COLORS = {"secure": "#2fbf71", "connecting": "#d4a72c"}
+
+    def _link_caption(self) -> str:
+        if self._link_state in ("secure", "connecting"):
+            return tr(f"peer_link.{self._link_state}")
+        return ""
+
+    def set_link_state(self, state: str) -> None:
+        """Show a coloured dot for a live (``secure``) or connecting contact."""
+        state = state if state in self._LINK_COLORS else ""
+        if state == self._link_state:
+            return
+        self._link_state = state
+        if state:
+            self._link_dot.setText("●")
+            self._link_dot.setStyleSheet(f"color: {self._LINK_COLORS[state]};")
+            self._link_dot.setToolTip(self._link_caption())
+            self._link_dot.show()
+        else:
+            self._link_dot.hide()
         self._sync_row_tooltip()
         self._apply_elide()
 
@@ -5749,6 +5805,20 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
         )
         form.addRow("SAM host", self._system_host)
         form.addRow("SAM port", _wrap_history_numeric_row(self._system_port))
+        self._allow_remote = QtWidgets.QCheckBox(
+            "Router on another machine (local network or Yggdrasil). "
+            "The SAM connection is not encrypted.",
+            self,
+        )
+        self._allow_remote.setChecked(
+            settings.allow_remote_sam or allow_remote_system_sam()
+        )
+        form.addRow("", self._allow_remote)
+        self._host_error = QtWidgets.QLabel("", self)
+        self._host_error.setWordWrap(True)
+        self._host_error.setObjectName("RouterHostError")
+        self._host_error.hide()
+        form.addRow("", self._host_error)
 
         form_wrap = QtWidgets.QWidget(self)
         form_outer = QtWidgets.QVBoxLayout(form_wrap)
@@ -5856,7 +5926,7 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
         bb.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setObjectName(
             "SecondaryButton"
         )
-        bb.accepted.connect(self.accept)
+        bb.accepted.connect(self._on_accept)
         bb.rejected.connect(self.reject)
         _add_centered_dialog_buttons(v, bb)
 
@@ -5869,6 +5939,7 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
         use_system = self._opt_system.isChecked()
         self._system_host.setEnabled(use_system)
         self._system_port.setEnabled(use_system)
+        self._allow_remote.setEnabled(use_system)
         bundled_enabled = (not use_system) and bundled_i2pd_allowed()
         self._bundled_sam_port.setEnabled(bundled_enabled)
         self._bundled_http_proxy_port.setEnabled(bundled_enabled)
@@ -5880,6 +5951,19 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
                 "Bundled router is disabled in this build. Configure a system i2pd SAM endpoint."
             )
 
+    def _on_accept(self) -> None:
+        if self._opt_system.isChecked():
+            error = system_sam_host_error(
+                self._system_host.text(),
+                allow_remote=self._allow_remote.isChecked(),
+            )
+            if error:
+                self._host_error.setText(error)
+                self._host_error.show()
+                return
+        self._host_error.hide()
+        self.accept()
+
     def settings(self) -> RouterSettings:
         backend = (
             "bundled"
@@ -5890,6 +5974,7 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
             backend=backend,
             system_sam_host=self._system_host.text().strip() or "127.0.0.1",
             system_sam_port=int(self._system_port.value()),
+            allow_remote_sam=self._allow_remote.isChecked(),
             bundled_sam_host="127.0.0.1",
             bundled_sam_port=int(self._bundled_sam_port.value()),
             bundled_http_proxy_port=int(self._bundled_http_proxy_port.value()),
@@ -6392,6 +6477,157 @@ def _sidebar_saved_peer_sort_key(rec: ContactRecord) -> tuple[str, str]:
     return (primary, (rec.addr or "").lower())
 
 
+# Core service kinds routed to the Status page instead of the chat transcript.
+_SERVICE_MESSAGE_KINDS = frozenset({"info", "success", "disconnect", "system"})
+
+
+class StatusPanel(QtWidgets.QWidget):
+    """Readiness checklist, router advice and the service-notice log."""
+
+    back_to_chats = QtCore.pyqtSignal()
+    restart_router_requested = QtCore.pyqtSignal()
+    router_settings_requested = QtCore.pyqtSignal()
+    verbose_toggled = QtCore.pyqtSignal(bool)
+
+    _CHECK_MARKS = {"ok": ("✓", "#2fbf71"), "failed": ("✗", "#e5484d"), "pending": ("…", "#d4a72c")}
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusPanel")
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(10)
+
+        head = QtWidgets.QHBoxLayout()
+        self._title = QtWidgets.QLabel(tr("status.not_ready"), self)
+        tf = self._title.font()
+        tf.setPointSize(tf.pointSize() + 4)
+        tf.setBold(True)
+        self._title.setFont(tf)
+        self._chats_btn = QtWidgets.QPushButton(tr("status.chats") + " →", self)
+        self._chats_btn.clicked.connect(self.back_to_chats.emit)
+        head.addWidget(self._title, 1)
+        head.addWidget(self._chats_btn, 0)
+        outer.addLayout(head)
+
+        self._problem = QtWidgets.QFrame(self)
+        self._problem.setObjectName("StatusProblemFrame")
+        self._problem.setStyleSheet(
+            "QFrame#StatusProblemFrame { border: 1px solid #e5484d; border-radius: 8px; }"
+        )
+        pl = QtWidgets.QVBoxLayout(self._problem)
+        pl.setContentsMargins(12, 10, 12, 10)
+        self._problem_title = QtWidgets.QLabel(tr("status.problem"), self._problem)
+        pf = self._problem_title.font()
+        pf.setBold(True)
+        self._problem_title.setFont(pf)
+        self._problem_text = QtWidgets.QLabel("", self._problem)
+        self._problem_text.setWordWrap(True)
+        self._problem_text.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        buttons = QtWidgets.QHBoxLayout()
+        self._restart_btn = QtWidgets.QPushButton(tr("status.restart_router"), self._problem)
+        self._restart_btn.clicked.connect(self.restart_router_requested.emit)
+        self._settings_btn = QtWidgets.QPushButton(tr("status.router_settings"), self._problem)
+        self._settings_btn.clicked.connect(self.router_settings_requested.emit)
+        buttons.addWidget(self._restart_btn)
+        buttons.addWidget(self._settings_btn)
+        buttons.addStretch(1)
+        pl.addWidget(self._problem_title)
+        pl.addWidget(self._problem_text)
+        pl.addLayout(buttons)
+        self._problem.hide()
+        outer.addWidget(self._problem)
+
+        self._checks = QtWidgets.QLabel("", self)
+        self._checks.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self._checks.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        outer.addWidget(self._checks)
+
+        events_title = QtWidgets.QLabel(tr("status.events"), self)
+        ef = events_title.font()
+        ef.setBold(True)
+        events_title.setFont(ef)
+        outer.addWidget(events_title)
+        self._events = QtWidgets.QPlainTextEdit(self)
+        self._events.setReadOnly(True)
+        self._events.setObjectName("StatusEventsLog")
+        outer.addWidget(self._events, 2)
+
+        self._verbose_check = QtWidgets.QCheckBox(tr("status.verbose"), self)
+        self._verbose_check.setToolTip(tr("status.verbose_hint"))
+        self._verbose_check.toggled.connect(self._on_verbose_toggled)
+        outer.addWidget(self._verbose_check)
+        self._verbose = QtWidgets.QPlainTextEdit(self)
+        self._verbose.setReadOnly(True)
+        self._verbose.setObjectName("StatusVerboseLog")
+        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        self._verbose.setFont(mono)
+        self._verbose.hide()
+        outer.addWidget(self._verbose, 2)
+        self._events_sig: tuple[int, str] = (0, "")
+        self._verbose_sig: tuple[int, str] = (0, "")
+
+    def _on_verbose_toggled(self, on: bool) -> None:
+        self._verbose.setVisible(on)
+        self.verbose_toggled.emit(on)
+
+    def set_verbose_enabled(self, on: bool) -> None:
+        blocker = QtCore.QSignalBlocker(self._verbose_check)
+        self._verbose_check.setChecked(on)
+        del blocker
+        self._verbose.setVisible(on)
+
+    @staticmethod
+    def _set_lines(edit: QtWidgets.QPlainTextEdit, lines: list[str]) -> None:
+        bar = edit.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        edit.setPlainText("\n".join(lines))
+        if at_bottom:
+            bar.setValue(bar.maximum())
+
+    def update_view(
+        self,
+        *,
+        ready: bool,
+        checks: list[tuple[str, str, str]],
+        issue_text: Optional[str],
+        can_restart: bool,
+        events: list[str],
+        verbose: list[str],
+    ) -> None:
+        self._title.setText(tr("status.ready") if ready else tr("status.not_ready"))
+        if issue_text:
+            self._problem_text.setText(issue_text)
+            self._restart_btn.setVisible(can_restart)
+            self._problem.show()
+        else:
+            self._problem.hide()
+        rows = []
+        for label, value, state in checks:
+            mark, color = self._CHECK_MARKS.get(state, ("–", "#8a8f98"))
+            state_text = tr(f"status.state.{state}" if state in ("ok", "failed", "pending") else "status.state.off")
+            rows.append(
+                f"<tr><td style='color:{color}; padding-right:8px'><b>{mark}</b></td>"
+                f"<td style='padding-right:12px'><b>{html.escape(label)}</b></td>"
+                f"<td style='padding-right:12px'>{html.escape(value)}</td>"
+                f"<td style='color:{color}'>{html.escape(state_text)}</td></tr>"
+            )
+        self._checks.setText("<table>" + "".join(rows) + "</table>")
+        sig = (len(events), events[-1] if events else "")
+        if sig != self._events_sig:
+            self._events_sig = sig
+            self._set_lines(self._events, events or [tr("status.no_events")])
+        if self._verbose_check.isChecked():
+            vsig = (len(verbose), verbose[-1] if verbose else "")
+            if vsig != self._verbose_sig:
+                self._verbose_sig = vsig
+                self._set_lines(self._verbose, verbose)
+
+
 class ChatWindow(QtWidgets.QMainWindow):
     # Ниже этого порога ширины лейбла статуса показывается сокращённая строка.
     _STATUS_LABEL_COMPACT_PX = 700
@@ -6442,6 +6678,9 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._window_title_base = f"I2PChat @ {clean_profile}"
         self._unread_by_peer: dict[str, int] = {}
         self._status_send_in_flight = False
+        self._notice_log = NoticeLog()
+        self._verbose_log_enabled = load_verbose_log_enabled()
+        self._readiness = ReadinessTracker()
         # closeEvent: один раз планируем async shutdown; не вызываем event.accept()
         # до его завершения — иначе Qt закрывает окно и qasync выходит из run_forever()
         # раньше, чем отработают core/router shutdown.
@@ -6929,6 +7168,12 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.contacts_list.setViewportMargins(0, 0, 0, 0)
         self._contacts_list_viewport = self.contacts_list.viewport()
         self._contacts_list_viewport.installEventFilter(self)
+        self.status_nav_btn = QtWidgets.QPushButton(tr("status.title"), self.contacts_sidebar)
+        self.status_nav_btn.setObjectName("StatusNavButton")
+        self.status_nav_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.status_nav_btn.setCheckable(True)
+        self.status_nav_btn.clicked.connect(lambda: self._show_status_page())
+        sidebar_layout.addWidget(self.status_nav_btn)
         sidebar_layout.addWidget(groups_header)
         sidebar_layout.addWidget(self.contacts_list, 1)
 
@@ -6964,8 +7209,26 @@ class ChatWindow(QtWidgets.QMainWindow):
         for _hi in range(self._compose_vertical_splitter.count() - 1):
             self._compose_vertical_splitter.handle(_hi).setCursor(_v_split_cursor)
 
-        right_column_layout.addWidget(self._compose_vertical_splitter, 1)
-        right_column_layout.addWidget(actions_container)
+        self._center_stack = QtWidgets.QStackedWidget(self.right_chat_column)
+        self._chat_page = QtWidgets.QWidget(self._center_stack)
+        chat_page_layout = QtWidgets.QVBoxLayout(self._chat_page)
+        chat_page_layout.setContentsMargins(0, 0, 0, 0)
+        chat_page_layout.setSpacing(self._UI_GRID_PX)
+        chat_page_layout.addWidget(self._compose_vertical_splitter, 1)
+        chat_page_layout.addWidget(actions_container)
+        self.status_panel = StatusPanel(self._center_stack)
+        self.status_panel.set_verbose_enabled(self._verbose_log_enabled)
+        self.status_panel.back_to_chats.connect(self._show_chat_page)
+        self.status_panel.verbose_toggled.connect(self._on_verbose_log_toggled)
+        self.status_panel.router_settings_requested.connect(
+            self._open_router_settings_dialog
+        )
+        self.status_panel.restart_router_requested.connect(
+            self._restart_bundled_router_clicked
+        )
+        self._center_stack.addWidget(self._chat_page)
+        self._center_stack.addWidget(self.status_panel)
+        right_column_layout.addWidget(self._center_stack, 1)
 
         right_pack_layout = QtWidgets.QHBoxLayout(self.contacts_right_pack)
         right_pack_layout.setContentsMargins(self._CONTACTS_STRIP_EDGE_COLLAPSED_PX, 0, 0, 0)
@@ -7172,6 +7435,14 @@ class ChatWindow(QtWidgets.QMainWindow):
             "Clear history", self._on_clear_history_clicked, tool_tip=menu_tt.TT_CLEAR_HISTORY
         )
         self.more_actions_popup.add_action(
+            "Incoming files…",
+            self._configure_incoming_files,
+        )
+        self.more_actions_popup.add_action(
+            "Profile password…",
+            self._configure_profile_password,
+        )
+        self.more_actions_popup.add_action(
             "History retention…",
             self._configure_history_retention,
             tool_tip=menu_tt.TT_HISTORY_RETENTION,
@@ -7188,6 +7459,10 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._compose_enter_sends_toggle_label(),
             self._on_toggle_compose_enter_sends_clicked,
             tool_tip=menu_tt.TT_COMPOSE_ENTER_SENDS_TOGGLE,
+        )
+        self.more_actions_popup.add_action(
+            tr("status.title"),
+            self._show_status_page,
         )
         self.more_actions_popup.add_separator()
         self._notify_sound_enabled = load_notify_sound_enabled()
@@ -7223,6 +7498,80 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._refresh_connection_buttons()
         QtCore.QTimer.singleShot(0, self._balance_contacts_splitter_initial)
         QtCore.QTimer.singleShot(0, self._balance_compose_splitter_initial)
+        self._status_refresh_timer = QtCore.QTimer(self)
+        self._status_refresh_timer.setInterval(3000)
+        self._status_refresh_timer.timeout.connect(self._refresh_status_panel)
+        self._status_refresh_timer.start()
+        self._show_status_page()
+
+    # --- Status page -------------------------------------------------------
+
+    def _status_page_visible(self) -> bool:
+        return self._center_stack.currentWidget() is self.status_panel
+
+    def _show_status_page(self) -> None:
+        self._center_stack.setCurrentWidget(self.status_panel)
+        self.status_nav_btn.setChecked(True)
+        self._refresh_status_panel()
+
+    def _show_chat_page(self) -> None:
+        self._center_stack.setCurrentWidget(self._chat_page)
+        self.status_nav_btn.setChecked(False)
+
+    def _on_verbose_log_toggled(self, on: bool) -> None:
+        self._verbose_log_enabled = bool(on)
+        save_verbose_log_enabled(self._verbose_log_enabled)
+        self._refresh_status_panel()
+
+    def _record_notice(self, notice: Notice) -> None:
+        self._notice_log.add(notice)
+        if notice.is_peer_state:
+            QtCore.QTimer.singleShot(0, self._refresh_contact_link_states)
+        if self._status_page_visible():
+            self._refresh_status_panel()
+
+    def _refresh_status_panel(self) -> None:
+        if not hasattr(self, "status_panel"):
+            return
+        readiness = self._readiness.evaluate(
+            core=self.core,
+            router_settings=self._router_settings,
+            bundled_manager=self._bundled_router_manager,
+            active_sam=self._active_sam_address,
+        )
+        events = [f"{ts}  {render_notice(n)}" for ts, n in self._notice_log.user]
+        verbose = (
+            [f"{ts}  {n.text}" for ts, n in self._notice_log.verbose]
+            if self._verbose_log_enabled
+            else []
+        )
+        self.status_panel.update_view(
+            ready=readiness.ready,
+            checks=[(c.label, c.value or "—", c.state) for c in readiness.checks],
+            issue_text=readiness.issue_text,
+            can_restart=readiness.can_restart,
+            events=events,
+            verbose=verbose,
+        )
+        self._refresh_contact_link_states()
+
+    def _refresh_contact_link_states(self) -> None:
+        lst = self.contacts_list
+        core = self.core
+        for i in range(lst.count()):
+            item = lst.item(i)
+            if item is None or item.data(_SIDEBAR_LIST_ROLE) != "contact":
+                continue
+            row = lst.itemWidget(item)
+            if not isinstance(row, ContactRowWidget):
+                continue
+            link = "offline"
+            if core is not None:
+                try:
+                    link = core.peer_link_state(row.contact_addr)
+                except Exception:
+                    link = "offline"
+            row.set_link_state(link)
 
     def _profile_identity_key(self) -> bytes | None:
         core = self.core
@@ -7514,6 +7863,11 @@ class ChatWindow(QtWidgets.QMainWindow):
                     pinned=bool(info and info.pinned),
                     locked=False,
                 )
+                if self.core is not None:
+                    try:
+                        row.set_link_state(self.core.peer_link_state(rec.addr))
+                    except Exception:
+                        pass
                 row.activate.connect(self._on_contact_row_activated)
                 lst.addItem(item)
                 lst.setItemWidget(item, row)
@@ -7586,6 +7940,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         return True
 
     def _on_group_row_activated(self, group_id: str) -> None:
+        self._show_chat_page()
         if self._set_active_group(group_id):
             return
         self.handle_error(f"Could not open group: {group_id}")
@@ -8491,6 +8846,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         raw = (addr or "").strip()
         if not raw:
             return
+        self._show_chat_page()
         # Сразу выходим из группы: иначе при «плохом» адресе для normalize_peer_address
         # ранний return оставлял _active_group_id и личный чат не открывался.
         leaving_group = self._active_group_id is not None
@@ -9753,7 +10109,11 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._history_dirty = False
             self._history_flush_timer.stop()
 
-        if not direct_peer_offscreen:
+        if kind in _SERVICE_MESSAGE_KINDS:
+            notice = classify_notice(text, kind=kind, peer=msg.source_peer)
+            self._record_notice(notice)
+            self._show_notice_in_status_bar(notice)
+        elif not direct_peer_offscreen:
             self._append_item(
                 ChatItem(
                     kind=kind,
@@ -9967,7 +10327,23 @@ class ChatWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(str)
     def handle_system(self, text: str) -> None:
+        """Feedback for a local UI action: shown in the chat and logged on Status."""
         self._append_item(ChatItem(kind="system", timestamp="", sender="SYSTEM", text=text))
+        self._record_notice(Notice("ui.feedback", "user", (text or "").strip()))
+        self._refresh_sidebar_once_identity_ready()
+        self.refresh_status_label()
+        self._refresh_connection_buttons()
+
+    def _show_notice_in_status_bar(self, notice: Notice) -> None:
+        if notice.is_user and notice.severity in ("warning", "error"):
+            self._focus_status_bar(duration_ms=4600, event_text=render_notice(notice))
+
+    @QtCore.pyqtSlot(str)
+    def handle_core_system(self, text: str) -> None:
+        """Core service message: goes to the Status page, never into the chat."""
+        notice = classify_notice(text)
+        self._record_notice(notice)
+        self._show_notice_in_status_bar(notice)
         # After Ready / incoming accept: bind UI to the live peer so Send targets
         # the session that actually finished handshake (not a stale addr_edit).
         if self.core is not None and isinstance(text, str):
@@ -10002,9 +10378,16 @@ class ChatWindow(QtWidgets.QMainWindow):
             return
         self._last_error_text = text
         self._last_error_ts = now
-        self._append_item(ChatItem(kind="error", timestamp="", sender="ERROR", text=text))
+        notice = classify_error(text)
+        self._record_notice(notice)
+        if notice.code == "error.other":
+            self._append_item(ChatItem(kind="error", timestamp="", sender="ERROR", text=text))
         self.refresh_status_label()
-        self._focus_status_bar(duration_ms=4600, event_text=f"Error: {text}")
+        if notice.is_user:
+            self._focus_status_bar(
+                duration_ms=4600,
+                event_text=f"Error: {text}" if notice.code == "error.other" else render_notice(notice),
+            )
         self._refresh_connection_buttons()
 
     def _animate_transfer(self) -> None:
@@ -10187,15 +10570,19 @@ class ChatWindow(QtWidgets.QMainWindow):
     async def ask_incoming_file_accept(self, filename: str, size: int) -> bool:
         """Асинхронный запрос подтверждения входящего файла для core."""
         loop = asyncio.get_running_loop()
-        decision: asyncio.Future[bool] = loop.create_future()
+        decision: asyncio.Future[Optional[str]] = loop.create_future()
 
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle("Incoming file")
-        box.setText(f"Accept incoming file?\n\n{filename} ({size} bytes)")
+        box.setText(
+            f"Accept incoming file?\n\n{filename} ({size} bytes)\n\n"
+            "Accept uses the folder from Incoming files…. Save as… picks a place for this file."
+        )
         box.setStandardButtons(
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No
         )
+        save_as = box.addButton("Save as…", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
         # Не блокируем всё окно чата: можно писать в поле ввода, пока решаете принять файл.
         box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
@@ -10208,9 +10595,15 @@ class ChatWindow(QtWidgets.QMainWindow):
             except ValueError:
                 pass
             if not decision.done():
-                decision.set_result(
-                    result == int(QtWidgets.QMessageBox.StandardButton.Yes)
-                )
+                if box.clickedButton() is save_as:
+                    picked, _chosen_filter = QtWidgets.QFileDialog.getSaveFileName(
+                        self, "Save file", filename
+                    )
+                    decision.set_result(picked or None)
+                elif result == int(QtWidgets.QMessageBox.StandardButton.Yes):
+                    decision.set_result("")
+                else:
+                    decision.set_result(None)
             box.deleteLater()
 
         box.finished.connect(_finished)
@@ -10420,7 +10813,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             on_status=self.handle_status,
             on_message=self.handle_message,
             on_peer_changed=self.handle_peer_changed,
-            on_system=self.handle_system,
+            on_system=self.handle_core_system,
             on_error=self.handle_error,
             on_file_event=on_file,
             on_file_offer=self.ask_incoming_file_accept,
@@ -10442,7 +10835,32 @@ class ChatWindow(QtWidgets.QMainWindow):
             "on_outbound_delivery_update",
             self.handle_outbound_delivery_update,
         )
+        core.on_profile_password = self._ask_profile_password
         return core
+
+    def _ask_profile_password(self) -> str:
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Profile password",
+            "This profile will not open without its password.",
+            QtWidgets.QLineEdit.EchoMode.Password,
+        )
+        return text if ok else ""
+
+    def _offer_new_profile_password(self) -> None:
+        if self.core is None or is_transient_profile_name(self.profile):
+            return
+        path = self.core._profile_path()
+        if os.path.exists(path):
+            return
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Profile password",
+            "Optional. Leave empty to open this profile without a password.",
+            QtWidgets.QLineEdit.EchoMode.Password,
+        )
+        if ok and text.strip():
+            self.core.profile_password = text.strip()
 
     def _persist_system_sam_backend(self, settings: RouterSettings) -> RouterSettings:
         fallback = normalize_router_settings(
@@ -12195,6 +12613,61 @@ class ChatWindow(QtWidgets.QMainWindow):
             self.handle_system("Privacy mode OFF.")
 
     @QtCore.pyqtSlot()
+    def _configure_profile_password(self) -> None:
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Profile password",
+            "New password. Leave empty to remove it. Contacts and history stay sealed by the identity key.",
+            QtWidgets.QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return
+        try:
+            self.core.set_profile_password(text)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Profile password", str(exc))
+            return
+        self.handle_system(
+            "Profile password updated." if text.strip() else "Profile password removed."
+        )
+
+    @QtCore.pyqtSlot()
+    def _configure_incoming_files(self) -> None:
+        from i2pchat.storage.media_prefs import load_media_prefs, save_media_prefs
+
+        files_dir, images_dir, ephemeral = load_media_prefs()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Incoming files")
+        layout = QtWidgets.QFormLayout(dlg)
+        files = QtWidgets.QLineEdit(files_dir, dlg)
+        images = QtWidgets.QLineEdit(images_dir, dlg)
+        files.setPlaceholderText("Empty = downloads/")
+        images.setPlaceholderText("Empty = images/")
+        ephemeral_box = QtWidgets.QCheckBox(
+            "Do not keep files. They are deleted when I2PChat closes or you switch profile.",
+            dlg,
+        )
+        ephemeral_box.setChecked(ephemeral)
+        layout.addRow("Files folder", files)
+        layout.addRow("Images folder", images)
+        layout.addRow(ephemeral_box)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        save_media_prefs(
+            files_dir=files.text(),
+            images_dir=images.text(),
+            ephemeral=ephemeral_box.isChecked(),
+        )
+        self.handle_system("Incoming file folders updated.")
+
+    @QtCore.pyqtSlot()
     def _configure_history_retention(self) -> None:
         dlg = _HistoryRetentionDialog(
             self,
@@ -12267,7 +12740,8 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Export profile backup", str(exc))
             return
         self.handle_system(
-            f"Profile backup exported: {summary.file_count} file(s), {summary.history_files} history file(s)."
+            "Profile backup exported. This file moves the address and contacts between a computer and a phone. "
+            f"{summary.file_count} file(s), {summary.history_files} history file(s)."
         )
 
     @QtCore.pyqtSlot()
@@ -12293,7 +12767,9 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Import profile backup", str(exc))
             return
         self.handle_system(
-            f"Profile backup imported as '{summary.target_profile}' ({summary.restored_files} file(s))."
+            f"Profile backup imported as '{summary.target_profile}' ({summary.restored_files} file(s)). "
+            "The address and contacts came from the other device. "
+            "A profile password, if it had one, is asked again on open."
         )
         self._run_switch_profile_task(summary.target_profile)
 
@@ -12956,6 +13432,9 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._flush_compose_drafts_to_disk()
         self._save_history_if_needed()
         self._history_flush_timer.stop()
+        from i2pchat.storage.media_prefs import clear_ephemeral_media
+
+        clear_ephemeral_media()
         await self.core.shutdown()
         self._history_loaded_for_peer = None
         self._loaded_group_history_id = None
@@ -12979,6 +13458,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._update_unread_chrome()
         self.refresh_status_label()
         self._refresh_connection_buttons()
+        self._offer_new_profile_password()
         await self.core.init_session()
         # После init — снова с диска (возможны записи книги во время длинной инициализации).
         self._load_contacts_book()
@@ -13136,6 +13616,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
 
     async def start_core(self) -> None:
+        self._readiness.session_starting()
         try:
             sam_address = await self._ensure_router_backend_ready()
             self._active_sam_address = sam_address
@@ -13147,6 +13628,8 @@ class ChatWindow(QtWidgets.QMainWindow):
             self.core = None
             self._sidebar_identity_refresh_core_id = None
             err_msg = str(e).strip() or type(e).__name__
+            self._readiness.session_failed(err_msg, self._router_settings)
+            QtCore.QTimer.singleShot(0, self._show_status_page)
             QtCore.QTimer.singleShot(
                 0,
                 lambda m=err_msg: self.handle_error(
@@ -13341,6 +13824,9 @@ class ChatWindow(QtWidgets.QMainWindow):
 
         async def _shutdown() -> None:
             try:
+                from i2pchat.storage.media_prefs import clear_ephemeral_media
+
+                clear_ephemeral_media()
                 try:
                     if self.core is not None:
                         await asyncio.wait_for(self.core.shutdown(), timeout=15.0)
@@ -13402,6 +13888,7 @@ def main() -> None:
     else:
         app = QtWidgets.QApplication.instance() or I2PChatQApplication(sys.argv)
     apply_tooltip_handling(app)
+    set_language(QtCore.QLocale.system().name())
 
     # Единый стиль и шрифт для всех платформ (более предсказуемый рендеринг)
     app.setStyle("Fusion")
