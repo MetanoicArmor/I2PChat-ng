@@ -213,7 +213,7 @@ ldd_out="$(mktemp)"
 ldd_err="$(mktemp)"
 LD_LIBRARY_PATH="${DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ldd "$I2PD" >"$ldd_out" 2>"$ldd_err" || true
 
-missing="$(grep 'not found' "$ldd_out" || true)"
+missing="$(grep ' => not found' "$ldd_out" || true)"
 if [[ -n "$missing" ]]; then
   echo "WARN: bundled i2pd still has unresolved libs (common on Arch if i2pd was built for another Boost):" >&2
   printf '%s\n' "$missing" >&2
