@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.5.4** | [RELEASE_1.5.4.md](RELEASE_1.5.4.md) — Android bundled i2pd via I2pdNative (JNI_OnLoad fix); shorter compact group invites |
 | **1.5.3** | [RELEASE_1.5.3.md](RELEASE_1.5.3.md) — Status section, remote SAM opt-in, file folders, auto-reconnect, optional profile password, GitHub update check |
 | **1.5.2** | [RELEASE_1.5.2.md](RELEASE_1.5.2.md) — `python` is the shipping desktop again (PyQt6 + Textual); 1.5.1 Trust gate on Python and Android; tag publish verifies assets before the release goes public |
 | **1.5.1** | [RELEASE_1.5.1.md](RELEASE_1.5.1.md) — C++ line: unknown peers stay out until Trust; group roster cannot be replaced by a remote frame; Android armeabi-v7a sideload APK |
