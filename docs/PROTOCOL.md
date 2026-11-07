@@ -382,27 +382,27 @@ manuals for user-visible requirements). User-facing behavior: [MANUAL_EN.md](MAN
 Any current member can create a **copyable invite token** (same trust model as
 sharing a destination address). The invite is **not** a group transport frame.
 
-New invites are an **opaque sealed blob**: the signed JSON roster snapshot is
-wrapped in a NaCl SecretBox whose random key is carried in the token, then
-encoded as unpadded base64url. The shareable string has no `__I2PCHAT_…`
-prefix and does not contain the group title, member destinations, or other
-metadata in plaintext. Anyone who possesses the full token can decrypt it;
-Ed25519 signature verification still binds the roster to the inviter's
-handshake signing key.
+New invites are an **opaque sealed blob**. The roster is a compact binary
+document (version byte 3): each standard base32 destination is 32 raw bytes,
+and the Ed25519 signature and signing key are raw bytes rather than hex. That
+document is wrapped in a NaCl SecretBox whose random key is carried in the
+token, then encoded as unpadded base64url. The shareable string has no
+`__I2PCHAT_…` prefix and does not contain the group title, member destinations,
+or other metadata in plaintext. Anyone who possesses the full token can decrypt
+it; signature verification still binds the roster to the inviter's handshake
+signing key.
 
 ```text
-<base64url(wrap_key || SecretBox(JSON))>
+<base64url(wrap_key || SecretBox(compact roster))>
 ```
 
-Inner JSON (after decrypt) remains signed invite v2:
+Older sealed JSON (v2) and `__I2PCHAT_GROUP_INVITE__:` + plaintext JSON tokens
+are still accepted on redeem. Newly created invites use the compact form.
+v1 unsigned invites are rejected. The previous JSON body was:
 
 ```json
 {"v":2,"invite_id":"...","group_id":"...","title":"...","members":["..."],"epoch":N,"inviter_id":"...","inviter_signing_pub":"...","created_at":"...","expires_at":null,"signature":"..."}
 ```
-
-Legacy `__I2PCHAT_GROUP_INVITE__:` + plaintext JSON tokens are still accepted
-on redeem so older copied invites keep working; newly created invites are
-always sealed.
 
 Implementation: `i2pchat/groups/invite.py`, core APIs `create_group_invite` /
 `join_group_from_invite` in `i2pchat/core/i2p_chat_core.py`.

@@ -178,6 +178,30 @@ std::string base32_encode_lower(ByteView data) {
     return out;
 }
 
+std::optional<Bytes> base32_decode(std::string_view text) {
+    Bytes out;
+    out.reserve((text.size() * 5) / 8);
+    std::uint32_t accumulator = 0;
+    int bits = 0;
+    for (const char ch : text) {
+        const char upper = (ch >= 'a' && ch <= 'z') ? static_cast<char>(ch - 'a' + 'A') : ch;
+        const auto pos = kB32Alphabet.find(upper);
+        if (pos == std::string_view::npos) {
+            return std::nullopt;
+        }
+        accumulator = (accumulator << 5) | static_cast<std::uint32_t>(pos);
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<Byte>((accumulator >> bits) & 0xFFu));
+        }
+    }
+    if (bits > 0 && (accumulator & ((1u << bits) - 1u)) != 0) {
+        return std::nullopt;
+    }
+    return out;
+}
+
 std::optional<std::size_t> utf8_length(std::string_view text) {
     std::size_t count = 0;
     std::size_t i = 0;

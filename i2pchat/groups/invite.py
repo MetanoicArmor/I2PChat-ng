@@ -154,6 +154,245 @@ def _canonical_invite_bytes(
     return _INVITE_SIG_DOMAIN + b"|" + body.encode("utf-8")
 
 
+_COMPACT_VERSION = 3
+_COMPACT_DOMAIN = b"I2PCHAT-GROUP-INVITE-v3"
+_MEMBER_RAW = 0x01
+_MEMBER_TEXT = 0x00
+_B32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def _b32_decode(text: str) -> bytes | None:
+    acc = 0
+    bits = 0
+    out = bytearray()
+    for ch in text:
+        pos = _B32_ALPHABET.find(ch.lower())
+        if pos < 0:
+            return None
+        acc = (acc << 5) | pos
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    if bits and (acc & ((1 << bits) - 1)):
+        return None
+    return bytes(out)
+
+
+def _b32_encode(raw: bytes) -> str:
+    acc = 0
+    bits = 0
+    out: list[str] = []
+    for value in raw:
+        acc = (acc << 8) | value
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(_B32_ALPHABET[(acc >> bits) & 0x1F])
+    if bits:
+        out.append(_B32_ALPHABET[(acc << (5 - bits)) & 0x1F])
+    return "".join(out)
+
+
+def _pack_member(member: str) -> bytes | None:
+    raw = _b32_decode(member)
+    if raw is not None and len(raw) == 32 and _b32_encode(raw) == member:
+        return bytes((_MEMBER_RAW,)) + raw
+    encoded = member.encode("utf-8")
+    if len(encoded) > 255:
+        return None
+    return bytes((_MEMBER_TEXT, len(encoded))) + encoded
+
+
+def _u32(value: int) -> bytes:
+    return int(value).to_bytes(4, "big")
+
+
+def _unix_seconds(value: datetime | None) -> int | None:
+    if value is None:
+        return 0
+    secs = int(value.timestamp())
+    if secs < 0 or secs > 0xFFFFFFFF:
+        return None
+    return secs
+
+
+def _try_compact_plaintext(
+    invite: GroupInvite,
+    *,
+    signing_seed: bytes,
+    inviter_signing_pub: bytes,
+    created_at: datetime,
+    expires_at: datetime | None,
+) -> bytes | None:
+    """Binary roster. None means a field does not fit and JSON should be used."""
+    members = invite.members
+    if not members or len(members) > 255:
+        return None
+    try:
+        inviter_index = members.index(invite.inviter_id)
+    except ValueError:
+        return None
+    group_id = invite.group_id.encode("utf-8")
+    invite_id = invite.invite_id.encode("utf-8")
+    title = (invite.title or "").encode("utf-8")
+    if (
+        not group_id
+        or len(group_id) > 255
+        or not invite_id
+        or len(invite_id) > 255
+        or len(title) > 512
+        or invite.epoch < 0
+        or invite.epoch > 0xFFFFFFFF
+    ):
+        return None
+    created_unix = _unix_seconds(created_at)
+    expires_unix = _unix_seconds(expires_at) if expires_at is not None else 0
+    if created_unix is None or expires_unix is None:
+        return None
+    body = bytearray()
+    body.append(_COMPACT_VERSION)
+    body.append(1 if expires_at is not None else 0)
+    body += _u32(invite.epoch)
+    body += _u32(created_unix)
+    body += _u32(expires_unix)
+    body.append(inviter_index)
+    body.append(len(group_id))
+    body += group_id
+    body.append(len(invite_id))
+    body += invite_id
+    body += len(title).to_bytes(2, "big")
+    body += title
+    body.append(len(members))
+    for member in members:
+        packed = _pack_member(member)
+        if packed is None:
+            return None
+        body += packed
+    body += inviter_signing_pub
+    signature = crypto.sign_data(signing_seed, _COMPACT_DOMAIN + b"|" + bytes(body))
+    return bytes(body) + signature
+
+
+class _Cursor:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._at = 0
+        self.ok = True
+
+    def u8(self) -> int:
+        if self._at >= len(self._data):
+            self.ok = False
+            return 0
+        value = self._data[self._at]
+        self._at += 1
+        return value
+
+    def u16(self) -> int:
+        return (self.u8() << 8) | self.u8()
+
+    def u32(self) -> int:
+        value = 0
+        for _ in range(4):
+            value = (value << 8) | self.u8()
+        return value
+
+    def take(self, n: int) -> bytes:
+        if not self.ok or self._at + n > len(self._data):
+            self.ok = False
+            return b""
+        chunk = self._data[self._at : self._at + n]
+        self._at += n
+        return chunk
+
+    @property
+    def at(self) -> int:
+        return self._at
+
+
+def _decode_compact(plain: bytes) -> GroupInvite:
+    if len(plain) < 96 or plain[0] != _COMPACT_VERSION:
+        raise ValueError("Invalid group invite payload")
+    signature = plain[-64:]
+    body_and_key = plain[:-64]
+    pub = body_and_key[-32:]
+    signed_body = body_and_key[:-32]
+    if not crypto.verify_signature(pub, _COMPACT_DOMAIN + b"|" + signed_body + pub, signature):
+        raise ValueError("Group invite signature verification failed")
+    reader = _Cursor(signed_body)
+    version = reader.u8()
+    flags = reader.u8()
+    epoch = reader.u32()
+    created_unix = reader.u32()
+    expires_unix = reader.u32()
+    inviter_index = reader.u8()
+    group_id = reader.take(reader.u8())
+    invite_id = reader.take(reader.u8())
+    title_raw = reader.take(reader.u16())
+    member_count = reader.u8()
+    members: list[str] = []
+    for _ in range(member_count):
+        if not reader.ok:
+            break
+        tag = reader.u8()
+        if tag == _MEMBER_RAW:
+            raw = reader.take(32)
+            if len(raw) != 32:
+                reader.ok = False
+                break
+            members.append(_b32_encode(raw))
+        elif tag == _MEMBER_TEXT:
+            text = reader.take(reader.u8())
+            if not text:
+                reader.ok = False
+                break
+            try:
+                members.append(text.decode("utf-8"))
+            except UnicodeDecodeError:
+                reader.ok = False
+                break
+        else:
+            reader.ok = False
+            break
+    if (
+        not reader.ok
+        or reader.at != len(signed_body)
+        or version != _COMPACT_VERSION
+        or not group_id
+        or not invite_id
+        or not members
+        or inviter_index >= len(members)
+    ):
+        raise ValueError("Invalid group invite payload")
+    try:
+        group_text = group_id.decode("utf-8")
+        invite_text = invite_id.decode("utf-8")
+        title_text = title_raw.decode("utf-8") or None
+    except UnicodeDecodeError as exc:
+        raise ValueError("Invalid group invite payload") from exc
+    created_at = (
+        datetime.fromtimestamp(created_unix, timezone.utc) if created_unix else None
+    )
+    expires_at = None
+    if flags & 0x01 and expires_unix:
+        expires_at = datetime.fromtimestamp(expires_unix, timezone.utc)
+        if expires_at < utc_now():
+            raise ValueError("Group invite has expired")
+    return GroupInvite(
+        invite_id=invite_text,
+        group_id=group_text,
+        members=tuple(members),
+        epoch=epoch,
+        inviter_id=members[inviter_index],
+        title=title_text,
+        created_at=created_at,
+        expires_at=expires_at,
+        version=GROUP_INVITE_VERSION,
+        inviter_signing_pub=pub.hex(),
+        signature=signature.hex(),
+    )
+
+
 def encode_group_invite(invite: GroupInvite, signing_seed: bytes) -> str:
     """Serialize and Ed25519-sign an invite with the inviter's signing seed.
 
@@ -163,8 +402,18 @@ def encode_group_invite(invite: GroupInvite, signing_seed: bytes) -> str:
     """
     if not signing_seed:
         raise ValueError("A signing seed is required to sign a group invite")
+    created = invite.created_at or utc_now()
+    compact = _try_compact_plaintext(
+        invite,
+        signing_seed=signing_seed,
+        inviter_signing_pub=crypto.get_verify_key_from_seed(signing_seed),
+        created_at=created,
+        expires_at=invite.expires_at,
+    )
+    if compact is not None:
+        return _seal_invite_plaintext(compact)
     inviter_signing_pub = crypto.get_verify_key_from_seed(signing_seed).hex()
-    created_at = _to_iso8601(invite.created_at or utc_now())
+    created_at = _to_iso8601(created)
     expires_at = _to_iso8601(invite.expires_at) if invite.expires_at else None
     signed_bytes = _canonical_invite_bytes(
         version=GROUP_INVITE_VERSION,
@@ -267,6 +516,11 @@ def _load_invite_payload(text: str) -> dict[str, Any]:
 
 
 def decode_group_invite(text: str) -> GroupInvite:
+    raw = (text or "").strip()
+    if raw and not raw.startswith(GROUP_INVITE_PREFIX):
+        plain = _unseal_invite_plaintext(raw)
+        if plain.startswith(bytes((_COMPACT_VERSION,))):
+            return _decode_compact(plain)
     payload = _load_invite_payload(text)
 
     version = int(payload.get("v", 0))
@@ -371,7 +625,13 @@ def looks_like_group_invite(text: str) -> bool:
     if raw.startswith(GROUP_INVITE_PREFIX):
         return True
     try:
-        payload = _load_invite_payload(raw)
+        plain = _unseal_invite_plaintext(raw)
     except ValueError:
         return False
-    return bool(payload.get("invite_id") and payload.get("signature"))
+    if plain.startswith(bytes((_COMPACT_VERSION,))):
+        return len(plain) >= 96
+    try:
+        payload = json.loads(plain.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("invite_id") and payload.get("signature"))

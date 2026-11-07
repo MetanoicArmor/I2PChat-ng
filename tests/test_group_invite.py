@@ -5,6 +5,7 @@ import pytest
 from i2pchat import crypto
 from i2pchat.groups.invite import (
     GROUP_INVITE_PREFIX,
+    _b32_encode,
     _seal_invite_plaintext,
     _unseal_invite_plaintext,
     build_group_invite,
@@ -87,7 +88,8 @@ def test_decode_rejects_tampered_sealed_blob() -> None:
         build_group_invite(group_id="g", members=(ALICE, BOB), epoch=1, inviter_id=ALICE),
         seed,
     )
-    flipped = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
+    mid = len(encoded) // 2
+    flipped = encoded[:mid] + ("A" if encoded[mid] != "A" else "B") + encoded[mid + 1 :]
     with pytest.raises(ValueError, match="decryption failed|Invalid group invite"):
         decode_group_invite(flipped)
 
@@ -98,8 +100,8 @@ def test_decode_rejects_tampered_members_inside_seal() -> None:
         build_group_invite(group_id="g", members=(ALICE, BOB), epoch=1, inviter_id=ALICE),
         seed,
     )
-    inner = _unseal_invite_plaintext(encoded).decode("utf-8")
-    tampered_inner = inner.replace(BOB, CAROL).encode("utf-8")
+    inner = _unseal_invite_plaintext(encoded)
+    tampered_inner = inner.replace(BOB.encode("ascii"), CAROL.encode("ascii"))
     resealed = _seal_invite_plaintext(tampered_inner)
     with pytest.raises(ValueError, match="signature verification failed"):
         decode_group_invite(resealed)
@@ -118,10 +120,13 @@ def test_decode_rejects_v1_unsigned_invite() -> None:
 
 def test_decode_accepts_legacy_signed_v2_prefix_form() -> None:
     seed = _seed()
+    # An epoch past 32 bits does not fit the compact token, so the encoder
+    # still seals the old JSON document. That document remains acceptable
+    # with the historical prefix.
     invite = build_group_invite(
         group_id="legacy-g",
         members=(ALICE, BOB),
-        epoch=2,
+        epoch=2**32,
         inviter_id=ALICE,
         title="Old",
         invite_id="cafebabe",
@@ -132,6 +137,34 @@ def test_decode_accepts_legacy_signed_v2_prefix_form() -> None:
     decoded = decode_group_invite(legacy)
     assert decoded.title == "Old"
     assert decoded.group_id == "legacy-g"
+    assert decoded.epoch == 2**32
+
+
+def test_compact_invite_hides_real_addresses_and_is_shorter() -> None:
+    seed = _seed()
+    alice = _b32_encode(b"\x11" * 32)
+    bob = _b32_encode(b"\x22" * 32)
+    carol = _b32_encode(b"\x33" * 32)
+    invite = build_group_invite(
+        group_id="group-abc",
+        members=(alice, bob, carol),
+        epoch=3,
+        inviter_id=alice,
+        title="Weekend",
+        invite_id="deadbeef",
+    )
+    encoded = encode_group_invite(invite, seed)
+    assert alice not in encoded
+    assert bob not in encoded
+    assert "Weekend" not in encoded
+    # The previous JSON seal repeated every address, the signing key and the
+    # signature as hex. Three real destinations no longer need that.
+    assert len(encoded) < 700
+    decoded = decode_group_invite(encoded)
+    assert decoded.members == (alice, bob, carol)
+    assert decoded.inviter_id == alice
+    assert decoded.title == "Weekend"
+    assert looks_like_group_invite("\n".join(encoded[i : i + 48] for i in range(0, len(encoded), 48)))
 
 
 def test_decode_group_invite_rejects_malformed() -> None:
@@ -142,19 +175,22 @@ def test_decode_group_invite_rejects_malformed() -> None:
         decode_group_invite(GROUP_INVITE_PREFIX)
     with pytest.raises(ValueError, match="Invalid group invite JSON"):
         decode_group_invite(GROUP_INVITE_PREFIX + "{not-json")
-    inner = _unseal_invite_plaintext(
-        encode_group_invite(
-            build_group_invite(
-                group_id="x",
-                members=(ALICE,),
-                epoch=0,
-                inviter_id=ALICE,
-            ),
-            seed,
+    inner = bytearray(
+        _unseal_invite_plaintext(
+            encode_group_invite(
+                build_group_invite(
+                    group_id="x",
+                    members=(ALICE,),
+                    epoch=0,
+                    inviter_id=ALICE,
+                ),
+                seed,
+            )
         )
-    ).decode("utf-8")
-    with pytest.raises(ValueError, match="group_id"):
-        decode_group_invite(_seal_invite_plaintext(inner.replace('"group_id":"x"', '"group_id":""').encode("utf-8")))
+    )
+    inner[4] ^= 0x01
+    with pytest.raises(ValueError, match="signature verification failed"):
+        decode_group_invite(_seal_invite_plaintext(bytes(inner)))
 
 
 def test_looks_like_group_invite_ignores_destinations() -> None:

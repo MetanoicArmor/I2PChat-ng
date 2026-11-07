@@ -16,15 +16,18 @@
 /// — the same key that is TOFU-pinned during the secure handshake — so accepting
 /// one binds the group's membership to an identity the invitee can verify.
 ///
-/// The signed JSON is then sealed:
+/// New tokens seal a compact binary roster (version 3) instead of JSON:
+/// destinations are raw 32-byte hashes, and the signature and signing key are
+/// raw bytes. The seal is unchanged:
 ///
-///   token = base64url_nopad( wrap_key(32) || SecretBox(JSON) )
+///   token = base64url_nopad( wrap_key(32) || SecretBox(body) )
 ///
 /// The wrap key travels with the ciphertext, so the seal is not a secret: it
 /// only means the token has no recognisable prefix and does not show the title,
 /// members or destinations to anyone glancing at it. Whoever holds the whole
 /// token can open it.
 ///
+/// Older sealed JSON (v2) and `__I2PCHAT_GROUP_INVITE__:` documents still open.
 /// v1 invites were unsigned and are refused.
 namespace i2pchat::groups {
 

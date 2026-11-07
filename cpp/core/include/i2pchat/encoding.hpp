@@ -32,6 +32,9 @@ std::optional<Bytes> base64url_decode(std::string_view text);
 
 /// Lowercase RFC 4648 base32 without padding, as used for .b32.i2p addresses.
 std::string base32_encode_lower(ByteView data);
+/// Inverse of `base32_encode_lower`. Accepts either case. Leftover low bits
+/// must be zero, the same way the encoder pads the final symbol.
+std::optional<Bytes> base32_decode(std::string_view text);
 
 /// Number of Unicode code points in a UTF-8 string. Returns nullopt when the
 /// input is not well-formed UTF-8.
