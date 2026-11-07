@@ -133,8 +133,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: android.content.Intent) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         bridge.consumeOpenIntent(intent)
     }
 }
@@ -143,6 +144,10 @@ class MainActivity : ComponentActivity() {
 fun I2PChatRoot(bridge: ChatBridge) {
     val state by bridge.state.collectAsStateWithLifecycle()
     val nav = rememberNavController()
+    LaunchedEffect(state.openChatNonce) {
+        if (state.openChatNonce == 0L || !state.running) return@LaunchedEffect
+        nav.navigate("conversation") { launchSingleTop = true }
+    }
     if (state.tofu != null) {
         TofuDialog(state.tofu!!, onAccept = { bridge.answerTofu(true) }, onReject = { bridge.answerTofu(false) })
     }

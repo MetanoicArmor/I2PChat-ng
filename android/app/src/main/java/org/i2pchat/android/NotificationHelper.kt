@@ -36,7 +36,7 @@ object NotificationHelper {
         val open = PendingIntent.getActivity(
             context,
             0,
-            Intent(context, MainActivity::class.java),
+            openApp(context),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(context, ROUTER_CHANNEL)
@@ -52,7 +52,7 @@ object NotificationHelper {
         val open = PendingIntent.getActivity(
             context,
             peer.hashCode() xor 0x7f,
-            Intent(context, MainActivity::class.java).putExtra("openPeer", peer),
+            openApp(context, peer),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL)
@@ -73,7 +73,7 @@ object NotificationHelper {
         val open = PendingIntent.getActivity(
             context,
             peer.hashCode(),
-            Intent(context, MainActivity::class.java).putExtra("openPeer", peer),
+            openApp(context, peer),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL)
@@ -86,6 +86,14 @@ object NotificationHelper {
         try {
             NotificationManagerCompat.from(context).notify(peer.hashCode(), notification)
         } catch (_: SecurityException) {
+        }
+    }
+
+    /** Reuse the running activity. A plain launch builds a second screen and drops the session. */
+    private fun openApp(context: Context, peer: String? = null): Intent {
+        return Intent(context, MainActivity::class.java).apply {
+            if (!peer.isNullOrBlank()) putExtra("openPeer", peer)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
     }
 }

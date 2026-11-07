@@ -173,6 +173,8 @@ data class ChatUiState(
     val routerIssue: RouterIssue? = null,
     val selectedId: String = "",
     val selectedIsGroup: Boolean = false,
+    /** Changes when a notification should open the current chat. Zero means no request. */
+    val openChatNonce: Long = 0,
     val compose: String = "",
     val drafts: Map<String, String> = emptyMap(),
     val tofu: TofuPrompt? = null,
@@ -1348,8 +1350,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     fun consumeOpenIntent(intent: Intent?) {
-        val peer = intent?.getStringExtra("openPeer") ?: return
+        val peer = intent?.getStringExtra("openPeer")?.trim().orEmpty()
+        if (peer.isEmpty() || !_state.value.running) return
         selectConversation(peer, false)
+        _state.update { it.copy(openChatNonce = System.nanoTime()) }
     }
 
     override fun onCleared() {
