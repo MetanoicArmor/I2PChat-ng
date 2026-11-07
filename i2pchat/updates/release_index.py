@@ -19,8 +19,10 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
+GITHUB_RELEASES_REPO = "MetanoicArmor/I2PChat-ng"
+DEFAULT_DOWNLOADS_PAGE_URL = f"https://github.com/{GITHUB_RELEASES_REPO}/releases"
 DEFAULT_RELEASES_PAGE_URL = (
-    "http://i2pchatsfjisxgbfpjqg52qfv4unspxgcizvvh7mfirn2uzj2udq.b32.i2p/"
+    f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases?per_page=30"
 )
 
 # Строго под имена вида I2PChat-linux-x86_64-v1.0.1.zip
@@ -128,11 +130,20 @@ def releases_page_url() -> str:
 
 
 def downloads_page_url() -> str:
-    """URL для открытия в браузере с якорем #downloads."""
-    u = releases_page_url().strip()
-    if "#" in u:
-        return u
-    return u.rstrip("/") + "/#downloads"
+    """Page a person opens to download a build.
+
+    The default check reads the GitHub releases API. The button opens the
+    human releases page of the same repository. A custom ``.i2p`` listing
+    still gets the ``#downloads`` anchor.
+    """
+    override = (os.environ.get("I2PCHAT_RELEASES_PAGE_URL") or "").strip()
+    if not override:
+        return DEFAULT_DOWNLOADS_PAGE_URL
+    if "#" in override or "github.com" in override or "api.github.com" in override:
+        if "api.github.com" in override:
+            return DEFAULT_DOWNLOADS_PAGE_URL
+        return override
+    return override.rstrip("/") + "/#downloads"
 
 
 def expected_artifact_prefix() -> Optional[str]:
@@ -146,7 +157,7 @@ def expected_artifact_prefix() -> Optional[str]:
         if machine in ("x86_64", "amd64"):
             return "I2PChat-linux-x86_64"
         if machine in ("aarch64", "arm64"):
-            return "I2PChat-linux-arm64"
+            return "I2PChat-linux-aarch64"
         return None
     if plat == "darwin":
         if machine == "arm64":
@@ -236,7 +247,10 @@ def fetch_releases_page(
     """
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "I2PChat-update-check/1.0"},
+        headers={
+            "User-Agent": "I2PChat-update-check/1.0",
+            "Accept": "application/vnd.github+json",
+        },
         method="GET",
     )
     op = (
@@ -289,38 +303,46 @@ def check_for_updates_sync(
         )
 
     url = page_url if page_url is not None else releases_page_url()
+    via_i2p = _url_is_i2p_host(url)
     try:
         html = fetch_releases_page(
             url, timeout=timeout, opener=opener, proxy_url=proxy_url
         )
     except urllib.error.HTTPError as e:
+        hint = (
+            "Ensure I2P is running; for .i2p the app uses http://127.0.0.1:4444 "
+            "when no http_proxy is set. Check the proxy port in your router settings."
+            if via_i2p
+            else "GitHub could not be reached. Check the network connection."
+        )
         return UpdateCheckResult(
             ok=False,
             kind="network",
-            message=(
-                f"HTTP error while fetching release page ({e.code}). "
-                "Ensure I2P is running; for .i2p the app uses http://127.0.0.1:4444 "
-                "when no http_proxy is set. Check the proxy port in your router settings."
-            ),
+            message=f"HTTP error while fetching release page ({e.code}). {hint}",
         )
     except urllib.error.URLError as e:
         reason = getattr(e, "reason", e)
+        hint = (
+            "Ensure I2P is running. If the HTTP proxy is not on 127.0.0.1:4444, set "
+            "http_proxy or I2PCHAT_UPDATE_HTTP_PROXY to your I2P HTTP proxy URL."
+            if via_i2p
+            else "Check the network connection to GitHub."
+        )
         return UpdateCheckResult(
             ok=False,
             kind="network",
-            message=(
-                f"Could not reach the release page ({reason}). "
-                "Ensure I2P is running. If the HTTP proxy is not on 127.0.0.1:4444, set "
-                "http_proxy or I2PCHAT_UPDATE_HTTP_PROXY to your I2P HTTP proxy URL."
-            ),
+            message=f"Could not reach the release page ({reason}). {hint}",
         )
     except TimeoutError:
+        hint = (
+            "Ensure I2P is running and the HTTP proxy is configured."
+            if via_i2p
+            else "GitHub did not answer in time."
+        )
         return UpdateCheckResult(
             ok=False,
             kind="network",
-            message=(
-                "Request timed out. Ensure I2P is running and the HTTP proxy is configured."
-            ),
+            message=f"Request timed out. {hint}",
         )
     except OSError as e:
         return UpdateCheckResult(
@@ -336,7 +358,7 @@ def check_for_updates_sync(
             kind="no_artifact",
             message=(
                 f"No release file found for this platform (expected prefix {prefix}). "
-                "You can still open the downloads page to look for other builds."
+                f"You can still open the releases page: {downloads_page_url()}"
             ),
         )
 
@@ -362,7 +384,10 @@ def check_for_updates_sync(
     return UpdateCheckResult(
         ok=True,
         kind="update_available",
-        message=f"A newer release is available: v{remote_ver} (you have v{current_version.strip()}).",
+        message=(
+            f"A newer release is available: v{remote_ver} "
+            f"(you have v{current_version.strip()}).\n{downloads_page_url()}"
+        ),
         remote_version=remote_ver,
         remote_filename=remote_name,
     )

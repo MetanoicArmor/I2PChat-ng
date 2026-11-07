@@ -11393,7 +11393,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             display_message += (
                 "\n\nBefore installing a build you download: verify SHA256SUMS and the GPG "
                 "detached signature. The in-app check only compares version numbers parsed "
-                "from the release page HTML (see manual §4.12)."
+                "from the GitHub releases list (see manual §4.12)."
             )
         elif result.ok and result.kind == "no_artifact":
             display_message += (
@@ -11408,24 +11408,29 @@ class ChatWindow(QtWidgets.QMainWindow):
         else:
             mb.setIcon(QtWidgets.QMessageBox.Icon.Information)
         open_btn: Optional[QtWidgets.QAbstractButton] = None
+        url = downloads_page_url()
+        page_host = (QtCore.QUrl(url).host() or "").lower()
+        page_is_i2p = page_host == "i2p" or page_host.endswith(".i2p")
         if (
             result.kind == "update_available"
             or result.kind == "no_artifact"
             or not result.ok
         ):
             open_btn = mb.addButton(
-                "Copy downloads page address",
+                "Copy downloads page address" if page_is_i2p else "Open releases page",
                 QtWidgets.QMessageBox.ButtonRole.ActionRole,
             )
         mb.addButton(QtWidgets.QMessageBox.StandardButton.Ok)
         mb.exec()
         if open_btn is not None and mb.clickedButton() == open_btn:
+            if not page_is_i2p:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+                return
             # The page lives inside I2P. Handing the .i2p URL to the system
             # browser would make the default browser resolve it through the
             # clearnet DNS, which both fails and tells the resolver that this
             # machine uses I2PChat. The address is copied instead, for a
             # browser the user has configured with an I2P proxy.
-            url = downloads_page_url()
             clipboard = QtWidgets.QApplication.clipboard()
             if clipboard is not None:
                 clipboard.setText(url)

@@ -100,8 +100,15 @@ std::string releases_page_url() {
 }
 
 std::string downloads_page_url() {
-    std::string url = releases_page_url();
-    if (url.find('#') != std::string::npos) {
+    const char* raw = std::getenv("I2PCHAT_RELEASES_PAGE_URL");
+    if (raw == nullptr || raw[0] == '\0') {
+        return std::string(kDefaultDownloadsPageUrl);
+    }
+    std::string url = raw;
+    if (url.find('#') != std::string::npos || url.find("github.com") != std::string::npos) {
+        if (url.find("api.github.com") != std::string::npos) {
+            return std::string(kDefaultDownloadsPageUrl);
+        }
         return url;
     }
     while (!url.empty() && url.back() == '/') {
@@ -127,7 +134,7 @@ std::optional<std::string> expected_artifact_prefix() {
         return "I2PChat-linux-x86_64";
     }
     if (machine == "aarch64" || machine == "arm64") {
-        return "I2PChat-linux-arm64";
+        return "I2PChat-linux-aarch64";
     }
     return std::nullopt;
 #endif

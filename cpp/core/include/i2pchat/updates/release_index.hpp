@@ -8,12 +8,14 @@
 
 /// Parse a releases listing and compare versions with the local build.
 ///
-/// Source of truth: i2pchat/updates/release_index.py. Fetching the page is a
-/// GUI concern (Qt Network + I2P HTTP proxy); this module only interprets HTML.
+/// Source of truth: i2pchat/updates/release_index.py. Fetching the listing is a
+/// GUI concern; this module only interprets the page or GitHub releases JSON.
 namespace i2pchat::updates {
 
 inline constexpr std::string_view kDefaultReleasesPageUrl =
-    "http://i2pchatsfjisxgbfpjqg52qfv4unspxgcizvvh7mfirn2uzj2udq.b32.i2p/";
+    "https://api.github.com/repos/MetanoicArmor/I2PChat-ng/releases?per_page=30";
+inline constexpr std::string_view kDefaultDownloadsPageUrl =
+    "https://github.com/MetanoicArmor/I2PChat-ng/releases";
 
 struct UpdateCheckResult {
     bool ok = false;

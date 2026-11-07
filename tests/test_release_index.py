@@ -174,6 +174,38 @@ class OpenerSelectionTests(unittest.TestCase):
         self.assertEqual(op, urllib.request.urlopen)
 
 
+GITHUB_RELEASE_JSON = """
+[{"tag_name":"v1.5.2","assets":[
+  {"name":"I2PChat-macOS-arm64-v1.5.2.zip"},
+  {"name":"I2PChat-macOS-arm64-tui-v1.5.2.zip"},
+  {"name":"I2PChat-linux-aarch64-v1.5.2.zip"},
+  {"name":"I2PChat-linux-x86_64-v1.0.0.zip"}
+]}]
+"""
+
+
+class GithubReleaseIndexTests(unittest.TestCase):
+    def test_default_points_at_github_releases(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("I2PCHAT_RELEASES_PAGE_URL", None)
+            self.assertIn("api.github.com/repos/MetanoicArmor/I2PChat-ng/releases", ri.releases_page_url())
+            self.assertEqual(
+                ri.downloads_page_url(),
+                "https://github.com/MetanoicArmor/I2PChat-ng/releases",
+            )
+
+    def test_github_json_lists_the_platform_zip(self) -> None:
+        got = ri.find_latest_for_prefix(GITHUB_RELEASE_JSON, "I2PChat-macOS-arm64")
+        self.assertEqual(got, ("1.5.2", "I2PChat-macOS-arm64-v1.5.2.zip"))
+        linux = ri.find_latest_for_prefix(GITHUB_RELEASE_JSON, "I2PChat-linux-aarch64")
+        self.assertEqual(linux, ("1.5.2", "I2PChat-linux-aarch64-v1.5.2.zip"))
+
+    def test_github_host_is_fetched_directly(self) -> None:
+        with patch.object(ri, "_configured_http_proxy_url", return_value=""):
+            op = ri._opener_for_update_fetch(ri.DEFAULT_RELEASES_PAGE_URL)
+        self.assertEqual(op, urllib.request.urlopen)
+
+
 class DownloadsUrlTests(unittest.TestCase):
     def test_downloads_page_adds_fragment(self) -> None:
         with patch.dict("os.environ", {"I2PCHAT_RELEASES_PAGE_URL": "http://example.i2p/rel/"}):

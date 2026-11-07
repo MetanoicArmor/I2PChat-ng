@@ -426,7 +426,7 @@ Size limit:
 
 #### 4.12. Check for updates and verifying downloads
 
-The **`⋯` → Check for updates…** action (**Ctrl/Cmd+U**) fetches the **HTML** releases page, discovers ZIP filenames by pattern, and **compares version numbers** with the local build (the root **`VERSION`** file when running from source). For `*.i2p` hosts the request follows the **active router backend’s HTTP proxy** by default (or `I2PCHAT_UPDATE_HTTP_PROXY` if you override it). The app **does not download** the archive or **verify** hashes or signatures.
+The **`⋯` → Check for updates…** action (**Ctrl/Cmd+U**) reads the GitHub releases list for [MetanoicArmor/I2PChat-ng](https://github.com/MetanoicArmor/I2PChat-ng/releases), discovers ZIP filenames by pattern, and **compares version numbers** with the local build (the root **`VERSION`** file when running from source). The button opens that releases page; the app **does not download** the archive or **verify** hashes or signatures. A custom `*.i2p` page set with `I2PCHAT_RELEASES_PAGE_URL` still goes through the **active router HTTP proxy** (or `I2PCHAT_UPDATE_HTTP_PROXY`).
 
 **Trust chain when you install manually:**
 
