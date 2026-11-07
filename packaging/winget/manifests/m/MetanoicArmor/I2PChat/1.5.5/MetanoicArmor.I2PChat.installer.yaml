@@ -12,7 +12,7 @@ Installers:
   - Architecture: x64
     InstallerType: zip
     InstallerUrl: https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v1.5.5/I2PChat-windows-x64-winget-v1.5.5.zip
-    InstallerSha256: f82f563d0938b60aba159fe37dee22e0a0ffe4b279925c6c8abf10617a54dd74
+    InstallerSha256: 1b2cd32fb81604c9f5535fc6815418ef57d8ad3b86f50b05f54960303136773f
     NestedInstallerType: portable
     NestedInstallerFiles:
       - RelativeFilePath: I2PChat/I2PChat.exe

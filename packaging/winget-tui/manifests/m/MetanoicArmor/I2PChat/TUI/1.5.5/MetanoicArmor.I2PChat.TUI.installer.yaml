@@ -12,7 +12,7 @@ Installers:
   - Architecture: x64
     InstallerType: zip
     InstallerUrl: https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v1.5.5/I2PChat-windows-tui-x64-winget-v1.5.5.zip
-    InstallerSha256: e39892de21d7ac8386c154d44b3cd52efcd3045d44954be4283f0657825549a4
+    InstallerSha256: b5edbef0e9651aa766cb418133235abe27b8465b26bf7060e4d5c4c0657a83e1
     NestedInstallerType: portable
     NestedInstallerFiles:
       - RelativeFilePath: I2PChat/I2PChat-tui.exe
