@@ -13,18 +13,27 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -32,16 +41,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.EmojiEmotions
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
@@ -54,7 +59,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +90,7 @@ import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -100,8 +105,13 @@ import android.net.Uri
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
+import org.i2pchat.android.ui.ChatListScreen
 import org.i2pchat.android.ui.EmojiChars
+import org.i2pchat.android.ui.KeetComposer
+import org.i2pchat.android.ui.KeetMessageBubble
+import org.i2pchat.android.ui.PeerAvatar
 import org.i2pchat.android.ui.theme.I2PChatTheme
+import org.i2pchat.android.ui.theme.TerminalPalettes
 
 class MainActivity : ComponentActivity() {
     private val bridge: ChatBridge by viewModels()
@@ -160,7 +170,7 @@ fun I2PChatRoot(bridge: ChatBridge) {
         }
         return
     }
-    NavHost(navController = nav, startDestination = if (state.running) "status" else "profile") {
+    NavHost(navController = nav, startDestination = if (state.running) "chats" else "profile") {
         composable("profile") { ProfileScreen(bridge, nav) }
         composable("status") { StatusScreen(bridge, nav) }
         composable("chats") { ChatListScreen(bridge, nav) }
@@ -179,17 +189,17 @@ fun I2PChatRoot(bridge: ChatBridge) {
     }
 }
 
-/** Status, Chats and Settings are top-level tabs on top of "status" in the back stack. */
+/** Status, Chats and Settings sit on top of the chat list in the back stack. */
 fun NavHostController.goTab(route: String) {
     navigate(route) {
-        popUpTo("status") { inclusive = route == "status" }
+        popUpTo("chats") { inclusive = route == "chats" }
         launchSingleTop = true
     }
 }
 
 @Composable
 fun MainBottomBar(nav: NavHostController, current: String) {
-    NavigationBar {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
         NavigationBarItem(
             selected = current == "status",
             onClick = { nav.goTab("status") },
@@ -228,8 +238,8 @@ fun peerLinkLabel(state: ChatUiState, contact: ContactUi?): String {
 @Composable
 fun PeerLinkDot(link: String) {
     val color = when (link) {
-        "secure" -> Color(0xFF50FA7B)
-        "connecting" -> Color(0xFFF1FA8C)
+        "secure" -> Color(0xFF3CB86A)
+        "connecting" -> Color(0xFFE2B340)
         else -> MaterialTheme.colorScheme.outline
     }
     Text("●", color = color, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
@@ -311,6 +321,29 @@ fun openReceivedFile(context: android.content.Context, path: String) {
     }
 }
 
+fun openReceivedFolder(context: android.content.Context, path: String) {
+    val dir = File(path)
+    if (!dir.isDirectory || (dir.name != "downloads" && dir.name != "images")) return
+    val uri = runCatching {
+        FileProvider.getUriForFile(context, "${context.packageName}.files", dir.canonicalFile)
+    }.getOrNull() ?: return
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, android.provider.DocumentsContract.Document.MIME_TYPE_DIR)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(Intent.createChooser(intent, dir.name)) }
+}
+
+/** Same quote block the desktop client inserts into the compose field. */
+fun formatReplyQuote(sender: String, text: String): String {
+    val who = sender.trim().ifBlank { "message" }
+    val quoted = text.trimEnd('\n').lines().joinToString("\n") { line ->
+        if (line.isEmpty()) ">" else "> $line"
+    }
+    return "@$who wrote:\n$quoted\n\n"
+}
+
 @Composable
 fun OpenFileWarningDialog(
     path: String,
@@ -331,12 +364,73 @@ fun OpenFileWarningDialog(
     )
 }
 
-/** A non-message row stored in history (e.g. group membership changes). */
 @Composable
-fun HistoryNoticeRow(msg: MessageUi) {
+fun MessageActionsDialog(
+    msg: MessageUi,
+    onDismiss: () -> Unit,
+    onCopy: (String) -> Unit,
+    onReply: () -> Unit,
+    onRetry: () -> Unit,
+    onOpen: (String) -> Unit,
+    onOpenFolder: (String) -> Unit,
+) {
+    val path = msg.imagePath.ifBlank { msg.filePath }
+    val folder = path.takeIf { it.isNotBlank() }?.let { File(it).parentFile }?.takeIf {
+        it.isDirectory && (it.name == "downloads" || it.name == "images")
+    }
+    val plain = msg.text.isNotBlank() && msg.imagePath.isBlank() && !msg.text.startsWith("[file] ")
+    val detail = msg.deliveryHint.ifBlank { msg.deliveryReason }.trim()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.menu_message_actions)) },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                if (path.isNotBlank()) {
+                    TextButton(onClick = { onOpen(path) }) { Text(stringResource(R.string.action_open)) }
+                    TextButton(onClick = { onCopy(path) }) { Text(stringResource(R.string.menu_copy_path)) }
+                }
+                if (folder != null) {
+                    TextButton(onClick = { onOpenFolder(folder.absolutePath) }) { Text(stringResource(R.string.menu_open_folder)) }
+                    TextButton(onClick = { onCopy(folder.absolutePath) }) { Text(stringResource(R.string.menu_copy_folder)) }
+                }
+                if (msg.fileCaption.isNotBlank() && path.isBlank()) {
+                    TextButton(onClick = { onCopy(msg.fileCaption) }) { Text(stringResource(R.string.menu_copy_filename)) }
+                }
+                if (msg.text.isNotBlank()) {
+                    TextButton(onClick = { onCopy(msg.text) }) { Text(stringResource(R.string.menu_copy_text)) }
+                    if (msg.ts.isNotBlank()) {
+                        TextButton(onClick = { onCopy("[${msg.ts}] ${msg.sender}: ${msg.text}") }) {
+                            Text(stringResource(R.string.menu_copy_with_time))
+                        }
+                    }
+                }
+                if (plain) {
+                    TextButton(onClick = onReply) { Text(stringResource(R.string.menu_reply)) }
+                }
+                if (msg.retryable && plain) {
+                    TextButton(onClick = onRetry) { Text(stringResource(R.string.menu_retry)) }
+                }
+                if (detail.isNotBlank()) {
+                    TextButton(onClick = { onCopy(detail) }) { Text(stringResource(R.string.menu_copy_delivery)) }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
+    )
+}
+
+/** A non-message row stored in history (e.g. group membership changes). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun HistoryNoticeRow(msg: MessageUi, onLongClick: () -> Unit = {}) {
     Text(
         msg.text,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = {}, onLongClick = onLongClick)
+            .padding(vertical = 3.dp),
         style = MaterialTheme.typography.bodySmall,
         color = if (msg.kind == "error") {
             MaterialTheme.colorScheme.error
@@ -382,14 +476,45 @@ fun NoticeRow(notice: NoticeUi, technical: Boolean = false) {
 @Composable
 fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
     val state by bridge.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var name by remember { mutableStateOf(state.profiles.firstOrNull().orEmpty()) }
+    var menuFor by remember { mutableStateOf<String?>(null) }
+    var renameFrom by remember { mutableStateOf<String?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
+    var addressTarget by remember { mutableStateOf<String?>(null) }
+    var addressPassword by remember { mutableStateOf("") }
+    var addressShown by remember { mutableStateOf("") }
+    var askPassword by remember { mutableStateOf(false) }
+    var opError by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         bridge.refreshProfiles()
         bridge.warmRouter()
     }
     LaunchedEffect(state.running, state.starting) {
         if (state.running || state.starting) {
-            nav.navigate("status") { popUpTo("profile") { inclusive = true } }
+            nav.navigate("chats") { popUpTo("profile") { inclusive = true } }
+        }
+    }
+    fun showAddress(profile: String, password: String) {
+        busy = true
+        opError = ""
+        bridge.profileAddress(profile, password) { op ->
+            busy = false
+            when {
+                op.ok -> {
+                    addressShown = op.address
+                    askPassword = false
+                    addressTarget = profile
+                }
+                op.code == "needs_password" -> {
+                    askPassword = true
+                    addressShown = ""
+                    addressTarget = profile
+                }
+                else -> opError = op.code
+            }
         }
     }
     Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { padding ->
@@ -414,16 +539,85 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             )
             Text(stringResource(R.string.profile_password_hint), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            LazyColumn(Modifier.weight(1f, fill = false)) {
+            LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
                 items(state.profiles) { profile ->
-                    Text(
-                        profile,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { name = profile }
-                            .padding(12.dp),
-                    )
+                    val saved = profile != "random_address"
+                    val address = state.profileAddresses[profile].orEmpty()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clickable { name = profile }
+                                .padding(vertical = 10.dp),
+                        ) {
+                            Text(
+                                profile,
+                                fontWeight = if (name == profile) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            if (saved && address.isNotBlank()) {
+                                Text(
+                                    address,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else if (saved && profile in state.lockedProfiles) {
+                                Text(
+                                    stringResource(R.string.profile_address_locked),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (saved) {
+                            Box {
+                                IconButton(onClick = { menuFor = profile }) {
+                                    Icon(Icons.Default.MoreVert, stringResource(R.string.cd_profile_menu))
+                                }
+                                DropdownMenu(
+                                    expanded = menuFor == profile,
+                                    onDismissRequest = { menuFor = null },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.profile_menu_address)) },
+                                        onClick = {
+                                            menuFor = null
+                                            addressPassword = ""
+                                            addressShown = address
+                                            if (address.isNotBlank()) {
+                                                askPassword = false
+                                                addressTarget = profile
+                                            } else {
+                                                showAddress(profile, "")
+                                            }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.profile_rename)) },
+                                        onClick = {
+                                            menuFor = null
+                                            renameFrom = profile
+                                            renameText = profile
+                                            opError = ""
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.profile_delete)) },
+                                        onClick = {
+                                            menuFor = null
+                                            deleteTarget = profile
+                                            opError = ""
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            if (opError.isNotBlank() && addressTarget == null && renameFrom == null && deleteTarget == null) {
+                Text(profileOpMessage(opError), color = MaterialTheme.colorScheme.error)
             }
             state.routerIssue?.let { issue ->
                 Text(bridge.issueText(issue), color = MaterialTheme.colorScheme.error)
@@ -446,14 +640,165 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             TextButton(onClick = { nav.navigate("router") }) { Text(stringResource(R.string.router_settings)) }
         }
     }
+    renameFrom?.let { from ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) renameFrom = null },
+            title = { Text(stringResource(R.string.profile_rename_title)) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        label = { Text(stringResource(R.string.profile_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (opError.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(profileOpMessage(opError), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy && renameText.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        opError = ""
+                        bridge.renameProfile(from, renameText) { op ->
+                            busy = false
+                            if (op.ok) {
+                                if (name == from) name = renameText.trim()
+                                renameFrom = null
+                            } else {
+                                opError = op.code.ifBlank { "failed" }
+                            }
+                        }
+                    },
+                ) { Text(stringResource(R.string.action_save)) }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { renameFrom = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) deleteTarget = null },
+            title = { Text(stringResource(R.string.profile_delete_title)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.profile_delete_body, target))
+                    if (opError.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(profileOpMessage(opError), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        busy = true
+                        opError = ""
+                        bridge.deleteProfile(target) { op ->
+                            busy = false
+                            if (op.ok) {
+                                if (name == target) name = ""
+                                deleteTarget = null
+                            } else {
+                                opError = op.code.ifBlank { "failed" }
+                            }
+                        }
+                    },
+                ) {
+                    Text(stringResource(R.string.profile_delete), color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { deleteTarget = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+    if (addressTarget != null && (addressShown.isNotBlank() || askPassword)) {
+        val target = addressTarget!!
+        AlertDialog(
+            onDismissRequest = {
+                addressTarget = null
+                addressShown = ""
+                askPassword = false
+                opError = ""
+            },
+            title = { Text(stringResource(R.string.profile_address_title)) },
+            text = {
+                Column {
+                    if (addressShown.isNotBlank()) {
+                        SelectionContainer {
+                            Text(addressShown, style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = addressPassword,
+                            onValueChange = { addressPassword = it },
+                            label = { Text(stringResource(R.string.profile_password_for_address)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (opError.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(profileOpMessage(opError), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                if (addressShown.isNotBlank()) {
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard.setPrimaryClip(ClipData.newPlainText("i2p", addressShown))
+                    }) { Text(stringResource(R.string.copy_address)) }
+                } else {
+                    TextButton(
+                        enabled = !busy && addressPassword.isNotEmpty(),
+                        onClick = { showAddress(target, addressPassword) },
+                    ) { Text(stringResource(R.string.action_open)) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    addressTarget = null
+                    addressShown = ""
+                    askPassword = false
+                    opError = ""
+                }) { Text(stringResource(R.string.action_cancel)) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun profileOpMessage(code: String): String = when (code) {
+    "invalid_name" -> stringResource(R.string.profile_name_invalid)
+    "reserved" -> stringResource(R.string.profile_name_reserved)
+    "exists" -> stringResource(R.string.profile_exists)
+    "missing" -> stringResource(R.string.profile_missing)
+    "busy" -> stringResource(R.string.profile_busy)
+    "wrong_password" -> stringResource(R.string.profile_password_wrong)
+    "needs_password" -> stringResource(R.string.profile_address_locked)
+    else -> stringResource(R.string.profile_failed)
 }
 
 @Composable
 private fun CheckRow(label: String, value: String, check: String, onClick: (() -> Unit)? = null) {
     val (mark, color) = when (check) {
-        "ok" -> "✓" to Color(0xFF50FA7B)
+        "ok" -> "✓" to Color(0xFF3CB86A)
         "failed" -> "✗" to MaterialTheme.colorScheme.error
-        "pending" -> "…" to Color(0xFFF1FA8C)
+        "pending" -> "…" to Color(0xFFE2B340)
         else -> "–" to MaterialTheme.colorScheme.outline
     }
     val stateText = when (check) {
@@ -600,7 +945,7 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                 if (!active) {
                     Spacer(Modifier.height(8.dp))
                     Button(
-                        onClick = { nav.navigate("profile") { popUpTo("status") { inclusive = true } } },
+                        onClick = { nav.navigate("profile") { popUpTo("chats") { inclusive = true } } },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(stringResource(R.string.status_choose_profile)) }
                 }
@@ -622,138 +967,6 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
-    val state by bridge.state.collectAsStateWithLifecycle()
-    var query by remember { mutableStateOf("") }
-    var menu by remember { mutableStateOf(false) }
-    var newPeer by remember { mutableStateOf(false) }
-    var peerAddr by remember { mutableStateOf("") }
-    val filtered = state.conversations.filter {
-        query.isBlank() || it.title.contains(query, true) || it.addr.contains(query, true)
-    }
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        if (state.profile.isBlank()) {
-                            stringResource(R.string.app_name)
-                        } else {
-                            stringResource(R.string.title_with_profile, state.profile)
-                        },
-                    )
-                },
-                actions = {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_new_chat)) }, onClick = {
-                            menu = false
-                            newPeer = true
-                        })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_new_group)) }, onClick = {
-                            menu = false
-                            nav.navigate("group")
-                        })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.menu_switch_profile)) }, onClick = {
-                            menu = false
-                            bridge.stop()
-                            nav.navigate("profile") { popUpTo("status") { inclusive = true } }
-                        })
-                    }
-                },
-            )
-        },
-        bottomBar = { MainBottomBar(nav, "chats") },
-        floatingActionButton = {
-            FloatingActionButton(onClick = { newPeer = true }) {
-                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_new_chat))
-            }
-        },
-    ) { padding ->
-        if (newPeer) {
-            AlertDialog(
-                onDismissRequest = { newPeer = false },
-                title = { Text(stringResource(R.string.open_chat_title)) },
-                text = {
-                    OutlinedTextField(
-                        value = peerAddr,
-                        onValueChange = { peerAddr = it },
-                        label = { Text(stringResource(R.string.i2p_address)) },
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        val addr = peerAddr.trim()
-                        newPeer = false
-                        if (addr.isNotBlank()) {
-                            bridge.selectConversation(addr, false)
-                            nav.navigate("conversation")
-                        }
-                    }) { Text(stringResource(R.string.action_open)) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { newPeer = false }) { Text(stringResource(R.string.action_cancel)) }
-                },
-            )
-        }
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (!state.tunnelsReady) {
-                Text(
-                    stringResource(R.string.network_not_ready),
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { nav.goTab("status") }
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            }
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                label = { Text(stringResource(R.string.search)) },
-            )
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(filtered, key = { it.addr }) { item ->
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                bridge.selectConversation(item.addr, item.isGroup)
-                                nav.navigate("conversation")
-                            }
-                            .padding(16.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (!item.isGroup) PeerLinkDot(state.peerLink(item.addr))
-                            Text(
-                                if (item.isGroup && item.displayName.isBlank()) {
-                                    stringResource(R.string.group_default_title)
-                                } else {
-                                    item.title
-                                },
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (item.unread > 0) Text(item.unread.toString(), color = MaterialTheme.colorScheme.primary)
-                        }
-                        Text(
-                            if (item.isGroup) {
-                                stringResource(R.string.group_preview, item.lastPreview)
-                            } else {
-                                item.lastPreview.ifBlank { peerLinkLabel(state, item) }
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -764,9 +977,12 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     val context = LocalContext.current
     var emoji by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    var finding by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
+    var newNote by remember { mutableStateOf("") }
+    var messageMenu by remember { mutableStateOf<MessageUi?>(null) }
     var pendingOpenPath by remember { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -787,11 +1003,14 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
             onDismissRequest = { renaming = false },
             title = { Text(stringResource(R.string.display_name)) },
             text = {
-                OutlinedTextField(newName, { newName = it }, label = { Text(stringResource(R.string.name)) })
+                Column {
+                    OutlinedTextField(newName, { newName = it }, label = { Text(stringResource(R.string.name)) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(newNote, { newNote = it }, label = { Text(stringResource(R.string.peer_note)) }, modifier = Modifier.fillMaxWidth())
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    bridge.setPeerProfile(id, newName, state.contacts.firstOrNull { it.addr == id }?.note.orEmpty())
+                    bridge.setPeerProfile(id, newName, newNote)
                     renaming = false
                 }) { Text(stringResource(R.string.action_save)) }
             },
@@ -809,15 +1028,19 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         )
     }
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(title)
-                        if (!group) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                PeerLinkDot(state.peerLink(id))
-                                Text(peerLinkLabel(state, contact), style = MaterialTheme.typography.labelSmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PeerAvatar(seed = id, label = title, size = 36.dp)
+                        Column(Modifier.padding(start = 10.dp)) {
+                            Text(title, maxLines = 1)
+                            if (!group) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    PeerLinkDot(state.peerLink(id))
+                                    Text(peerLinkLabel(state, contact), style = MaterialTheme.typography.labelSmall)
+                                }
                             }
                         }
                     }
@@ -830,8 +1053,22 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 actions = {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.find_in_chat)) }, onClick = {
+                            menu = false
+                            finding = !finding
+                        })
                         if (!group) {
-                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_rename)) }, onClick = { menu = false; renaming = true })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_rename)) }, onClick = {
+                                menu = false
+                                newName = contact?.displayName.orEmpty()
+                                newNote = contact?.note.orEmpty()
+                                renaming = true
+                            })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.menu_copy_peer)) }, onClick = {
+                                menu = false
+                                val clipboard = context.getSystemService(ClipboardManager::class.java)
+                                clipboard.setPrimaryClip(ClipData.newPlainText("i2p", id))
+                            })
                             DropdownMenuItem(text = { Text(stringResource(R.string.menu_connect)) }, onClick = { menu = false; bridge.connectSelected() })
                             DropdownMenuItem(text = { Text(stringResource(R.string.menu_disconnect)) }, onClick = { menu = false; bridge.disconnectSelected() })
                             DropdownMenuItem(text = { Text(stringResource(R.string.menu_forget_pin)) }, onClick = { menu = false; bridge.forgetPin(id) })
@@ -866,13 +1103,15 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).imePadding().fillMaxSize()) {
-            OutlinedTextField(
-                value = search,
-                onValueChange = { search = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                label = { Text(stringResource(R.string.find_in_chat)) },
-            )
-            val shown = if (search.isBlank()) state.messages else state.messages.filter {
+            if (finding) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    label = { Text(stringResource(R.string.find_in_chat)) },
+                )
+            }
+            val shown = if (!finding || search.isBlank()) state.messages else state.messages.filter {
                 it.text.contains(search, true) || it.sender.contains(search, true)
             }
             LaunchedEffect(shown.size) {
@@ -881,62 +1120,48 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 val atBottom = lastVisible == null || lastVisible >= shown.lastIndex - 1
                 if (atBottom) list.animateScrollToItem(shown.lastIndex)
             }
+            messageMenu?.let { msg ->
+                MessageActionsDialog(
+                    msg = msg,
+                    onDismiss = { messageMenu = null },
+                    onCopy = { text ->
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard.setPrimaryClip(ClipData.newPlainText("i2pchat", text))
+                        messageMenu = null
+                    },
+                    onReply = {
+                        val quote = formatReplyQuote(msg.sender, msg.text)
+                        val draft = state.compose
+                        bridge.setCompose(if (draft.isBlank()) quote else "$draft\n\n$quote")
+                        messageMenu = null
+                    },
+                    onRetry = {
+                        bridge.resend(msg.text)
+                        messageMenu = null
+                    },
+                    onOpen = { path ->
+                        pendingOpenPath = path
+                        messageMenu = null
+                    },
+                    onOpenFolder = { path ->
+                        openReceivedFolder(context, path)
+                        messageMenu = null
+                    },
+                )
+            }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
                 items(shown) { msg ->
                     if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
-                        HistoryNoticeRow(msg)
+                        HistoryNoticeRow(msg, onLongClick = { messageMenu = msg })
                     } else {
-                        val mine = msg.kind == "out" || msg.kind == "me"
-                        Column(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
-                        ) {
-                            Card {
-                                Column(Modifier.padding(10.dp)) {
-                                    if (group && msg.sender.isNotBlank()) {
-                                        Text(msg.sender.take(16), style = MaterialTheme.typography.labelSmall)
-                                    }
-                                    if (msg.imagePath.isNotBlank()) {
-                                        ChatImageThumb(msg.imagePath)
-                                        if (msg.fileCaption.isNotBlank()) {
-                                            Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall)
-                                        }
-                                    } else if (msg.filePath.isNotBlank() || msg.text.startsWith("[file] ")) {
-                                        val path = msg.filePath
-                                        Text(
-                                            "📎 ${msg.fileCaption.ifBlank { msg.text }}",
-                                            modifier = if (path.isNotBlank()) {
-                                                Modifier.clickable { pendingOpenPath = path }
-                                            } else {
-                                                Modifier
-                                            },
-                                        )
-                                        if (path.isNotBlank()) {
-                                            Text(
-                                                stringResource(R.string.tap_to_open),
-                                                style = MaterialTheme.typography.labelSmall,
-                                            )
-                                        }
-                                    } else {
-                                        Text(msg.text, style = emojiSafeTextStyle())
-                                    }
-                                    Text(
-                                        listOf(
-                                            msg.ts.take(19),
-                                            when (msg.delivery) {
-                                                "delivered" -> "✓"
-                                                "sent" -> "·"
-                                                "queued" -> "⧗"
-                                                "failed" -> "✗"
-                                                "sending" -> "…"
-                                                else -> msg.delivery
-                                            },
-                                        ).filter { it.isNotBlank() }.joinToString(" · "),
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
-                            }
-                        }
+                        KeetMessageBubble(
+                            msg = msg,
+                            mine = msg.kind == "out" || msg.kind == "me",
+                            showSender = group,
+                            textStyle = emojiSafeTextStyle(),
+                            onOpenFile = { pendingOpenPath = it },
+                            onLongClick = { messageMenu = msg },
+                        )
                     }
                 }
             }
@@ -953,22 +1178,15 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-                IconButton(onClick = { emoji = !emoji }) { Icon(Icons.Default.EmojiEmotions, stringResource(R.string.cd_emoji)) }
-                if (!group) {
-                    IconButton(onClick = { filePicker.launch("*/*") }) { Icon(Icons.Default.AttachFile, stringResource(R.string.cd_file)) }
-                    IconButton(onClick = { imagePicker.launch("image/*") }) { Icon(Icons.Default.Image, stringResource(R.string.cd_image)) }
-                }
-                OutlinedTextField(
-                    value = state.compose,
-                    onValueChange = bridge::setCompose,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text(stringResource(R.string.message_hint)) },
-                )
-                IconButton(onClick = { bridge.send() }) {
-                    Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.cd_send))
-                }
-            }
+            KeetComposer(
+                text = state.compose,
+                onTextChange = bridge::setCompose,
+                onSend = { bridge.send() },
+                onToggleEmoji = { emoji = !emoji },
+                showAttach = !group,
+                onPickFile = { filePicker.launch("*/*") },
+                onPickImage = { imagePicker.launch("image/*") },
+            )
             LaunchedEffect(state.inviteToken) {
                 if (state.inviteToken.isNotBlank()) {
                     val clipboard = context.getSystemService(ClipboardManager::class.java)
@@ -979,7 +1197,7 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     val state by bridge.state.collectAsStateWithLifecycle()
@@ -987,13 +1205,28 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     var maxMessages by remember { mutableStateOf(state.uiPrefs.historyMaxMessages.toString()) }
     var days by remember { mutableStateOf(state.uiPrefs.historyRetentionDays.toString()) }
     Scaffold(
-        topBar = { TopAppBar(title = { Text(stringResource(R.string.tab_settings)) }) },
+        topBar = {
+            TopAppBar(title = { Text(stringResource(R.string.tab_settings)) })
+        },
         bottomBar = { MainBottomBar(nav, "settings") },
     ) { padding ->
-        LazyColumn(Modifier.padding(padding).padding(16.dp)) {
-            item {
+        Column(
+            Modifier
+                .padding(padding)
+                .padding(16.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+        ) {
+                Button(
+                    onClick = {
+                        bridge.stop()
+                        nav.navigate("profile") { popUpTo("chats") { inclusive = true } }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.menu_switch_profile)) }
+                Spacer(Modifier.height(16.dp))
                 Text(stringResource(R.string.theme), fontWeight = FontWeight.SemiBold)
-                Row {
+                FlowRow {
                     listOf(
                         "system" to R.string.theme_system,
                         "light" to R.string.theme_light,
@@ -1004,6 +1237,29 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                             onClick = { bridge.setTheme(value) },
                             label = { Text(stringResource(label)) },
                             modifier = Modifier.padding(end = 8.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(stringResource(R.string.theme_palette), fontWeight = FontWeight.SemiBold)
+                FlowRow {
+                    TerminalPalettes.forEach { palette ->
+                        FilterChip(
+                            selected = state.theme == palette.id,
+                            onClick = { bridge.setTheme(palette.id) },
+                            label = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        Modifier
+                                            .size(10.dp)
+                                            .clip(CircleShape)
+                                            .background(palette.primary),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(palette.label)
+                                }
+                            },
+                            modifier = Modifier.padding(end = 8.dp, bottom = 4.dp),
                         )
                     }
                 }
@@ -1094,7 +1350,6 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                 }) { Text(stringResource(R.string.save_retention)) }
                 Spacer(Modifier.height(16.dp))
                 Text(stringResource(R.string.foreground_note))
-            }
         }
     }
 }
@@ -1393,7 +1648,7 @@ fun TofuDialog(prompt: TofuPrompt, onAccept: () -> Unit, onReject: () -> Unit) {
 }
 
 /** Extra line height so emoji glyphs are not clipped by the font metrics. */
-private fun emojiSafeTextStyle(): TextStyle = TextStyle(
+internal fun emojiSafeTextStyle(): TextStyle = TextStyle(
     platformStyle = PlatformTextStyle(includeFontPadding = true),
     lineHeight = 24.sp,
 )

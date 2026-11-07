@@ -43,6 +43,10 @@ object NativeEngine {
     @JvmStatic external fun nativeInitKeyring()
     @JvmStatic external fun nativeSetListener(listener: Listener?)
     @JvmStatic external fun nativeListProfiles(appRoot: String): String
+    /** JSON `{ok, address}` or `{ok:false, code}` (`needs_password`, `wrong_password`, …). */
+    @JvmStatic external fun nativeProfileAddress(appRoot: String, profile: String, password: String): String
+    @JvmStatic external fun nativeRenameProfile(appRoot: String, from: String, to: String): String
+    @JvmStatic external fun nativeDeleteProfile(appRoot: String, profile: String): String
     @JvmStatic external fun nativePrepareRouter(
         dataDir: String,
         host: String,

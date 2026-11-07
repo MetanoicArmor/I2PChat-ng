@@ -36,10 +36,13 @@
 #include "i2pchat/session/manager.hpp"
 #include "i2pchat/session/peer_session.hpp"
 #include "i2pchat/session/trust_store.hpp"
+#include "i2pchat/storage/atomic_write.hpp"
 #include "i2pchat/storage/chat_history.hpp"
 #include "i2pchat/storage/compose_drafts.hpp"
 #include "i2pchat/storage/contacts.hpp"
+#include "i2pchat/storage/keyring.hpp"
 #include "i2pchat/storage/profile_backup.hpp"
+#include "i2pchat/storage/profile_dat.hpp"
 #include "i2pchat/storage/profile_paths.hpp"
 #include "i2pchat/storage/replica_settings.hpp"
 #include "storage/keyring_backend.hpp"
@@ -278,6 +281,87 @@ struct Engine {
 
 Engine g_engine;
 
+nlohmann::json profile_error(const char* code) {
+    return {{"ok", false}, {"code", code}};
+}
+
+/// A saved profile is one directory directly under `profiles/`, never a symlink
+/// and never a path that canonicalises outside that directory.
+std::optional<fs::path> saved_profile_dir(const fs::path& root, const std::string& name) {
+    if (!i2pchat::storage::is_valid_profile_name(name) || name == kTransientProfile) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const fs::path profiles = fs::weakly_canonical(root / "profiles", ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    const fs::path link = profiles / name;
+    if (fs::is_symlink(link, ec)) {
+        return std::nullopt;
+    }
+    const fs::path dir = fs::weakly_canonical(link, ec);
+    if (ec || dir.parent_path() != profiles || !fs::is_directory(dir)) {
+        return std::nullopt;
+    }
+    return dir;
+}
+
+bool profile_is_open(const std::string& name) {
+    return g_engine.service && g_engine.service->paths().profile() == name;
+}
+
+void rename_prefixed_files(const fs::path& dir, const std::string& from, const std::string& to) {
+    if (!fs::is_directory(dir)) {
+        return;
+    }
+    std::vector<std::string> names;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        std::error_code ec;
+        if (entry.is_directory(ec)) {
+            continue;
+        }
+        const std::string fname = entry.path().filename().string();
+        if (fname.starts_with(from + ".")) {
+            names.push_back(fname);
+        }
+    }
+    for (const auto& fname : names) {
+        const fs::path dest = dir / (to + fname.substr(from.size()));
+        if (fs::exists(dest)) {
+            throw std::runtime_error("exists");
+        }
+        fs::rename(dir / fname, dest);
+    }
+}
+
+struct MovedSecret {
+    std::string from;
+    std::string to;
+    std::string value;
+};
+
+void move_keyring_account(const std::string& from, const std::string& to,
+                          std::vector<MovedSecret>& moved) {
+    const std::optional<std::string> value =
+        i2pchat::storage::keyring::get(i2pchat::storage::kKeyringService, from);
+    if (!value.has_value()) {
+        return;
+    }
+    if (!i2pchat::storage::keyring::set(i2pchat::storage::kKeyringService, to, *value)) {
+        throw std::runtime_error("keyring");
+    }
+    i2pchat::storage::keyring::erase(i2pchat::storage::kKeyringService, from);
+    moved.push_back({from, to, *value});
+}
+
+void restore_keyring(const std::vector<MovedSecret>& moved) {
+    for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+        i2pchat::storage::keyring::set(i2pchat::storage::kKeyringService, it->from, it->value);
+        i2pchat::storage::keyring::erase(i2pchat::storage::kKeyringService, it->to);
+    }
+}
+
 std::string catch_message(const std::exception_ptr& ptr) {
     try {
         if (ptr) {
@@ -347,6 +431,153 @@ Java_org_i2pchat_android_NativeEngine_nativeListProfiles(JNIEnv* env, jclass, js
         // A directory that cannot be listed yields an empty profile list.
     }
     return utf8_to_jstring(env, names.dump());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeProfileAddress(
+    JNIEnv* env, jclass, jstring j_root, jstring j_profile, jstring j_password) {
+    try {
+        const std::string name = jstring_to_utf8(env, j_profile);
+        const std::string password = jstring_to_utf8(env, j_password);
+        if (name == kTransientProfile) {
+            return utf8_to_jstring(env, profile_error("transient").dump());
+        }
+        if (!i2pchat::storage::is_valid_profile_name(name)) {
+            return utf8_to_jstring(env, profile_error("invalid_name").dump());
+        }
+        const auto dir = saved_profile_dir(jstring_to_utf8(env, j_root), name);
+        if (!dir.has_value()) {
+            return utf8_to_jstring(env, profile_error("missing").dump());
+        }
+        const fs::path dat = *dir / (name + ".dat");
+        if (!fs::is_regular_file(dat)) {
+            return utf8_to_jstring(env, profile_error("missing").dump());
+        }
+        const i2pchat::Bytes raw = i2pchat::storage::read_file(dat);
+        if (i2pchat::storage::profile_dat_version(i2pchat::ByteView(raw)) ==
+                i2pchat::storage::kProfileDatVersionPassword &&
+            password.empty()) {
+            return utf8_to_jstring(env, profile_error("needs_password").dump());
+        }
+        const i2pchat::storage::ProfileDatContents contents =
+            i2pchat::storage::read_profile_dat_file(
+                dat, name, *dir,
+                [](const std::string& line) { return line.size() < 600; }, false, password);
+        if (!contents.private_key_base64.has_value() || contents.private_key_base64->empty()) {
+            return utf8_to_jstring(env, profile_error("missing").dump());
+        }
+        const std::string address =
+            i2pchat::sam::Destination::from_private_base64(*contents.private_key_base64).base32();
+        return utf8_to_jstring(
+            env, nlohmann::json{{"ok", true}, {"address", address}}.dump());
+    } catch (const i2pchat::storage::ProfileDatError& ex) {
+        const std::string message = ex.what();
+        if (message.find("Wrong profile password") != std::string::npos) {
+            return utf8_to_jstring(env, profile_error("wrong_password").dump());
+        }
+        if (message.find("password is required") != std::string::npos) {
+            return utf8_to_jstring(env, profile_error("needs_password").dump());
+        }
+        nlohmann::json json = profile_error("failed");
+        json["error"] = message;
+        return utf8_to_jstring(env, json.dump());
+    } catch (const std::exception& ex) {
+        nlohmann::json json = profile_error("failed");
+        json["error"] = ex.what();
+        return utf8_to_jstring(env, json.dump());
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeRenameProfile(
+    JNIEnv* env, jclass, jstring j_root, jstring j_from, jstring j_to) {
+    const std::string from = jstring_to_utf8(env, j_from);
+    const std::string to = jstring_to_utf8(env, j_to);
+    if (from == kTransientProfile || to == kTransientProfile) {
+        return utf8_to_jstring(env, profile_error("reserved").dump());
+    }
+    if (!i2pchat::storage::is_valid_profile_name(from) ||
+        !i2pchat::storage::is_valid_profile_name(to)) {
+        return utf8_to_jstring(env, profile_error("invalid_name").dump());
+    }
+    if (from == to) {
+        return utf8_to_jstring(env, nlohmann::json{{"ok", true}}.dump());
+    }
+    if (profile_is_open(from)) {
+        return utf8_to_jstring(env, profile_error("busy").dump());
+    }
+    const fs::path root = jstring_to_utf8(env, j_root);
+    const auto source = saved_profile_dir(root, from);
+    if (!source.has_value() || !fs::is_regular_file(*source / (from + ".dat"))) {
+        return utf8_to_jstring(env, profile_error("missing").dump());
+    }
+    std::error_code ec;
+    const fs::path profiles = fs::weakly_canonical(root / "profiles", ec);
+    const fs::path dest = profiles / to;
+    if (ec || fs::exists(dest)) {
+        return utf8_to_jstring(env, profile_error("exists").dump());
+    }
+    bool renamed_dir = false;
+    std::vector<MovedSecret> moved;
+    try {
+        fs::rename(*source, dest);
+        renamed_dir = true;
+        rename_prefixed_files(dest, from, to);
+        if (fs::is_directory(dest / "data")) {
+            rename_prefixed_files(dest / "data", from, to);
+        }
+        move_keyring_account(i2pchat::storage::dat_wrap_keyring_account(from),
+                             i2pchat::storage::dat_wrap_keyring_account(to), moved);
+        move_keyring_account(i2pchat::runtime::signing_keyring_account(from),
+                             i2pchat::runtime::signing_keyring_account(to), moved);
+        return utf8_to_jstring(env, nlohmann::json{{"ok", true}}.dump());
+    } catch (const std::exception& ex) {
+        restore_keyring(moved);
+        std::error_code ignore;
+        if (renamed_dir) {
+            rename_prefixed_files(dest, to, from);
+            if (fs::is_directory(dest / "data")) {
+                rename_prefixed_files(dest / "data", to, from);
+            }
+            fs::rename(dest, *source, ignore);
+        }
+        const std::string message = ex.what();
+        if (message == "exists") {
+            return utf8_to_jstring(env, profile_error("exists").dump());
+        }
+        nlohmann::json json = profile_error("failed");
+        json["error"] = message;
+        return utf8_to_jstring(env, json.dump());
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeDeleteProfile(
+    JNIEnv* env, jclass, jstring j_root, jstring j_profile) {
+    const std::string name = jstring_to_utf8(env, j_profile);
+    if (name == kTransientProfile) {
+        return utf8_to_jstring(env, profile_error("reserved").dump());
+    }
+    if (!i2pchat::storage::is_valid_profile_name(name)) {
+        return utf8_to_jstring(env, profile_error("invalid_name").dump());
+    }
+    if (profile_is_open(name)) {
+        return utf8_to_jstring(env, profile_error("busy").dump());
+    }
+    const auto dir = saved_profile_dir(jstring_to_utf8(env, j_root), name);
+    if (!dir.has_value()) {
+        return utf8_to_jstring(env, profile_error("missing").dump());
+    }
+    std::error_code ec;
+    fs::remove_all(*dir, ec);
+    if (ec || fs::exists(*dir)) {
+        return utf8_to_jstring(env, profile_error("failed").dump());
+    }
+    i2pchat::storage::keyring::erase(i2pchat::storage::kKeyringService,
+                                     i2pchat::storage::dat_wrap_keyring_account(name));
+    i2pchat::storage::keyring::erase(i2pchat::storage::kKeyringService,
+                                     i2pchat::runtime::signing_keyring_account(name));
+    return utf8_to_jstring(env, nlohmann::json{{"ok", true}}.dump());
 }
 
 extern "C" JNIEXPORT jstring JNICALL

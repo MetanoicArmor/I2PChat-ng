@@ -44,6 +44,9 @@ data class MessageUi(
     val ts: String,
     val sender: String = "",
     val delivery: String = "",
+    val deliveryHint: String = "",
+    val deliveryReason: String = "",
+    val retryable: Boolean = false,
     val messageId: String = "",
     /** Absolute local path when `text` is `[image] …`; empty for plain messages. */
     val imagePath: String = "",
@@ -129,8 +132,30 @@ data class FileOfferPrompt(
     val size: Long,
 )
 
+data class ProfileOp(
+    val ok: Boolean,
+    val code: String = "",
+    val address: String = "",
+    val error: String = "",
+)
+
+private fun profileOp(json: String): ProfileOp {
+    val obj = runCatching { JSONObject(json) }.getOrNull()
+        ?: return ProfileOp(ok = false, code = "failed")
+    return ProfileOp(
+        ok = obj.optBoolean("ok"),
+        code = obj.optString("code"),
+        address = obj.optString("address"),
+        error = obj.optString("error"),
+    )
+}
+
 data class ChatUiState(
     val profiles: List<String> = emptyList(),
+    /** Base32 address for a saved profile that can be opened without a password. */
+    val profileAddresses: Map<String, String> = emptyMap(),
+    /** Saved profiles whose identity is sealed with a password. */
+    val lockedProfiles: Set<String> = emptySet(),
     val profile: String = "",
     val running: Boolean = false,
     val starting: Boolean = false,
@@ -221,15 +246,68 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     fun refreshProfiles() {
+        viewModelScope.launch(Dispatchers.IO) { loadProfiles() }
+    }
+
+    private fun loadProfiles() {
+        val names = runCatching {
+            JSONArray(NativeEngine.nativeListProfiles(appRoot.absolutePath))
+        }.getOrNull() ?: JSONArray()
+        val saved = buildList {
+            for (i in 0 until names.length()) add(names.getString(i))
+        }.distinct()
+        val addresses = mutableMapOf<String, String>()
+        val locked = mutableSetOf<String>()
+        for (name in saved) {
+            val op = profileOp(NativeEngine.nativeProfileAddress(appRoot.absolutePath, name, ""))
+            when {
+                op.ok && op.address.isNotBlank() -> addresses[name] = op.address
+                op.code == "needs_password" -> locked += name
+            }
+        }
+        val list = buildList {
+            add("random_address")
+            addAll(saved)
+        }.distinct()
+        _state.update {
+            it.copy(profiles = list, profileAddresses = addresses, lockedProfiles = locked)
+        }
+    }
+
+    fun profileAddress(name: String, password: String, done: (ProfileOp) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val names = runCatching {
-                JSONArray(NativeEngine.nativeListProfiles(appRoot.absolutePath))
-            }.getOrNull() ?: JSONArray()
-            val list = buildList {
-                add("random_address")
-                for (i in 0 until names.length()) add(names.getString(i))
-            }.distinct()
-            _state.update { it.copy(profiles = list) }
+            val op = runCatching {
+                profileOp(NativeEngine.nativeProfileAddress(appRoot.absolutePath, name, password))
+            }.getOrElse { ProfileOp(ok = false, code = "failed", error = it.message.orEmpty()) }
+            if (op.ok && op.address.isNotBlank()) {
+                _state.update {
+                    it.copy(
+                        profileAddresses = it.profileAddresses + (name to op.address),
+                        lockedProfiles = it.lockedProfiles - name,
+                    )
+                }
+            }
+            onMain { done(op) }
+        }
+    }
+
+    fun renameProfile(from: String, to: String, done: (ProfileOp) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val op = runCatching {
+                profileOp(NativeEngine.nativeRenameProfile(appRoot.absolutePath, from, to.trim()))
+            }.getOrElse { ProfileOp(ok = false, code = "failed", error = it.message.orEmpty()) }
+            if (op.ok) loadProfiles()
+            onMain { done(op) }
+        }
+    }
+
+    fun deleteProfile(name: String, done: (ProfileOp) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val op = runCatching {
+                profileOp(NativeEngine.nativeDeleteProfile(appRoot.absolutePath, name))
+            }.getOrElse { ProfileOp(ok = false, code = "failed", error = it.message.orEmpty()) }
+            if (op.ok) loadProfiles()
+            onMain { done(op) }
         }
     }
 
@@ -625,6 +703,21 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    /** Send again without touching the draft. Desktop retry does the same for text. */
+    fun resend(text: String) {
+        val id = _state.value.selectedId
+        val body = text.trim()
+        if (id.isBlank() || body.isBlank()) return
+        val group = _state.value.selectedIsGroup
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!group) ensureLiveForSend(id)
+            if (group) NativeEngine.nativeSendGroupText(id, body)
+            else NativeEngine.nativeSendText(id, body)
+            loadHistory()
+            refreshSnapshot()
+        }
+    }
+
     private fun peerLiveInSnapshot(addr: String): Boolean {
         val snap = runCatching { JSONObject(NativeEngine.nativeSnapshot()) }.getOrNull() ?: return false
         val arr = snap.optJSONArray("contacts") ?: return false
@@ -885,6 +978,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                             ts = o.optString("ts").ifBlank { o.optString("createdAt") },
                             sender = o.optString("senderId"),
                             delivery = o.optString("deliveryState"),
+                            deliveryHint = o.optString("deliveryHint"),
+                            deliveryReason = o.optString("deliveryReason"),
+                            retryable = o.optBoolean("retryable"),
                             messageId = o.optString("messageId").ifBlank { o.optString("msgId") },
                             imagePath = resolveChatImagePath(text, appRoot),
                             filePath = resolveChatFilePath(text, appRoot),
