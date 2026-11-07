@@ -41,9 +41,45 @@ normalize_linux_i2pd_bundle_dir() {
   fi
 }
 
+# True when the Mach-O still needs Homebrew/OpenSSL/Boost (not redistributable alone).
+darwin_i2pd_needs_third_party_dylibs() {
+  local bin="$1"
+  [[ -f "$bin" ]] || return 1
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  command -v otool >/dev/null 2>&1 || return 1
+  otool -L "$bin" 2>/dev/null | awk 'NR>1 {print $1}' | grep -Eq 'homebrew|/opt/|@rpath/lib(ssl|crypto|boost)|@loader_path/lib(ssl|crypto|boost)'
+}
+
+refresh_darwin_i2pd_if_dynamic() {
+  # Old vendor copies were Homebrew-linked (~7–8 MiB) without matching *.dylib.
+  # Prefer a static payload from sibling/git (~11 MiB, system libs only).
+  local sub bin
+  case "$(uname -m)" in
+    x86_64) sub=darwin-x64 ;;
+    arm64) sub=darwin-arm64 ;;
+    *) return 0 ;;
+  esac
+  bin="${ROOT}/vendor/i2pd/${sub}/i2pd"
+  darwin_i2pd_needs_third_party_dylibs "$bin" || return 0
+
+  log "==> Bundled Darwin i2pd links third-party dylibs — refreshing from payload source"
+  rm -f "${ROOT}/vendor/i2pd/${sub}/"*.dylib
+  if [[ -n "${SOURCE_DIR}" ]] && stage_from_dir "${SOURCE_DIR}"; then
+    return 0
+  fi
+  if stage_from_dir "${SIBLING_DIR}"; then
+    return 0
+  fi
+  if stage_from_git; then
+    return 0
+  fi
+  log "==> WARN: could not refresh Darwin i2pd; run scripts/stage_i2pd_darwin_dylibs.sh or replace vendor/i2pd/${sub}/i2pd with a static build"
+}
+
 normalize_bundled() {
   normalize_linux_i2pd_bundle_dir "${ROOT}/vendor/i2pd/linux-x86_64"
   normalize_linux_i2pd_bundle_dir "${ROOT}/vendor/i2pd/linux-aarch64"
+  refresh_darwin_i2pd_if_dynamic || true
 }
 
 has_any_bundled() {

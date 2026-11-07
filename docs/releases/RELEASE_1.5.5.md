@@ -14,6 +14,7 @@
 - Message actions on Android catch up with desktop: long-press copy/reply/retry, rename contact notes, and copy peer address.
 - Notification taps no longer spawn a second activity that drops the open session back to the profile chooser; they reuse the running screen and open the peer chat when the session is live.
 - Image and file transfers no longer drop an in-flight frame on a read timeout (avoids desyncing replay protection). Android also surfaces the real bundled-router failure text and lets i2pd bind IPv6/SSU2.
+- macOS bundled i2pd uses the static `darwin-arm64` payload again (system libs only). The previous Homebrew-linked binary failed at launch without Boost/OpenSSL `*.dylib` next to it.
 
 ### Compatibility
 
@@ -44,6 +45,7 @@ CI uploads the draft without `SHA256SUMS.asc` (`I2PCHAT_SKIP_GPG_SIGN=1`). Sign 
 - Действия с сообщениями на Android ближе к десктопу: долгое нажатие — копировать / ответить / повторить, заметка контакта, копирование адреса собеседника.
 - Нажатие на уведомление больше не создаёт вторую активность и не сбрасывает сессию на выбор профиля: возвращает текущий экран и открывает чат, если сессия уже запущена.
 - Передача картинок и файлов больше не теряет кадр при таймауте чтения (не ломает replay protection). На Android показывается реальный текст ошибки встроенного роутера; i2pd может слушать IPv6/SSU2.
+- Встроенный i2pd на macOS снова статический payload `darwin-arm64` (только системные библиотеки). Прежний Homebrew-бинарь без Boost/OpenSSL `*.dylib` рядом не запускался.
 
 ### Совместимость
 

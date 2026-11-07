@@ -34,7 +34,16 @@ fi
 
 echo "==> Checking optional bundled i2pd source"
 "$(pwd)/scripts/ensure_bundled_i2pd.sh"
-if [ ! -f "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" ]; then
+if [ -f "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" ]; then
+  # Static payload needs nothing else. Homebrew-linked builds need staged *.dylib.
+  if otool -L "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" 2>/dev/null \
+    | awk 'NR>1 {print $1}' \
+    | grep -Eq 'homebrew|/opt/|@rpath/lib(ssl|crypto|boost)|@loader_path/lib(ssl|crypto|boost)'; then
+    "$(pwd)/scripts/stage_i2pd_darwin_dylibs.sh" || {
+      echo "WARN: could not stage Darwin i2pd dylibs — bundled router may fail to start." >&2
+    }
+  fi
+else
   echo "WARN: нет vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd — .app будет без встроенного i2pd (см. build-linux.sh / docs/BUILD.md)." >&2
 fi
 
@@ -85,10 +94,16 @@ rm -rf "dist/${APP_NAME}.app"
 mkdir -p "dist/${APP_NAME}.app/Contents/MacOS" "dist/${APP_NAME}.app/Contents/Resources"
 cp -R "dist/${APP_NAME}" "dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}"
 if [ -f "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" ]; then
-  mkdir -p "dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"
-  cp "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" \
-    "dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd"
-  chmod +x "dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd"
+  I2PD_APP_VENDOR="dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"
+  mkdir -p "${I2PD_APP_VENDOR}"
+  cp "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" "${I2PD_APP_VENDOR}/i2pd"
+  chmod +x "${I2PD_APP_VENDOR}/i2pd"
+  # Keep Boost/OpenSSL next to i2pd in the non-_internal copy as well.
+  shopt -s nullglob
+  for dy in "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"/*.dylib; do
+    cp "$dy" "${I2PD_APP_VENDOR}/"
+  done
+  shopt -u nullglob
 else
   echo "==> No local bundled macOS i2pd found (ensure_bundled_i2pd clones https://github.com/MetanoicArmor/i2pchat-bundled-i2pd by default, or run ./scripts/fetch_bundled_i2pd.sh --from …)"
 fi

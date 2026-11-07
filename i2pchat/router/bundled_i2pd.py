@@ -265,12 +265,19 @@ def _tighten_permissions(path: str, mode: int) -> None:
 
 
 def _subprocess_env_with_i2pd_libdir(binary: str) -> dict[str, str]:
-    """Put i2pd's directory first on LD_LIBRARY_PATH so bundled *.so (e.g. Boost) load before AppImage _internal."""
+    """Prefer libs next to i2pd (Boost/OpenSSL) over AppImage/_internal shadows."""
     env = os.environ.copy()
     if sys.platform == "win32":
         return env
     bindir = os.path.dirname(os.path.abspath(binary))
     if not bindir:
+        return env
+    if sys.platform == "darwin":
+        # @loader_path is primary after stage_i2pd_darwin_dylibs.sh; keep a
+        # fallback path for binaries that still look via DYLD_*.
+        for key in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+            prev = env.get(key, "")
+            env[key] = bindir if not prev else f"{bindir}{os.pathsep}{prev}"
         return env
     key = "LD_LIBRARY_PATH"
     prev = env.get(key, "")
@@ -1084,11 +1091,19 @@ class BundledI2pdManager:
         while loop.time() < deadline:
             if proc.returncode is not None:
                 rc = proc.returncode
-                hint = (
-                    "See {log} — common causes: missing Boost/OpenSSL *.so next to "
-                    "vendor/i2pd/linux-*/i2pd; i2pd/libi2pd.so version skew (SIGSEGV/-11); "
-                    "or another instance holding the pidfile (exit 1)."
-                ).format(log=rt.log_path)
+                if sys.platform == "darwin":
+                    hint = (
+                        "See {log} — common causes: missing Boost/OpenSSL *.dylib "
+                        "next to vendor/i2pd/darwin-*/i2pd (run "
+                        "scripts/stage_i2pd_darwin_dylibs.sh); or another instance "
+                        "holding the pidfile (exit 1)."
+                    ).format(log=rt.log_path)
+                else:
+                    hint = (
+                        "See {log} — common causes: missing Boost/OpenSSL *.so next to "
+                        "vendor/i2pd/linux-*/i2pd; i2pd/libi2pd.so version skew "
+                        "(SIGSEGV/-11); or another instance holding the pidfile (exit 1)."
+                    ).format(log=rt.log_path)
                 if rc in (-11, 139):  # SIGSEGV / 128+11
                     hint = (
                         f"See {rt.log_path} — exit {rc} is usually SIGSEGV from mismatched "

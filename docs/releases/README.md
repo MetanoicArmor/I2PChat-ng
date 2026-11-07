@@ -4,7 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
-| **1.5.5** | [RELEASE_1.5.5.md](RELEASE_1.5.5.md) — Android chat shell, terminal palettes, profile tools; notification tap keeps the session; image transfer read-timeout fix |
+| **1.5.5** | [RELEASE_1.5.5.md](RELEASE_1.5.5.md) — Android chat shell, terminal palettes, profile tools; notification tap keeps the session; image transfer read-timeout fix; static macOS bundled i2pd |
 | **1.5.4** | [RELEASE_1.5.4.md](RELEASE_1.5.4.md) — Android bundled i2pd via I2pdNative (JNI_OnLoad fix); shorter compact group invites |
 | **1.5.3** | [RELEASE_1.5.3.md](RELEASE_1.5.3.md) — Status section, remote SAM opt-in, file folders, auto-reconnect, optional profile password, GitHub update check |
 | **1.5.2** | [RELEASE_1.5.2.md](RELEASE_1.5.2.md) — `python` is the shipping desktop again (PyQt6 + Textual); 1.5.1 Trust gate on Python and Android; tag publish verifies assets before the release goes public |
