@@ -1,6 +1,6 @@
 # Homebrew (Cask)
 
-Каски ставят **Python** macOS-сборки с [I2PChat-ng Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases). Сейчас в формулах версия **1.4.1** и её SHA256: это последний релиз с PyQt6-архивами. **1.5.0** и **1.5.1** на странице релизов — десктоп C++; их хеши сюда не подставлять. После публикации **1.5.2** обновите `version` и `sha256` из `SHA256SUMS.macos-*`.
+Каски ставят **Python** macOS-сборки с [I2PChat-ng Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases). Сейчас в формулах версия **1.5.2** и SHA256 из `SHA256SUMS.macos-*` того релиза. **1.5.0** и **1.5.1** — десктоп C++; их хеши сюда не подставлять.
 
 - [`Casks/i2pchat.rb`](Casks/i2pchat.rb) — GUI: `I2PChat.app` из zip релиза (**arm64** / **x64** отдельные URL и SHA256 в `on_arm` / `on_intel`).
 - [`Casks/i2pchat-tui.rb`](Casks/i2pchat-tui.rb) — только TUI: **`on_arm`** → `I2PChat-macOS-arm64-tui-vX.Y.Z.zip`, **`on_intel`** → `I2PChat-macOS-x64-tui-vX.Y.Z.zip` (без `.app`).
