@@ -56,6 +56,8 @@ _EN: dict[str, str] = {
     "peer_link.offline_blindbox": "offline · delivery via BlindBox",
     # Status view
     "status.title": "Status",
+    "status.open_hint": "Click to open the full status.",
+    "status.close_hint": "Click to return to the chat.",
     "status.chats": "Chats",
     "status.ready": "Ready to chat",
     "status.not_ready": "Not ready yet",
@@ -78,6 +80,53 @@ _EN: dict[str, str] = {
     "status.copy_address": "Copy address",
     "status.router_settings": "Router settings",
     "status.restart_router": "Restart built-in i2pd",
+    "menu.language": "Language: English",
+    "menu.language.hint": "Switches this window between English and Russian.",
+    "ui.send": "Send",
+    "ui.connect": "Connect",
+    "ui.disconnect": "Disconnect",
+    "ui.groups": "Groups",
+    "ui.new": "New",
+    "ui.saved_peers": "Saved peers",
+    "ui.search_placeholder": "Search in this chat…",
+    "ui.search_prev": "Previous match",
+    "ui.search_next": "Next match",
+    "ui.addr_placeholder": "Peer base32 address (optional .b32.i2p when pasting)",
+    "ui.compose_enter": (
+        "Type message. Enter = send; Shift+Enter = new line; {send_mod} also sends. "
+        "Drag and drop images or files to send."
+    ),
+    "ui.compose_newline": (
+        "Type message. Enter = new line; Shift+Enter = new line; {send_mod} = send. "
+        "Drag and drop images or files to send."
+    ),
+    "menu.load_profile": "Load profile (.dat)",
+    "menu.send_picture": "Send picture",
+    "menu.send_file": "Send file",
+    "menu.new_group": "New text group…",
+    "menu.join_group": "Join group via invite…",
+    "menu.blindbox": "BlindBox diagnostics",
+    "menu.export_profile": "Export profile backup…",
+    "menu.import_profile": "Import profile backup…",
+    "menu.export_history": "Export history backup…",
+    "menu.import_history": "Import history backup…",
+    "menu.updates": "Check for updates…",
+    "menu.open_dir": "Open App dir",
+    "menu.router": "I2P router…",
+    "menu.forget_key": "Forget pinned peer key",
+    "menu.copy_address": "Copy my address",
+    "menu.history_on": "Chat history: ON",
+    "menu.history_off": "Chat history: OFF",
+    "menu.clear_history": "Clear history",
+    "menu.incoming_files": "Incoming files…",
+    "menu.profile_password": "Profile password…",
+    "menu.retention": "History retention…",
+    "menu.privacy_on": "Privacy mode: ON",
+    "menu.privacy_off": "Privacy mode: OFF",
+    "menu.enter_on": "Enter sends message: ON",
+    "menu.enter_off": "Enter sends message: OFF",
+    "menu.sound_on": "Notification sound: ON",
+    "menu.sound_off": "Notification sound: OFF",
     "status.network_not_ready": "Network is not ready. Open Status for details.",
     # Router diagnostics
     "diag.system_sam_unreachable": (
@@ -159,6 +208,8 @@ _RU: dict[str, str] = {
     "peer_link.offline": "не в сети",
     "peer_link.offline_blindbox": "не в сети · доставка через BlindBox",
     "status.title": "Статус",
+    "status.open_hint": "Нажмите, чтобы открыть подробный статус.",
+    "status.close_hint": "Нажмите, чтобы вернуться в чат.",
     "status.chats": "Чаты",
     "status.ready": "Готово к работе",
     "status.not_ready": "Ещё не готово",
@@ -181,6 +232,53 @@ _RU: dict[str, str] = {
     "status.copy_address": "Скопировать адрес",
     "status.router_settings": "Настройки роутера",
     "status.restart_router": "Перезапустить встроенный i2pd",
+    "menu.language": "Язык: Русский",
+    "menu.language.hint": "Переключает это окно между русским и английским.",
+    "ui.send": "Отправить",
+    "ui.connect": "Подключить",
+    "ui.disconnect": "Отключить",
+    "ui.groups": "Группы",
+    "ui.new": "Новая",
+    "ui.saved_peers": "Сохранённые",
+    "ui.search_placeholder": "Поиск в этом чате…",
+    "ui.search_prev": "Предыдущее совпадение",
+    "ui.search_next": "Следующее совпадение",
+    "ui.addr_placeholder": "Адрес собеседника (можно вставить .b32.i2p)",
+    "ui.compose_enter": (
+        "Сообщение. Enter — отправить, Shift+Enter — новая строка, {send_mod} тоже отправляет. "
+        "Картинки и файлы можно перетащить сюда."
+    ),
+    "ui.compose_newline": (
+        "Сообщение. Enter — новая строка, Shift+Enter — новая строка, {send_mod} — отправить. "
+        "Картинки и файлы можно перетащить сюда."
+    ),
+    "menu.load_profile": "Загрузить профиль (.dat)",
+    "menu.send_picture": "Отправить картинку",
+    "menu.send_file": "Отправить файл",
+    "menu.new_group": "Новая группа…",
+    "menu.join_group": "Вступить по приглашению…",
+    "menu.blindbox": "Диагностика BlindBox",
+    "menu.export_profile": "Экспорт профиля…",
+    "menu.import_profile": "Импорт профиля…",
+    "menu.export_history": "Экспорт истории…",
+    "menu.import_history": "Импорт истории…",
+    "menu.updates": "Проверить обновления…",
+    "menu.open_dir": "Папка приложения",
+    "menu.router": "Роутер I2P…",
+    "menu.forget_key": "Забыть ключ собеседника",
+    "menu.copy_address": "Копировать мой адрес",
+    "menu.history_on": "История чата: вкл",
+    "menu.history_off": "История чата: выкл",
+    "menu.clear_history": "Очистить историю",
+    "menu.incoming_files": "Входящие файлы…",
+    "menu.profile_password": "Пароль профиля…",
+    "menu.retention": "Хранение истории…",
+    "menu.privacy_on": "Приватный режим: вкл",
+    "menu.privacy_off": "Приватный режим: выкл",
+    "menu.enter_on": "Enter отправляет: вкл",
+    "menu.enter_off": "Enter отправляет: выкл",
+    "menu.sound_on": "Звук уведомлений: вкл",
+    "menu.sound_off": "Звук уведомлений: выкл",
     "status.network_not_ready": "Сеть не готова. Подробности — в разделе «Статус».",
     "diag.system_sam_unreachable": (
         "Не могу подключиться к системному i2pd по адресу {addr}. Проверьте, что "
@@ -256,10 +354,14 @@ def current_language() -> str:
     return _language
 
 
-def set_language(lang: str) -> None:
-    """Override detection (e.g. from ``QLocale().name()``); unknown codes fall back to en."""
+def set_language(lang: str, *, force: bool = False) -> None:
+    """Override detection (e.g. from ``QLocale().name()``); unknown codes fall back to en.
+
+    ``I2PCHAT_LANG`` still wins unless ``force`` is set. The ⋯ menu uses
+    ``force`` so a saved choice is not ignored on the next click.
+    """
     global _language
-    if _normalize(os.environ.get("I2PCHAT_LANG", "")):
+    if not force and _normalize(os.environ.get("I2PCHAT_LANG", "")):
         return
     _language = _normalize(lang) or "en"
 

@@ -70,6 +70,17 @@ def test_render_notice_localized(monkeypatch):
     assert render_notice(unknown) == "Some brand new message"
 
 
+def test_menu_language_overrides_env(monkeypatch):
+    monkeypatch.setenv("I2PCHAT_LANG", "en")
+    i18n.set_language("ru")
+    assert i18n.current_language() == "en"
+    i18n.set_language("ru", force=True)
+    assert i18n.current_language() == "ru"
+    assert i18n.tr("menu.language") == "Язык: Русский"
+    i18n.set_language("en", force=True)
+    assert i18n.tr("menu.language") == "Language: English"
+
+
 def test_language_detection(monkeypatch):
     monkeypatch.delenv("I2PCHAT_LANG")
     monkeypatch.setenv("LC_ALL", "")

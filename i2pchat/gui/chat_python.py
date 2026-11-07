@@ -64,7 +64,7 @@ from i2pchat.core.transient_profile import (
 from i2pchat.presentation.compose_drafts import apply_compose_draft_peer_switch
 from i2pchat.presentation.reply_format import format_reply_quote
 from i2pchat.presentation.status_presentation import build_status_presentation
-from i2pchat.presentation.i18n import tr
+from i2pchat.presentation.i18n import set_language, tr
 from i2pchat.presentation.readiness import ReadinessTracker
 from i2pchat.presentation.notices import (
     Notice,
@@ -309,6 +309,11 @@ class I2PChat(App):
         self._notice_log = NoticeLog()
         self._readiness = ReadinessTracker()
         self._verbose_log_enabled = self._load_ui_prefs().get("verbose_log") is True
+        saved_lang = self._load_ui_prefs().get("ui_language")
+        if isinstance(saved_lang, str) and saved_lang.strip().lower().startswith("ru"):
+            set_language("ru", force=True)
+        elif isinstance(saved_lang, str) and saved_lang.strip().lower().startswith("en"):
+            set_language("en", force=True)
         self._active_group_id: Optional[str] = None
         self._loaded_group_history_id: Optional[str] = None
 

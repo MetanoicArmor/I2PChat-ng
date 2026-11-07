@@ -67,7 +67,7 @@ from i2pchat.presentation.reply_format import format_reply_quote
 from i2pchat.core.live_peer_session import max_concurrent_live_sessions
 from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _should_start_auto_connect_retry
 from i2pchat.presentation.status_presentation import build_status_presentation
-from i2pchat.presentation.i18n import set_language, tr
+from i2pchat.presentation.i18n import current_language, set_language, tr
 from i2pchat.presentation.readiness import ReadinessTracker
 from i2pchat.presentation.notices import (
     Notice,
@@ -1033,6 +1033,9 @@ THEMES: dict[str, dict[str, object]] = {
                 color: #525966;
 %(status_ui_font_family_qss)s                font-size: %(status_font_px)spx;
             }
+            QLabel#StatusLabel:hover {
+                background-color: #e8edf5;
+            }
             QMessageBox { background-color: #f5f5f7; color: #1d1d1f; }
             QMessageBox QLabel { color: #1d1d1f; }
             QMessageBox QPushButton {
@@ -1599,6 +1602,9 @@ THEMES: dict[str, dict[str, object]] = {
                 color: #9fa1b5;
 %(status_ui_font_family_qss)s                font-size: %(status_font_px)spx;
             }
+            QLabel#StatusLabel:hover {
+                background-color: rgba(255, 255, 255, 0.12);
+            }
             QMessageBox { background-color: #1f1f23; color: #f5f5f7; }
             QMessageBox QLabel { color: #f5f5f7; }
             QMessageBox QPushButton {
@@ -1925,6 +1931,23 @@ def _save_ui_prefs(data: dict[str, object]) -> None:
         atomic_write_json(path, data)
     except Exception:
         pass
+
+
+def load_saved_ui_language() -> Optional[str]:
+    raw = _load_ui_prefs().get("ui_language")
+    if not isinstance(raw, str):
+        return None
+    code = raw.strip().lower().replace("-", "_").split(".")[0].split("_")[0]
+    return code if code in ("en", "ru") else None
+
+
+def save_ui_language(lang: str) -> None:
+    code = lang.strip().lower().replace("-", "_").split(".")[0].split("_")[0]
+    if code not in ("en", "ru"):
+        return
+    data = _load_ui_prefs()
+    data["ui_language"] = code
+    _save_ui_prefs(data)
 
 
 def load_saved_theme() -> str:
@@ -4086,7 +4109,7 @@ class ActionsPopupButton(QtWidgets.QFrame):
         self._shortcut_hint = (shortcut_hint or "").strip()
 
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(10)
 
         self._title_label = QtWidgets.QLabel(text, self)
@@ -4202,8 +4225,8 @@ class ActionsPopup(QtWidgets.QFrame):
         root.addWidget(self.surface)
 
         self.surface_layout = QtWidgets.QVBoxLayout(self.surface)
-        self.surface_layout.setContentsMargins(8, 8, 8, 8)
-        self.surface_layout.setSpacing(4)
+        self.surface_layout.setContentsMargins(8, 6, 8, 6)
+        self.surface_layout.setSpacing(2)
         self._actions_popup_theme_night: bool = False
         self._kb_button_index: int = -1
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
@@ -4298,12 +4321,14 @@ class ActionsPopup(QtWidgets.QFrame):
         *,
         tool_tip: Optional[str] = None,
         shortcut_hint: Optional[str] = None,
+        text_key: Optional[str] = None,
     ) -> ActionsPopupButton:
         btn = ActionsPopupButton(
-            text,
+            tr(text_key) if text_key else text,
             self.surface,
             shortcut_hint=shortcut_hint,
         )
+        btn._i18n_key = text_key  # type: ignore[attr-defined]
         btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn.setEnabled(enabled)
         if tool_tip:
@@ -4313,6 +4338,12 @@ class ActionsPopup(QtWidgets.QFrame):
         self.surface_layout.addWidget(btn)
         btn.apply_action_row_colors(night=self._actions_popup_theme_night)
         return btn
+
+    def retranslate(self) -> None:
+        for btn in self._iter_action_buttons():
+            key = getattr(btn, "_i18n_key", None)
+            if key:
+                btn.setText(tr(key))
 
     def add_separator(self) -> None:
         sep = QtWidgets.QFrame(self.surface)
@@ -4420,7 +4451,7 @@ class ActionsPopup(QtWidgets.QFrame):
                     max-height: 1px;
                     min-height: 1px;
                     border: none;
-                    margin: 4px 8px;
+                    margin: 2px 8px;
                 }
                 """
         items_light = """
@@ -4450,7 +4481,7 @@ class ActionsPopup(QtWidgets.QFrame):
                     max-height: 1px;
                     min-height: 1px;
                     border: none;
-                    margin: 4px 8px;
+                    margin: 2px 8px;
                 }
                 """
         if self._win_menu_chrome:
@@ -5246,13 +5277,16 @@ class _SidebarSectionHeader(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 22, 0, 4)
         lay.setSpacing(0)
-        lab = QtWidgets.QLabel(title)
-        lab.setObjectName("ContactsSidebarTitle")
-        lay.addWidget(lab)
+        self._title = QtWidgets.QLabel(title)
+        self._title.setObjectName("ContactsSidebarTitle")
+        lay.addWidget(self._title)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+
+    def set_title(self, title: str) -> None:
+        self._title.setText(title)
 
 
 def _sidebar_row_preview_one_line(text: str) -> str:
@@ -6413,14 +6447,8 @@ def _compose_input_placeholder_text(*, enter_sends: bool) -> str:
         else "Ctrl+Enter"
     )
     if enter_sends:
-        return (
-            f"Type message. Enter = send; Shift+Enter = new line; {send_mod} also sends. "
-            "Drag and drop images or files to send."
-        )
-    return (
-        f"Type message. Enter = new line; Shift+Enter = new line; {send_mod} = send. "
-        "Drag and drop images or files to send."
-    )
+        return tr("ui.compose_enter", send_mod=send_mod)
+    return tr("ui.compose_newline", send_mod=send_mod)
 
 
 def _compose_send_shortcut_tooltip_text(*, enter_sends: bool) -> str:
@@ -6479,6 +6507,26 @@ def _sidebar_saved_peer_sort_key(rec: ContactRecord) -> tuple[str, str]:
 
 # Core service kinds routed to the Status page instead of the chat transcript.
 _SERVICE_MESSAGE_KINDS = frozenset({"info", "success", "disconnect", "system"})
+
+
+class _ClickableStatusLabel(QtWidgets.QLabel):
+    """Bottom status line. A click opens or closes the full status page."""
+
+    clicked = QtCore.pyqtSignal()
+
+    def __init__(self, text: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and self.rect().contains(event.pos())
+        ):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class StatusPanel(QtWidgets.QWidget):
@@ -6547,11 +6595,11 @@ class StatusPanel(QtWidgets.QWidget):
         )
         outer.addWidget(self._checks)
 
-        events_title = QtWidgets.QLabel(tr("status.events"), self)
-        ef = events_title.font()
+        self._events_title = QtWidgets.QLabel(tr("status.events"), self)
+        ef = self._events_title.font()
         ef.setBold(True)
-        events_title.setFont(ef)
-        outer.addWidget(events_title)
+        self._events_title.setFont(ef)
+        outer.addWidget(self._events_title)
         self._events = QtWidgets.QPlainTextEdit(self)
         self._events.setReadOnly(True)
         self._events.setObjectName("StatusEventsLog")
@@ -6570,6 +6618,17 @@ class StatusPanel(QtWidgets.QWidget):
         outer.addWidget(self._verbose, 2)
         self._events_sig: tuple[int, str] = (0, "")
         self._verbose_sig: tuple[int, str] = (0, "")
+
+    def retranslate(self) -> None:
+        self._chats_btn.setText(tr("status.chats") + " →")
+        self._problem_title.setText(tr("status.problem"))
+        self._restart_btn.setText(tr("status.restart_router"))
+        self._settings_btn.setText(tr("status.router_settings"))
+        self._events_title.setText(tr("status.events"))
+        self._verbose_check.setText(tr("status.verbose"))
+        self._verbose_check.setToolTip(tr("status.verbose_hint"))
+        self._events_sig = (0, "")
+        self._verbose_sig = (0, "")
 
     def _on_verbose_toggled(self, on: bool) -> None:
         self._verbose.setVisible(on)
@@ -6728,7 +6787,9 @@ class ChatWindow(QtWidgets.QMainWindow):
         save_notify_quiet_mode(self._notify_quiet_mode)
 
         # диагностическая строка статуса
-        self.status_label = QtWidgets.QLabel("Status: initializing", self)
+        self.status_label = _ClickableStatusLabel("Status: initializing", self)
+        self.status_label.clicked.connect(self._on_status_bar_clicked)
+        self.status_label.setToolTip(tr("status.open_hint"))
         self.status_label.setObjectName("StatusLabel")
         self.status_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -6877,7 +6938,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         _wrap_lay.setSpacing(0)
         self._chat_search_edit = QtWidgets.QLineEdit(self._chat_search_field_wrap)
         self._chat_search_edit.setObjectName("ChatSearchLineEdit")
-        self._chat_search_edit.setPlaceholderText("Search in this chat…")
+        self._chat_search_edit.setPlaceholderText(tr("ui.search_placeholder"))
         self._chat_search_edit.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -6910,7 +6971,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self._chat_search_prev.setToolTip("Previous match")
+        self._chat_search_prev.setToolTip(tr("ui.search_prev"))
         self._chat_search_next = QtWidgets.QPushButton("▶", self._chat_search_row)
         self._chat_search_next.setFixedWidth(36)
         self._chat_search_next.setFixedHeight(_search_row_h)
@@ -6918,7 +6979,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self._chat_search_next.setToolTip("Next match")
+        self._chat_search_next.setToolTip(tr("ui.search_next"))
         search_h.addWidget(self._chat_search_field_wrap, 1)
         search_h.addWidget(self._chat_search_prev)
         search_h.addWidget(self._chat_search_next)
@@ -7013,7 +7074,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         font.setPointSize(font.pointSize() + 1)
         self.input_edit.setFont(font)
 
-        self.send_button = QtWidgets.QPushButton("Send", self)
+        self.send_button = QtWidgets.QPushButton(tr("ui.send"), self)
         self.send_button.setObjectName("PrimaryActionButton")
         self.send_button.setEnabled(False)
 
@@ -7045,7 +7106,7 @@ class ChatWindow(QtWidgets.QMainWindow):
 
         self.addr_edit = AddressLineEdit(self)
         self.addr_edit.setObjectName("PeerAddressEdit")
-        self.addr_edit.setPlaceholderText("Peer base32 address (optional .b32.i2p when pasting)")
+        self.addr_edit.setPlaceholderText(tr("ui.addr_placeholder"))
         # Адрес — главный элемент панели действий
         self.addr_edit.setMinimumWidth(220)
         self.addr_edit.setSizePolicy(
@@ -7053,9 +7114,9 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
 
-        self.connect_button = QtWidgets.QPushButton("Connect", self)
+        self.connect_button = QtWidgets.QPushButton(tr("ui.connect"), self)
         self.connect_button.setObjectName("ConnectPeerButton")
-        self.disconnect_button = QtWidgets.QPushButton("Disconnect", self)
+        self.disconnect_button = QtWidgets.QPushButton(tr("ui.disconnect"), self)
         self.disconnect_button.setObjectName("DisconnectPeerButton")
 
         self.more_toolbar_button = QtWidgets.QToolButton(self)
@@ -7125,12 +7186,12 @@ class ChatWindow(QtWidgets.QMainWindow):
         groups_header_layout.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        groups_title = QtWidgets.QLabel("Groups", self.contacts_sidebar)
-        groups_title.setObjectName("ContactsSidebarTitle")
-        groups_title.setAlignment(
+        self._groups_title = QtWidgets.QLabel(tr("ui.groups"), self.contacts_sidebar)
+        self._groups_title.setObjectName("ContactsSidebarTitle")
+        self._groups_title.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        self.groups_create_btn = QtWidgets.QPushButton("New", self.contacts_sidebar)
+        self.groups_create_btn = QtWidgets.QPushButton(tr("ui.new"), self.contacts_sidebar)
         self.groups_create_btn.setObjectName("GroupsCreateButton")
         self.groups_create_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.groups_create_btn.setToolTip(
@@ -7142,7 +7203,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Minimum,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        groups_header_layout.addWidget(groups_title, 1)
+        groups_header_layout.addWidget(self._groups_title, 1)
         groups_header_layout.addWidget(self.groups_create_btn, 0)
         # Один список: группы сверху, заголовок «Saved peers», контакты; общая прокрутка и выделение.
         self.contacts_list = QtWidgets.QListWidget(self.contacts_sidebar)
@@ -7168,12 +7229,6 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.contacts_list.setViewportMargins(0, 0, 0, 0)
         self._contacts_list_viewport = self.contacts_list.viewport()
         self._contacts_list_viewport.installEventFilter(self)
-        self.status_nav_btn = QtWidgets.QPushButton(tr("status.title"), self.contacts_sidebar)
-        self.status_nav_btn.setObjectName("StatusNavButton")
-        self.status_nav_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.status_nav_btn.setCheckable(True)
-        self.status_nav_btn.clicked.connect(lambda: self._show_status_page())
-        sidebar_layout.addWidget(self.status_nav_btn)
         sidebar_layout.addWidget(groups_header)
         sidebar_layout.addWidget(self.contacts_list, 1)
 
@@ -7315,24 +7370,28 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Load profile (.dat)",
             self.on_load_profile_clicked,
+            text_key="menu.load_profile",
             tool_tip=_tooltip_with_portable_shortcut(menu_tt.TT_LOAD_PROFILE_DAT, "Ctrl+O"),
             shortcut_hint=_native_shortcut_text("Ctrl+O"),
         )
         self.more_actions_popup.add_action(
             "Send picture",
             self.on_send_pic_clicked,
+            text_key="menu.send_picture",
             tool_tip=_tooltip_with_portable_shortcut(menu_tt.TT_SEND_PICTURE, "Ctrl+P"),
             shortcut_hint=_native_shortcut_text("Ctrl+P"),
         )
         self.more_actions_popup.add_action(
             "Send file",
             self.on_send_file_clicked,
+            text_key="menu.send_file",
             tool_tip=_tooltip_with_portable_shortcut(menu_tt.TT_SEND_FILE, "Ctrl+F"),
             shortcut_hint=_native_shortcut_text("Ctrl+F"),
         )
         self.more_actions_popup.add_action(
             "New text group…",
             self._show_create_group_dialog,
+            text_key="menu.new_group",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_NEW_TEXT_GROUP, "Ctrl+G"
             ),
@@ -7341,6 +7400,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Join group via invite…",
             self._show_join_group_invite_dialog,
+            text_key="menu.join_group",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_JOIN_GROUP_INVITE, "Ctrl+J"
             ),
@@ -7349,6 +7409,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "BlindBox diagnostics",
             self._show_blindbox_diagnostics,
+            text_key="menu.blindbox",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_BLINDBOX_DIAGNOSTICS, "Ctrl+D"
             ),
@@ -7357,6 +7418,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Export profile backup…",
             self._export_profile_backup,
+            text_key="menu.export_profile",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_EXPORT_PROFILE_BACKUP, "Ctrl+E"
             ),
@@ -7365,6 +7427,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Import profile backup…",
             self._import_profile_backup,
+            text_key="menu.import_profile",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_IMPORT_PROFILE_BACKUP, "Ctrl+I"
             ),
@@ -7373,6 +7436,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Export history backup…",
             self._export_history_backup,
+            text_key="menu.export_history",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_EXPORT_HISTORY_BACKUP, "Ctrl+Shift+E"
             ),
@@ -7381,6 +7445,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Import history backup…",
             self._import_history_backup,
+            text_key="menu.import_history",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_IMPORT_HISTORY_BACKUP, "Ctrl+Shift+I"
             ),
@@ -7389,6 +7454,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Check for updates…",
             self._on_check_for_updates_clicked,
+            text_key="menu.updates",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_CHECK_UPDATES, "Ctrl+U"
             ),
@@ -7397,6 +7463,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Open App dir",
             self._on_open_app_dir_clicked,
+            text_key="menu.open_dir",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_OPEN_APP_DIR, "Ctrl+Shift+A"
             ),
@@ -7405,6 +7472,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "I2P router…",
             self._open_router_settings_dialog,
+            text_key="menu.router",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_I2P_ROUTER, "Ctrl+R"
             ),
@@ -7414,11 +7482,13 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.more_actions_popup.add_action(
             "Forget pinned peer key",
             self.on_forget_pinned_peer_key_clicked,
+            text_key="menu.forget_key",
             tool_tip=menu_tt.TT_FORGET_PINNED_PEER_KEY,
         )
         self.more_actions_popup.add_action(
             "Copy my address",
             self.on_copy_my_addr_clicked,
+            text_key="menu.copy_address",
             tool_tip=_tooltip_with_portable_shortcut(
                 menu_tt.TT_COPY_MY_ADDRESS, "Ctrl+Shift+C"
             ),
@@ -7432,19 +7502,25 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         self._sync_chat_search_header_with_history()
         self.more_actions_popup.add_action(
-            "Clear history", self._on_clear_history_clicked, tool_tip=menu_tt.TT_CLEAR_HISTORY
+            "Clear history",
+            self._on_clear_history_clicked,
+            tool_tip=menu_tt.TT_CLEAR_HISTORY,
+            text_key="menu.clear_history",
         )
         self.more_actions_popup.add_action(
             "Incoming files…",
             self._configure_incoming_files,
+            text_key="menu.incoming_files",
         )
         self.more_actions_popup.add_action(
             "Profile password…",
             self._configure_profile_password,
+            text_key="menu.profile_password",
         )
         self.more_actions_popup.add_action(
             "History retention…",
             self._configure_history_retention,
+            text_key="menu.retention",
             tool_tip=menu_tt.TT_HISTORY_RETENTION,
         )
         self._privacy_mode_toggle_btn = self.more_actions_popup.add_action(
@@ -7460,16 +7536,18 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._on_toggle_compose_enter_sends_clicked,
             tool_tip=menu_tt.TT_COMPOSE_ENTER_SENDS_TOGGLE,
         )
-        self.more_actions_popup.add_action(
-            tr("status.title"),
-            self._show_status_page,
-        )
         self.more_actions_popup.add_separator()
         self._notify_sound_enabled = load_notify_sound_enabled()
         self._notify_sound_toggle_btn = self.more_actions_popup.add_action(
             self._notify_sound_toggle_label(),
             self._on_toggle_notify_sound_clicked,
             tool_tip=menu_tt.TT_NOTIFICATION_SOUND_TOGGLE,
+        )
+        self._language_toggle_btn = self.more_actions_popup.add_action(
+            tr("menu.language"),
+            self._on_toggle_language_clicked,
+            tool_tip=tr("menu.language.hint"),
+            text_key="menu.language",
         )
         self._setup_more_actions_shortcuts()
         self.chat_view.cancelTransferRequested.connect(self.on_cancel_transfer)
@@ -7509,14 +7587,59 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _status_page_visible(self) -> bool:
         return self._center_stack.currentWidget() is self.status_panel
 
+    def _on_toggle_language_clicked(self) -> None:
+        nxt = "ru" if current_language() != "ru" else "en"
+        set_language(nxt, force=True)
+        save_ui_language(nxt)
+        self._apply_interface_language()
+
+    def _apply_interface_language(self) -> None:
+        self.send_button.setText(tr("ui.send"))
+        self.connect_button.setText(tr("ui.connect"))
+        self.disconnect_button.setText(tr("ui.disconnect"))
+        self._groups_title.setText(tr("ui.groups"))
+        self.groups_create_btn.setText(tr("ui.new"))
+        self.addr_edit.setPlaceholderText(tr("ui.addr_placeholder"))
+        self._chat_search_edit.setPlaceholderText(tr("ui.search_placeholder"))
+        self._chat_search_prev.setToolTip(tr("ui.search_prev"))
+        self._chat_search_next.setToolTip(tr("ui.search_next"))
+        self._refresh_compose_placeholder_shortcuts()
+        self.more_actions_popup.retranslate()
+        self._history_toggle_btn.setText(self._history_toggle_label())
+        self._privacy_mode_toggle_btn.setText(self._privacy_mode_toggle_label())
+        self._compose_enter_sends_toggle_btn.setText(self._compose_enter_sends_toggle_label())
+        self._notify_sound_toggle_btn.setText(self._notify_sound_toggle_label())
+        self._language_toggle_btn.setToolTip(tr("menu.language.hint"))
+        _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
+        for i in range(self.contacts_list.count()):
+            item = self.contacts_list.item(i)
+            if item is None or item.data(_SIDEBAR_LIST_ROLE) != "section":
+                continue
+            header = self.contacts_list.itemWidget(item)
+            if isinstance(header, _SidebarSectionHeader):
+                header.set_title(tr("ui.saved_peers"))
+        self.status_panel.retranslate()
+        self._refresh_status_panel()
+
+    def _status_bar_tooltip(self) -> str:
+        if hasattr(self, "_center_stack") and self._status_page_visible():
+            return tr("status.close_hint")
+        return tr("status.open_hint")
+
+    def _on_status_bar_clicked(self) -> None:
+        if self._status_page_visible():
+            self._show_chat_page()
+        else:
+            self._show_status_page()
+
     def _show_status_page(self) -> None:
         self._center_stack.setCurrentWidget(self.status_panel)
-        self.status_nav_btn.setChecked(True)
+        _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
         self._refresh_status_panel()
 
     def _show_chat_page(self) -> None:
         self._center_stack.setCurrentWidget(self._chat_page)
-        self.status_nav_btn.setChecked(False)
+        _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
 
     def _on_verbose_log_toggled(self, on: bool) -> None:
         self._verbose_log_enabled = bool(on)
@@ -7843,7 +7966,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             sec_item = QtWidgets.QListWidgetItem()
             sec_item.setData(_SIDEBAR_LIST_ROLE, "section")
             sec_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
-            sec_w = _SidebarSectionHeader("Saved peers", lst)
+            sec_w = _SidebarSectionHeader(tr("ui.saved_peers"), lst)
             lst.addItem(sec_item)
             lst.setItemWidget(sec_item, sec_w)
             sec_item.setSizeHint(sec_w.sizeHint())
@@ -11680,7 +11803,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             available,
         )
         self.status_label.setText(elided)
-        _set_tooltip_if_changed(self.status_label, "")
+        _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
 
     def refresh_status_label(self) -> None:
         """Обновить строку статуса с учётом профиля и persist-режима."""
@@ -12555,24 +12678,16 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._save_history_if_needed()
 
     def _history_toggle_label(self) -> str:
-        return "Chat history: ON" if self._history_enabled else "Chat history: OFF"
+        return tr("menu.history_on") if self._history_enabled else tr("menu.history_off")
 
     def _notify_sound_toggle_label(self) -> str:
-        return (
-            "Notification sound: ON"
-            if self._notify_sound_enabled
-            else "Notification sound: OFF"
-        )
+        return tr("menu.sound_on") if self._notify_sound_enabled else tr("menu.sound_off")
 
     def _privacy_mode_toggle_label(self) -> str:
-        return "Privacy mode: ON" if self._privacy_mode_enabled else "Privacy mode: OFF"
+        return tr("menu.privacy_on") if self._privacy_mode_enabled else tr("menu.privacy_off")
 
     def _compose_enter_sends_toggle_label(self) -> str:
-        return (
-            "Enter sends message: ON"
-            if self._compose_enter_sends
-            else "Enter sends message: OFF"
-        )
+        return tr("menu.enter_on") if self._compose_enter_sends else tr("menu.enter_off")
 
     def _refresh_compose_placeholder_shortcuts(self) -> None:
         self.input_edit.setPlaceholderText(
@@ -13893,7 +14008,11 @@ def main() -> None:
     else:
         app = QtWidgets.QApplication.instance() or I2PChatQApplication(sys.argv)
     apply_tooltip_handling(app)
-    set_language(QtCore.QLocale.system().name())
+    saved_lang = load_saved_ui_language()
+    if saved_lang:
+        set_language(saved_lang, force=True)
+    else:
+        set_language(QtCore.QLocale.system().name())
 
     # Единый стиль и шрифт для всех платформ (более предсказуемый рендеринг)
     app.setStyle("Fusion")

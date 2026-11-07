@@ -84,7 +84,7 @@ The **Saved peers** strip on the **left** is your local **contact book** for the
 
 #### 3.2. Status page and verbose log
 
-The app opens on the **Status** page so you can see whether the messenger is ready. In the GUI it is the **Status** button above the contact list (also in the **`⋯`** menu); **Chats →** or clicking a contact returns to the conversation. On Android it is the first bottom tab (**Status / Chats / Settings**); in the TUI it is shown at startup and toggled with **F9** (close with **F9** or **Esc**).
+The app opens on the **Status** page so you can see whether the messenger is ready. In the GUI, click the status line at the bottom to open it again (the same click returns to the chat); **Chats →** or clicking a contact also returns to the conversation. On Android it is the first bottom tab (**Status / Chats / Settings**); in the TUI it is shown at startup and toggled with **F9** (close with **F9** or **Esc**).
 
 - **Readiness checklist**: I2P router (built-in i2pd or system router), router connection (SAM), tunnels, your address, BlindBox offline delivery. The header reads "Ready to chat" once everything is fine.
 - **Problem and what to do**: when the router is unreachable you get actionable advice. For a system i2pd: make sure the router is running, SAM is enabled, and the host and port are correct. For the built-in i2pd the app reads its log and names the cause: reseed failed (check the internet connection and clock sync, use a proxy on first start, or reseed manually if your provider blocks it), clock skew, port in use, no network. **Router settings** and (for the built-in i2pd) **Restart** buttons are next to the advice.
