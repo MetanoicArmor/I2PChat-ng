@@ -110,6 +110,13 @@ jobs:
         with:
           python-version: "3.14"
 
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          # 0.6.14 (test-gate) only knows CPython 3.14 alphas. Release
+          # builds need a uv that can install 3.14.0+; build-linux.sh
+          # requires `uv` on PATH.
+          version: "0.9.5"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -279,14 +286,12 @@ jobs:
 
       - name: Install uv
         env:
-          # Same uv release as test-gate.yml. Both architectures take the
-          # pinned GitHub release tarball with its checksum verified against
-          # a value committed here (not just the .sha256 published next to
-          # the tarball): the build toolchain must not be whatever "latest"
-          # Homebrew or astral.sh happens to serve when the job runs.
-          UV_VERSION: "0.6.14"
-          UV_SHA256_X64: "1d8ecb2eb3b68fb50e4249dc96ac9d2458dc24068848f04f4c5b42af2fd26552"
-          UV_SHA256_ARM64: "4ea4731010fbd1bc8e790e07f199f55a5c7c2c732e9b77f85e302b0bee61b756"
+          # Pinned GitHub release tarball + checksum committed here (not
+          # the .sha256 next to the archive, not Homebrew latest). 0.6.14
+          # only ships CPython 3.14.0a6; PyNaCl then SIGSEGV on import.
+          UV_VERSION: "0.9.5"
+          UV_SHA256_X64: "58b1d4a25aa8ff99147c2550b33dcf730207fe7e0f9a0d5d36a1bbf36b845aca"
+          UV_SHA256_ARM64: "dc098ff224d78ed418e121fd374f655949d2c7031a70f6f6604eaf016a130433"
         run: |
           set -euo pipefail
           if [ "${{ matrix.arch }}" = "x64" ]; then
@@ -438,8 +443,8 @@ jobs:
       - name: Install uv
         shell: pwsh
         env:
-          # Same uv release as test-gate.yml; the installer honours this pin.
-          UV_VERSION: "0.6.14"
+          # Same pin as the macOS/Linux release jobs (needs CPython 3.14.0+).
+          UV_VERSION: "0.9.5"
         run: irm "https://astral.sh/uv/$env:UV_VERSION/install.ps1" | iex
 
       - name: Verify bundled i2pd against committed checksums
