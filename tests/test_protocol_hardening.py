@@ -65,6 +65,27 @@ class _Reader:
         return data
 
 
+class _StallSecondPayloadReader(_Reader):
+    """Takes the second large read out of the buffer, then pauses.
+
+    That is the window where cancelling read_frame drops a whole frame and
+    the following one arrives one sequence ahead.
+    """
+
+    def __init__(self, payload: bytes, stall_s: float) -> None:
+        super().__init__(payload)
+        self._stall_s = stall_s
+        self._large_reads = 0
+
+    async def readexactly(self, n: int) -> bytes:
+        data = await super().readexactly(n)
+        if n > 32:
+            self._large_reads += 1
+            if self._large_reads == 2:
+                await asyncio.sleep(self._stall_s)
+        return data
+
+
 class _Writer:
     def __init__(self) -> None:
         self.buf = bytearray()
@@ -561,6 +582,40 @@ class TestImageTransferHardening(unittest.IsolatedAsyncioTestCase):
             any("connection timed out" in e.lower() for e in errors),
             errors,
         )
+
+    async def test_image_read_timeout_does_not_skip_sequence(self) -> None:
+        """A stall mid-frame must not drop that frame and desync replay protection."""
+        errors: list[str] = []
+        core = self._make_core(on_error=errors.append)
+        core.READ_TIMEOUT = 0.05
+        chunk = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00\x00").decode("ascii")
+        payload = (
+            core.frame_message("G", "photo.png|10")
+            + core.frame_message("G", chunk)
+            + core.frame_message("G", "__IMG_END__")
+        )
+        reader = _StallSecondPayloadReader(payload, stall_s=0.25)
+        conn = (reader, _Writer())
+        k = attach_mock_live_session(
+            core,
+            TEST_PEER_B32,
+            conn,
+            handshake_complete=True,
+            use_encryption=True,
+            shared_key=b"x" * 32,
+        )
+        await core.receive_loop(conn, peer_id=k)
+        self.assertFalse(
+            any("Replay protection" in e for e in errors),
+            errors,
+        )
+        # The end marker is only handled after the stalled chunk. A dropped
+        # chunk shows up as a sequence gap instead of an image error.
+        self.assertTrue(
+            any("Received invalid image" in e or "Image transfer incomplete" in e for e in errors),
+            errors,
+        )
+        self.assertEqual(reader._large_reads, 3)
 
 
 if __name__ == "__main__":

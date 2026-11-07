@@ -31,7 +31,7 @@ _RESEED_GAVE_UP = re.compile(
     r"|Reseed: No reseed servers specified"
 )
 _SU3_FAILED = re.compile(r"Reseed: SU3 download failed")
-_NO_NETWORK = re.compile(r"Network is unreachable|No route to host")
+_NO_NETWORK = re.compile(r"Network is unreachable|No route to host|Failed to start Transports")
 
 
 @dataclass(frozen=True)

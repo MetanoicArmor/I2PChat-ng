@@ -196,28 +196,28 @@ class I2pdForegroundService : Service() {
                     publish(text, alive = samUp)
                     notify(text)
                 } else {
-                    val error = getString(R.string.svc_start_failed, result.ifBlank { "start failed" })
-                    publish(error, alive = false, failed = true)
-                    notify(error)
+                    publishFailure(getString(R.string.svc_start_failed, result.ifBlank { "start failed" }))
                     beginExit(reportStopped = false)
                 }
             } catch (ex: Throwable) {
-                val error = getString(R.string.svc_crashed, ex.message.orEmpty())
-                Log.e(TAG, error, ex)
-                publish(error, alive = false, failed = true)
-                notify(error)
+                Log.e(TAG, "i2pd start failed", ex)
+                publishFailure(getString(R.string.svc_crashed, ex.message.orEmpty()))
                 beginExit(reportStopped = false)
             }
         }
     }
 
     private fun appendMobileConf(conf: File) {
+        // i2pd 3.0 refuses to start unless NTCP2 or SSU2 actually binds.
+        // Phones are often IPv6-only; forcing ipv6 off makes both binds fail
+        // and Daemon.start returns "Daemon start failed". `ssu` is SSU1 and
+        // is not an option in this library.
         val extra = """
             ipv4 = true
-            ipv6 = false
+            ipv6 = true
             nat = true
             ntcp2.enabled = true
-            ssu = false
+            ssu2.enabled = true
             upnp.enabled = false
             bandwidth = low
             loglevel = info
@@ -225,8 +225,6 @@ class I2pdForegroundService : Service() {
         val current = if (conf.isFile) conf.readText() else ""
         if (!current.contains("ntcp2.enabled")) {
             conf.appendText("\n$extra\n")
-        } else if (!current.contains("upnp.enabled")) {
-            conf.appendText("\nupnp.enabled = false\nbandwidth = low\n")
         }
     }
 
@@ -247,6 +245,27 @@ class I2pdForegroundService : Service() {
         } catch (_: Exception) {
         }
         File(dataDir, "certificates").mkdirs()
+    }
+
+    /** Last lines from the in-process i2pd log, also appended to i2pd.log. */
+    private fun nativeLogTail(maxLines: Int = 12): String {
+        if (!nativeLoaded) return ""
+        return runCatching {
+            I2pdNative.readLog(0, 80, LongArray(1)).takeLast(maxLines).joinToString("\n").trim()
+        }.getOrDefault("")
+    }
+
+    private fun publishFailure(summary: String) {
+        val tail = nativeLogTail()
+        if (tail.isNotBlank()) {
+            runCatching {
+                File(filesDir, "i2pchat/router/i2pd.log").appendText("\n$tail\n")
+            }
+        }
+        val text = if (tail.isBlank()) summary else "$summary\n$tail"
+        publish(text, alive = false, failed = true)
+        notify(summary)
+        Log.e(TAG, text)
     }
 
     private fun notify(text: String) {

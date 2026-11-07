@@ -45,7 +45,9 @@ object RouterDiagnostics {
             "|Reseed: No reseed servers specified",
     )
     private val su3Failed = Regex("Reseed: SU3 download failed")
-    private val noNetwork = Regex("Network is unreachable|No route to host")
+    private val noNetwork = Regex(
+        "Network is unreachable|No route to host|Failed to start Transports",
+    )
 
     fun readLogTail(file: File, maxBytes: Int = LOG_TAIL_BYTES): String {
         if (!file.isFile) return ""

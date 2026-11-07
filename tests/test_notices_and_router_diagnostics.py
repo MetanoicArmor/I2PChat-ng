@@ -125,6 +125,7 @@ QUIET_LOG = "12:00:01@1/info - NetDb: 120 routers loaded (10 floodfils)\n"
         (SSU2_CLOCK_LOG, "clock_skew"),
         (PORT_LOG, "port_in_use"),
         (NET_LOG, "no_network"),
+        ("Daemon: Failed to start Transports\n", "no_network"),
     ],
 )
 def test_diagnose_log_text(log, code):

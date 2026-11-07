@@ -27,6 +27,7 @@ class RouterDiagnosticsTest {
             code("Clients: Exception in SAM bridge: bind: Address already in use"),
         )
         assertEquals(RouterIssueCode.NO_NETWORK, code("NTCP2: Connect error Network is unreachable"))
+        assertEquals(RouterIssueCode.NO_NETWORK, code("Daemon: Failed to start Transports"))
         assertNull(code(quietLog))
         assertNull(code(""))
     }

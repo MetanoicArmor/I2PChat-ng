@@ -10870,7 +10870,12 @@ class I2PChatCore:
 
         reader, writer = connection
         current_type = initial_type
-        restart_after_timeout = False
+        # One in-flight read. A timeout must not cancel it: read_frame has
+        # already pulled bytes out of the socket, and a new read would skip
+        # that frame. The peer's next frame is then exactly one sequence ahead
+        # ("seq got N, expected N-1"), which shows up as soon as a picture
+        # stalls mid-chunk.
+        read_task: Optional[asyncio.Task[Any]] = None
 
         try:
             while True:
@@ -10882,11 +10887,14 @@ class I2PChatCore:
                     body_data = b""
                     is_encrypted = False
                 else:
+                    if read_task is None:
+                        read_task = asyncio.create_task(self._codec.read_frame(reader))
                     try:
                         frame = await asyncio.wait_for(
-                            self._codec.read_frame(reader), timeout=self.READ_TIMEOUT
+                            asyncio.shield(read_task), timeout=self.READ_TIMEOUT
                         )
                     except ValueError as e:
+                        read_task = None
                         if sess.handshake_complete:
                             logger.warning(
                                 "Protocol framing violation after handshake: %s (peer=%s)",
@@ -10901,22 +10909,21 @@ class I2PChatCore:
                             break
                         raise
                     except asyncio.TimeoutError:
-                        if sess._file_transfer_active:
-                            # Исходящая передача файла/картинки: цикл приёма не глушим — иначе до конца
-                            # отправки не обрабатываются входящие U/P/сигналы собеседника.
+                        transfer_in_progress = (
+                            sess._file_transfer_active
+                            or sess.incoming_info is not None
+                            or sess.inline_image_info is not None
+                        )
+                        if transfer_in_progress:
+                            # Тот же read_task дочитывает кадр. Новый read_frame
+                            # здесь съел бы уже прочитанные байты и сдвинул seq.
                             continue
-                        if sess.incoming_info is not None:
-                            restart_after_timeout = True
-                            return
-                        # Приём inline-картинки (G): как для F/D — не рвём сессию из-за долгой паузы I2P
-                        if sess.inline_image_info is not None:
-                            restart_after_timeout = True
-                            return
                         if sess.conn == connection:
                             self._emit_error(
                                 "Connection timed out (no data received)" + _ps(err_peer)
                             )
                         return
+                    read_task = None
                     msg_type = frame.msg_type
                     msg_id = frame.msg_id
                     body_data = frame.payload
@@ -11704,29 +11711,22 @@ class I2PChatCore:
             if sess.conn == connection:
                 self._emit_error(f"Protocol Error: {e}")
         finally:
+            if read_task is not None and not read_task.done():
+                read_task.cancel()
+
+                def _consume_read(task: asyncio.Task[Any]) -> None:
+                    if task.cancelled():
+                        return
+                    task.exception()
+
+                read_task.add_done_callback(_consume_read)
             current_task = asyncio.current_task()
             sess._recv_loop_active = False
-            skip_cleanup = False
-            if (
-                restart_after_timeout
-                and sess.conn == connection
-                and (
-                    sess.incoming_info is not None
-                    or sess.inline_image_info is not None
-                )
-                and not sess._file_transfer_active
-            ):
-                try:
-                    self._start_receive_loop_task(connection, peer_id=peer_id)
-                except RuntimeError:
-                    pass
-                skip_cleanup = True
             if sess.receive_task is current_task:
                 sess.receive_task = None
             # Не сбрасываем соединение если идёт передача или приём файла / inline-изображения
             if (
-                not skip_cleanup
-                and sess.conn == connection
+                sess.conn == connection
                 and not sess._file_transfer_active
                 and sess.incoming_info is None
                 and sess.inline_image_info is None

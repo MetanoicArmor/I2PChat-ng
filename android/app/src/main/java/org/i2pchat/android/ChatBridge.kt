@@ -529,6 +529,12 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     private fun bundledIssue(warmingSeconds: Long): RouterIssue? {
+        if (I2pdForegroundService.hasFailed(appRoot)) {
+            val detail = I2pdForegroundService.readStatus(appRoot).trim()
+            if (detail.isNotEmpty()) {
+                return RouterIssue(RouterIssueCode.ROUTER_CRASHED, detail)
+            }
+        }
         val log = RouterDiagnostics.readLogTail(I2pdForegroundService.logFile(appRoot))
         return RouterDiagnostics.diagnoseBundledRouter(
             log,
@@ -545,7 +551,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         RouterIssueCode.PORT_IN_USE -> str(R.string.diag_port_in_use)
         RouterIssueCode.NO_NETWORK -> str(R.string.diag_no_network)
         RouterIssueCode.TUNNELS_SLOW -> str(R.string.diag_tunnels_slow)
-        RouterIssueCode.ROUTER_CRASHED -> str(R.string.diag_router_crashed)
+        RouterIssueCode.ROUTER_CRASHED ->
+            issue.arg.ifBlank { str(R.string.diag_router_crashed) }
     }
 
     fun stop() {
