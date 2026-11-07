@@ -46,6 +46,16 @@ def transport_state(core: Any) -> str:
         return "stopped"
 
 
+def active_sam_reachable(bundled_manager: Any) -> bool:
+    if bundled_manager is None:
+        return False
+    try:
+        host, port = bundled_manager.sam_address()
+    except Exception:
+        return False
+    return is_tcp_open(host, int(port))
+
+
 class ReadinessTracker:
     """Keeps the start error and last router issue between periodic refreshes."""
 
@@ -83,8 +93,15 @@ class ReadinessTracker:
             except RuntimeError:
                 log_path = None
             found = diagnose_log_text(read_log_tail(log_path)) if log_path else None
-            if found is not None:
-                self.issue = found
+            # Stale "Address already in use" must not stick after a later bind
+            # succeeded: if our SAM port is open, the current router is fine.
+            if (
+                found is not None
+                and found.code == "port_in_use"
+                and active_sam_reachable(bundled_manager)
+            ):
+                found = None
+            self.issue = found
             return
         self.issue = bundled_manager.diagnose(
             network_ready=transport_state(core) == "ready",

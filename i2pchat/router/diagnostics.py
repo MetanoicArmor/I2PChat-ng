@@ -18,6 +18,10 @@ ACTION_ROUTER_SETTINGS = "router_settings"
 ACTION_RESTART_ROUTER = "restart_router"
 
 _LOG_TAIL_BYTES = 256 * 1024
+# Bind failures only matter at the latest startup. A 16 MiB router.log keeps
+# "Address already in use" from hours ago inside the 256 KiB tail, which made
+# Status keep showing "port busy" after a successful restart.
+_PORT_IN_USE_RECENT_BYTES = 24 * 1024
 # Several reseed hosts failing in a row means the user cannot reach any of them.
 _SU3_FAILURES_FOR_RESEED_ISSUE = 3
 
@@ -62,7 +66,8 @@ def diagnose_log_text(log_text: str) -> Optional[RouterIssue]:
     """Most actionable problem visible in an i2pd log excerpt, if any."""
     if not log_text:
         return None
-    if _PORT_IN_USE.search(log_text):
+    recent = log_text[-_PORT_IN_USE_RECENT_BYTES:]
+    if _PORT_IN_USE.search(recent):
         return RouterIssue(
             "port_in_use", actions=(ACTION_RESTART_ROUTER, ACTION_ROUTER_SETTINGS)
         )

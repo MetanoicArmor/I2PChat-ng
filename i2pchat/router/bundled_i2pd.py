@@ -46,8 +46,9 @@ _REAPER_ENV_PIDFILE = "I2PCHAT_REAPER_PIDFILE"
 
 
 def unix_reaper_main() -> None:
-    """Wait until GUI owner exits, then SIGINT bundled i2pd for this runtime (Unix only).
+    """Wait until GUI owner exits, then stop bundled i2pd for this runtime (Unix only).
 
+    Escalates SIGINT → SIGTERM → SIGKILL like ``_terminate_pid_sync``.
     Invoked from a detached subprocess (see ``run_gui`` when ``I2PCHAT_ROUTER_REAPER=1``).
     Environment: ``I2PCHAT_REAPER_OWNER``, ``I2PCHAT_REAPER_STATE``, ``I2PCHAT_REAPER_CONF``,
     ``I2PCHAT_REAPER_DATADIR``, ``I2PCHAT_REAPER_PIDFILE``.
@@ -91,7 +92,31 @@ def unix_reaper_main() -> None:
         try:
             os.kill(pid, signal.SIGINT)
         except OSError:
-            pass
+            continue
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.2)
+            else:
+                try:
+                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except OSError:
+                    pass
 
 
 def _unix_ps_pid_command_lines() -> list[tuple[int, str]]:
@@ -1055,6 +1080,25 @@ class BundledI2pdManager:
         _tighten_permissions(rt.tunconf_path, 0o600)
 
     @staticmethod
+    def _rotate_router_log(log_path: str) -> None:
+        """Move the previous router.log aside before a fresh i2pd launch."""
+        if not log_path or not os.path.isfile(log_path):
+            return
+        try:
+            if os.path.getsize(log_path) <= 0:
+                return
+        except OSError:
+            return
+        prev = log_path + ".prev"
+        try:
+            os.replace(log_path, prev)
+        except OSError:
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
+
+    @staticmethod
     def _build_launch_args(binary: str, rt: BundledI2pdRuntime) -> list[str]:
         return [
             binary,
@@ -1157,6 +1201,9 @@ class BundledI2pdManager:
         self._runtime = rt
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # Rotate the previous run aside so Status does not keep diagnosing
+        # stale "Address already in use" from an earlier failed bind.
+        self._rotate_router_log(rt.log_path)
         self._log_handle = open(rt.log_path, "ab")
         _tighten_permissions(rt.log_path, 0o600)
         self._proc = await asyncio.create_subprocess_exec(

@@ -30,6 +30,11 @@ class RouterDiagnosticsTest {
         assertEquals(RouterIssueCode.NO_NETWORK, code("Daemon: Failed to start Transports"))
         assertNull(code(quietLog))
         assertNull(code(""))
+        val stalePort = buildString {
+            append("Clients: Exception in SAM bridge: bind: Address already in use\n")
+            repeat(2000) { append("12:01:00@1/info - NetDb: routers loaded\n") }
+        }
+        assertNull(code(stalePort))
     }
 
     @Test

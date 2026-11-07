@@ -31,6 +31,9 @@ data class RouterIssue(
 
 object RouterDiagnostics {
     private const val LOG_TAIL_BYTES = 256 * 1024
+    // Bind failures only matter at the latest startup; older "Address already
+    // in use" lines in a large router.log must not stick after a good restart.
+    private const val PORT_IN_USE_RECENT_BYTES = 24 * 1024
     // Several reseed hosts failing in a row means none of them is reachable.
     private const val SU3_FAILURES_FOR_RESEED_ISSUE = 3
     private const val SLOW_AFTER_SECONDS = 120
@@ -64,7 +67,12 @@ object RouterDiagnostics {
 
     fun diagnoseLogText(log: String): RouterIssue? {
         if (log.isEmpty()) return null
-        if (portInUse.containsMatchIn(log)) return RouterIssue(RouterIssueCode.PORT_IN_USE)
+        val recent = if (log.length <= PORT_IN_USE_RECENT_BYTES) {
+            log
+        } else {
+            log.substring(log.length - PORT_IN_USE_RECENT_BYTES)
+        }
+        if (portInUse.containsMatchIn(recent)) return RouterIssue(RouterIssueCode.PORT_IN_USE)
         if (clockSkew.containsMatchIn(log)) return RouterIssue(RouterIssueCode.CLOCK_SKEW)
         val reseedFailed = reseedGaveUp.containsMatchIn(log) ||
             su3Failed.findAll(log).count() >= SU3_FAILURES_FOR_RESEED_ISSUE

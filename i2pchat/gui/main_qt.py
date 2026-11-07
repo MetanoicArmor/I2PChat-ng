@@ -11164,6 +11164,7 @@ class ChatWindow(QtWidgets.QMainWindow):
 
     def _restart_bundled_router_clicked(self) -> None:
         async def _restart_router_async() -> None:
+            self._readiness.session_starting()
             try:
                 if self.core is not None:
                     await self.core.shutdown()
@@ -11182,6 +11183,10 @@ class ChatWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 logger.exception("restart bundled router failed")
                 err_msg = str(e).strip() or type(e).__name__
+                self.core = None
+                self._sidebar_identity_refresh_core_id = None
+                self._readiness.session_failed(err_msg, self._router_settings)
+                self.refresh_status_label()
                 QtCore.QTimer.singleShot(
                     0,
                     lambda m=err_msg: QtWidgets.QMessageBox.warning(

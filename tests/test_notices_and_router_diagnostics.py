@@ -139,6 +139,13 @@ def test_diagnose_quiet_log():
     assert diagnose_log_text("") is None
 
 
+def test_diagnose_ignores_stale_port_in_use():
+    # Old bind failure buried under a long recent quiet tail must not stick.
+    stale = PORT_LOG + ("12:01:00@1/info - NetDb: routers loaded\n" * 2000)
+    assert diagnose_log_text(stale) is None
+    assert diagnose_log_text(PORT_LOG + QUIET_LOG).code == "port_in_use"
+
+
 def test_diagnose_bundled_router(tmp_path):
     log = tmp_path / "i2pd.log"
     log.write_text(QUIET_LOG)
