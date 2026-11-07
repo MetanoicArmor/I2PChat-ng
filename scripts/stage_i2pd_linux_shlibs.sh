@@ -82,11 +82,10 @@ copy_lib_into_vendor() {
     return 0
   fi
   if [[ -f "${DIR}/${base}" && ! -L "${DIR}/${base}" ]]; then
-    # Refresh if source is newer / different inode (optional: always overwrite for exact match)
-    if cmp -s "$src" "${DIR}/${base}" 2>/dev/null; then
-      ensure_staged_lib_mode "${DIR}/${base}"
-      return 0
-    fi
+    # Keep the committed/noble payload. Host OpenSSL on Ubuntu 22.04 would
+    # otherwise replace it with an older SONAME-compatible .so.
+    ensure_staged_lib_mode "${DIR}/${base}"
+    return 0
   fi
   rm -f "${DIR}/${base}"
   cp -L "$src" "${DIR}/${base}"
@@ -210,24 +209,32 @@ shopt -u nullglob
 stage_ldd_closure
 prune_unrelated_boost
 
-if LD_LIBRARY_PATH="${DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ldd "$I2PD" 2>/dev/null | grep -q 'not found'; then
+ldd_out="$(mktemp)"
+ldd_err="$(mktemp)"
+LD_LIBRARY_PATH="${DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ldd "$I2PD" >"$ldd_out" 2>"$ldd_err" || true
+
+missing="$(grep 'not found' "$ldd_out" || true)"
+if [[ -n "$missing" ]]; then
   echo "WARN: bundled i2pd still has unresolved libs (common on Arch if i2pd was built for another Boost):" >&2
-  LD_LIBRARY_PATH="${DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ldd "$I2PD" 2>/dev/null | grep 'not found' >&2 || true
+  printf '%s\n' "$missing" >&2
   echo "Hint: use distro-matched i2pd — cp \"\$(command -v i2pd)\" \"${DIR}/i2pd\" && rerun this script." >&2
+  rm -f "$ldd_out" "$ldd_err"
   exit 1
 fi
 
-# Also fail if loader reports missing symbol versions (e.g. CXXABI) against vendor-only path.
-if ! LD_LIBRARY_PATH="${DIR}" ldd "$I2PD" >/dev/null 2>"${DIR}/.ldd-stderr"; then
-  :
-fi
-if grep -q 'version .* not found' "${DIR}/.ldd-stderr" 2>/dev/null; then
+# i2pd is a noble (glibc 2.38+) binary. Ubuntu 22.04 CI (glibc 2.35) cannot
+# execute it; ldd then reports libc/libstdc++ version errors. Those libraries
+# are not staged on purpose — ignore them. Any other version error is real.
+if grep -vE 'libc\.so\.|libm\.so\.|libstdc\+\+\.so\.|libgcc_s\.so\.|ld-linux' "$ldd_err" | grep -q 'version .* not found'; then
   echo "WARN: bundled i2pd has ABI/version issues with staged libs:" >&2
-  cat "${DIR}/.ldd-stderr" >&2 || true
-  rm -f "${DIR}/.ldd-stderr"
+  cat "$ldd_err" >&2 || true
+  rm -f "$ldd_out" "$ldd_err"
   exit 1
 fi
-rm -f "${DIR}/.ldd-stderr"
+if grep -qE 'version `GLIBC_|version `GLIBCXX_|version `CXXABI_' "$ldd_err"; then
+  echo "NOTE: bundled i2pd needs a newer glibc/libstdc++ than this host; shipping it anyway." >&2
+fi
+rm -f "$ldd_out" "$ldd_err"
 
 echo "OK: ${I2PD} resolves all dynamic deps with LD_LIBRARY_PATH=${DIR}"
 shopt -s nullglob

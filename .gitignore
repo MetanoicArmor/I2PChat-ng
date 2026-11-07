@@ -54,8 +54,14 @@ SHA256SUMS.asc
 # Optional local bundled-router blobs for portable release builds only.
 # The binaries themselves are force-added; the checksum manifest that pins
 # them is tracked normally (verified by scripts/verify_bundled_i2pd.sh).
+# Linux also ships the Boost/OpenSSL/miniupnpc SONAMEs next to i2pd: the
+# Ubuntu 22.04 release runners cannot provide Boost 1.83.
 vendor/i2pd/**
 !vendor/i2pd/i2pd.sha256
+!vendor/i2pd/linux-x86_64/
+!vendor/i2pd/linux-x86_64/**
+!vendor/i2pd/linux-aarch64/
+!vendor/i2pd/linux-aarch64/**
 
 # Secrets / keys — never commit
 *.dat
