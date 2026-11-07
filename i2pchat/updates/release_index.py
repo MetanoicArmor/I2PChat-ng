@@ -32,6 +32,9 @@ RELEASE_ZIP_RE = re.compile(
 # Грубый поиск кандидатов в HTML (href, текст листинга).
 ZIP_CANDIDATE_RE = re.compile(r"I2PChat-[^\s\"'<>]+\.zip")
 
+# Верхняя граница размера страницы со списком релизов.
+MAX_UPDATE_PAGE_BYTES = 4 * 1024 * 1024
+
 # Типичный HTTP-прокси Java I2P / i2pd (если не задан http_proxy).
 _DEFAULT_I2P_HTTP_PROXY = "http://127.0.0.1:4444"
 
@@ -242,7 +245,11 @@ def fetch_releases_page(
         else _opener_for_update_fetch(url, proxy_url=proxy_url)
     )
     with op(req, timeout=timeout) as resp:  # type: ignore[misc]
-        raw = resp.read()
+        # A release listing is a few hundred KiB at most; the server (or
+        # whoever sits on the path to it) does not get to fill memory.
+        raw = resp.read(MAX_UPDATE_PAGE_BYTES + 1)
+    if isinstance(raw, bytes) and len(raw) > MAX_UPDATE_PAGE_BYTES:
+        raise ValueError("Update page is unexpectedly large")
     if isinstance(raw, bytes):
         return raw.decode("utf-8", errors="replace")
     return str(raw)

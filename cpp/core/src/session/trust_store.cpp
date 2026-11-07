@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <system_error>
 #include <nlohmann/json.hpp>
 
 #include "i2pchat/encoding.hpp"
@@ -34,7 +36,16 @@ void TrustStore::load() {
     } catch (const std::exception&) {
         // A corrupt trust store must not prevent startup. Losing pins downgrades
         // to first-sighting prompts, which is visible to the user, whereas
-        // refusing to launch is not recoverable without a shell.
+        // refusing to launch is not recoverable without a shell. The damaged
+        // file is kept aside rather than overwritten by the next save, so the
+        // pins can still be recovered by hand.
+        std::error_code ec;
+        const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        std::filesystem::rename(
+            path_, path_.string() + ".corrupt-" + std::to_string(stamp), ec);
+        degraded_ = true;
         return;
     }
     if (!document.is_object()) {
@@ -99,12 +110,19 @@ TrustDecision TrustStore::verify_or_pin(const std::string& peer_addr, ByteView s
 
     const auto existing = pins_.find(peer_addr);
     if (existing == pins_.end()) {
-        // First sighting. Without a prompt handler the key is pinned silently,
-        // which is the trust-on-first-use bargain the protocol is built on.
-        if (!auto_accept_first_sighting && prompt_ &&
-            prompt_(TrustPrompt::FirstSighting, peer_addr, key_hex, "") !=
-                TrustDecision::Accept) {
-            return TrustDecision::Reject;
+        // First sighting. Pinning requires either an explicit opt-in or a
+        // user saying yes; with neither available the stranger stays out, as
+        // in the reference implementation. Pinning silently here would let
+        // whoever connects first own a contact's address.
+        if (!auto_accept_first_sighting || degraded_) {
+            if (!prompt_) {
+                return TrustDecision::Reject;
+            }
+            const TrustDecision answer =
+                prompt_(TrustPrompt::FirstSighting, peer_addr, key_hex, "");
+            if (answer != TrustDecision::Accept) {
+                return answer;
+            }
         }
         pins_[peer_addr] = TrustPin{key_hex, false};
         save();
@@ -121,9 +139,10 @@ TrustDecision TrustStore::verify_or_pin(const std::string& peer_addr, ByteView s
     if (!prompt_) {
         return TrustDecision::Reject;
     }
-    if (prompt_(TrustPrompt::KeyChanged, peer_addr, key_hex,
-                existing->second.signing_key_hex) != TrustDecision::Accept) {
-        return TrustDecision::Reject;
+    const TrustDecision answer = prompt_(TrustPrompt::KeyChanged, peer_addr, key_hex,
+                                         existing->second.signing_key_hex);
+    if (answer != TrustDecision::Accept) {
+        return answer;
     }
     existing->second = TrustPin{key_hex, false};
     save();

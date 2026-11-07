@@ -14,9 +14,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 jobs:
   meta:
@@ -29,16 +27,21 @@ jobs:
         id: meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Release tags and dispatch inputs are attacker-influenced strings;
+          # they enter the script as data and must look like a version.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           REPO="${{ github.repository }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$(echo "$INPUT_TAG" | tr -d ' \t\r\n')"
           else
-            TAG="${{ github.event.release.tag_name }}"
+            TAG="$RELEASE_TAG"
           fi
           VER="${TAG#v}"
-          if [ -z "$VER" ]; then
-            echo "ERROR: empty version from tag: $TAG" >&2
+          if ! echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tag must be vX.Y.Z, got: '$TAG'" >&2
             exit 1
           fi
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -55,10 +58,14 @@ jobs:
   deb-amd64:
     needs: meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       apt_publish: ${{ steps.apt_pages.outputs.publish }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install build tools
         run: |
@@ -176,7 +183,7 @@ jobs:
             export DEB_ARM64_PATH_2="${{ github.workspace }}/i2pchat-tui_${VERSION}_arm64.deb"
           fi
           ./packaging/apt/scripts/build-apt-site.sh
-          echo "$APT_REPO_GPG_PRIVATE_KEY" | gpg --import --batch
+          # sign-release.sh imports APT_REPO_GPG_PRIVATE_KEY into a throwaway GNUPGHOME.
           export APT_REPO_GPG_PASSPHRASE
           ./packaging/apt/scripts/sign-release.sh
           echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -194,10 +201,14 @@ jobs:
   deb-arm64:
     needs: meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Релизы без aarch64 zip (старые теги): job падает по таймауту — не блокируем amd64/apt.
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install build tools
         run: |
@@ -266,8 +277,12 @@ jobs:
   rpm-x86_64:
     needs: meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Wait for Linux GUI zip on release (x86_64)
         env:
@@ -292,6 +307,10 @@ jobs:
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_ACTIONS: "1"
+          # Pinned by manifest-list digest so the build image is the one that
+          # was reviewed, not whatever the fedora:42 tag points at on the day.
+          # Refresh: docker buildx imagetools inspect fedora:42
+          FEDORA_IMAGE: docker.io/library/fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
         run: |
           docker run --rm \
             -e GITHUB_REPOSITORY \
@@ -299,7 +318,7 @@ jobs:
             -e I2PCHAT_RELEASE_REPO="${{ github.repository }}" \
             -v "$PWD:/workspace:rw" \
             -w /workspace \
-            fedora:42 \
+            "${FEDORA_IMAGE}" \
             bash packaging/fedora/build-rpm-from-release.sh "${{ needs.meta.outputs.ver }}"
 
       - name: Upload x86_64 .rpm to release
@@ -317,6 +336,10 @@ jobs:
     # Apt mirror is optional; do not fail the workflow after .deb/.rpm uploaded.
     continue-on-error: true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

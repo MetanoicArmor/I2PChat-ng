@@ -37,6 +37,20 @@ class RouterSettingsTests(unittest.TestCase):
                 loaded = load_router_settings()
                 self.assertEqual(loaded.backend, "system")
                 self.assertFalse(loaded.bundled_auto_start)
+                self.assertEqual(loaded.tunnel_length, 3)
+
+    def test_tunnel_length_roundtrip_and_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("i2pchat.router.settings.get_profiles_dir", return_value=td):
+                save_router_settings(RouterSettings(tunnel_length=5))
+                self.assertEqual(load_router_settings().tunnel_length, 5)
+                for raw, expected in ((0, 3), (8, 3), ("2", 2), ("x", 3), (None, 3)):
+                    with open(router_settings_path(), "w", encoding="utf-8") as f:
+                        json.dump({"tunnel_length": raw}, f)
+                    self.assertEqual(load_router_settings().tunnel_length, expected, raw)
+        self.assertEqual(
+            normalize_router_settings(RouterSettings(tunnel_length=99)).tunnel_length, 3
+        )
 
     def test_disable_bundled_env_forces_system_backend(self) -> None:
         with mock.patch.dict("os.environ", {"I2PCHAT_DISABLE_BUNDLED_I2PD": "1"}):
@@ -141,6 +155,23 @@ class RouterSettingsTests(unittest.TestCase):
                 RouterSettings(backend="system", system_sam_host="192.168.1.50")
             )
             self.assertEqual(allowed.system_sam_host, "192.168.1.50")
+
+
+class CoreTunnelOptionsTests(unittest.TestCase):
+    def test_core_sam_options_follow_tunnel_length(self) -> None:
+        from i2pchat.core.i2p_chat_core import I2PChatCore
+
+        core = I2PChatCore(profile="default", tunnel_length=4)
+        self.assertEqual(
+            core._sam_tunnel_options(quantity=3),
+            {
+                "inbound.length": "4",
+                "outbound.length": "4",
+                "inbound.quantity": "3",
+                "outbound.quantity": "3",
+            },
+        )
+        self.assertEqual(I2PChatCore(profile="default").tunnel_length, 3)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,14 @@ enum class DeliveryStatus { DeliveredLive, QueuedOffline, Failed };
 /// reject them.
 [[nodiscard]] std::string normalize_member_id(std::string_view value);
 
+/// Longest group title kept, in code points. Titles arrive from any member
+/// over the wire and end up in notifications and window titles.
+inline constexpr std::size_t kMaxGroupTitleLength = 128;
+
+/// Control characters become spaces, whitespace collapses, and the result is
+/// cut at `kMaxGroupTitleLength`. Empty when nothing printable remains.
+[[nodiscard]] std::string sanitize_group_title(std::string_view value);
+
 /// The shared view of a group at one epoch.
 ///
 /// `members` is deduplicated and normalised on construction, preserving the

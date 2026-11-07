@@ -71,6 +71,11 @@ RATE_LIMIT_BYTES_PER_MINUTE = _env_int(
 )
 MAX_PREFIX_FILES = _env_int("BLINDBOX_MAX_PREFIX_FILES", 256, minimum=0)
 MAX_PREFIX_BYTES = _env_int("BLINDBOX_MAX_PREFIX_BYTES", 32 * 1024 * 1024, minimum=0)
+# Connection budget: a client that connects and never sends a complete
+# command must not hold a socket (and a coroutine) forever, nor may many such
+# clients crowd out real ones.
+MAX_CONNECTIONS = _env_int("BLINDBOX_MAX_CONNECTIONS", 256)
+COMMAND_TIMEOUT_SEC = _env_int("BLINDBOX_COMMAND_TIMEOUT_SEC", 30)
 AUDIT_LOG_MAX_BYTES = _env_int("BLINDBOX_AUDIT_LOG_MAX_BYTES", 1_048_576, minimum=0)
 AUDIT_LOG_BACKUPS = _env_int("BLINDBOX_AUDIT_LOG_BACKUPS", 3, minimum=0)
 _AUTH_TOKEN = (os.environ.get("BLINDBOX_AUTH_TOKEN") or "").strip()
@@ -563,6 +568,59 @@ def _http_route_response(path: str) -> tuple[int, str, bytes]:
     return 404, "text/plain; charset=utf-8", b"not found\n"
 
 
+_active_connections = 0
+
+
+def _admit_connection() -> bool:
+    """Take a connection slot; False when the server is at MAX_CONNECTIONS."""
+    global _active_connections
+    if _active_connections >= MAX_CONNECTIONS:
+        return False
+    _active_connections += 1
+    return True
+
+
+def _release_connection() -> None:
+    global _active_connections
+    _active_connections = max(0, _active_connections - 1)
+
+
+def _bounded(handler):
+    """Wrap a stream handler with the connection cap and a per-connection deadline.
+
+    Every command here is one request per connection, so the deadline is the
+    command deadline: a client that stalls mid-PUT or never finishes its
+    request line is dropped after COMMAND_TIMEOUT_SEC.
+    """
+
+    async def run(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if not _admit_connection():
+            _emit_event("connection_limit", **_peer_fields(writer))
+            await _metrics_increment("connection_limit")
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+        try:
+            await asyncio.wait_for(handler(reader, writer), timeout=COMMAND_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            _emit_event("command_timeout", **_peer_fields(writer))
+            await _metrics_increment("command_timeout")
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            _release_connection()
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    return run
+
+
 async def _http_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = _peer_fields(writer)
     try:
@@ -776,10 +834,12 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
 async def main():
     _ensure_store_layout()
     _prune_store()
-    server = await asyncio.start_server(handle, "127.0.0.1", 19444)
+    server = await asyncio.start_server(_bounded(handle), "127.0.0.1", 19444)
     http_server = None
     if HTTP_STATUS_ENABLED:
-        http_server = await asyncio.start_server(_http_handle, HTTP_STATUS_HOST, HTTP_STATUS_PORT)
+        http_server = await asyncio.start_server(
+            _bounded(_http_handle), HTTP_STATUS_HOST, HTTP_STATUS_PORT
+        )
     gc_task = asyncio.create_task(_gc_loop())
     if _AUTH_TOKEN:
         print(

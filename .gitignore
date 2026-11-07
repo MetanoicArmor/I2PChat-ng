@@ -52,7 +52,10 @@ SHA256SUMS
 SHA256SUMS.asc
 
 # Optional local bundled-router blobs for portable release builds only.
-vendor/i2pd/
+# The binaries themselves are force-added; the checksum manifest that pins
+# them is tracked normally (verified by scripts/verify_bundled_i2pd.sh).
+vendor/i2pd/**
+!vendor/i2pd/i2pd.sha256
 
 # Secrets / keys — never commit
 *.dat

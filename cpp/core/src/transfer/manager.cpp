@@ -180,7 +180,7 @@ void IncomingTransfers::reset() {
     if (file_) {
         file_->stream.close();
         std::error_code ignored;
-        std::filesystem::remove(file_->path, ignored);
+        std::filesystem::remove(file_->write_path, ignored);
         file_.reset();
     }
     image_.reset();
@@ -219,7 +219,10 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
     }
     const std::string final_name = target.filename().string();
 
-    if (callbacks_.accept_file && !callbacks_.accept_file(final_name, size)) {
+    const OfferDecision decision =
+        callbacks_.accept_file ? callbacks_.accept_file(final_name, size)
+                               : OfferDecision::Accept;
+    if (decision == OfferDecision::Reject) {
         send(Frame{'S', protocol::signal_body(protocol::build_reject_file(final_name))});
         emit_system("Incoming file rejected by user: " + final_name);
         return;
@@ -227,12 +230,16 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
 
     IncomingFile incoming;
     incoming.path = target;
+    incoming.pending = decision == OfferDecision::Deferred;
+    incoming.write_path =
+        incoming.pending ? std::filesystem::path(target.string() + ".pending") : target;
     incoming.name = final_name;
     incoming.size = size;
     incoming.message_id = message_id;
     // Exclusive creation: between allocating the name and opening it, something
     // else may have taken it.
-    incoming.stream.open(target, std::ios::binary | std::ios::out | std::ios::trunc);
+    incoming.stream.open(incoming.write_path,
+                         std::ios::binary | std::ios::out | std::ios::trunc);
     if (!incoming.stream.is_open()) {
         emit_error("Cannot open the incoming file for writing: " + final_name);
         return;
@@ -241,12 +248,49 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
     if (final_name != safe_name) {
         emit_system("Filename collision detected: saved as " + final_name);
     }
-    emit_system("Receiving file: " + final_name + " (" + std::to_string(size) +
-                " bytes)");
+    if (incoming.pending) {
+        emit_system("Incoming file offer awaiting your decision: " + final_name + " (" +
+                    std::to_string(size) + " bytes)");
+    } else {
+        emit_system("Receiving file: " + final_name + " (" + std::to_string(size) +
+                    " bytes)");
+    }
 
     file_ = std::move(incoming);
     report(Progress{final_name, target, size, 0, Direction::Incoming, false,
                     Outcome::Active});
+}
+
+bool IncomingTransfers::resolve_pending_offer(bool accept) {
+    if (!file_ || !file_->pending) {
+        return false;
+    }
+    if (!accept) {
+        const std::string name = file_->name;
+        file_->stream.close();
+        std::error_code ignored;
+        std::filesystem::remove(file_->write_path, ignored);
+        const Progress failed{name, file_->path, file_->size, file_->received,
+                              Direction::Incoming, false, Outcome::Failed};
+        file_.reset();
+        send(Frame{'S', protocol::signal_body(protocol::build_reject_file(name))});
+        emit_system("Incoming file rejected by user: " + name);
+        report(failed);
+        return true;
+    }
+
+    file_->pending = false;
+    if (file_->complete) {
+        // Everything already arrived; only the rename and the ACK were waiting.
+        complete_file();
+        return true;
+    }
+    // Still streaming: keep writing to the .pending file and move it into
+    // place once the terminator arrives, so a chunk can never land in a
+    // half-renamed file.
+    emit_system("Receiving file: " + file_->name + " (" + std::to_string(file_->size) +
+                " bytes)");
+    return true;
 }
 
 void IncomingTransfers::append_file_chunk(std::string_view body) {
@@ -307,6 +351,29 @@ void IncomingTransfers::finish_file() {
         return;
     }
 
+    if (file_->pending) {
+        // The bytes are all here, but the user has not said yes. Hold the
+        // ACK and the report until `resolve_pending_offer`.
+        file_->complete = true;
+        return;
+    }
+    complete_file();
+}
+
+void IncomingTransfers::complete_file() {
+    if (!file_) {
+        return;
+    }
+    if (file_->write_path != file_->path) {
+        std::error_code error;
+        std::filesystem::rename(file_->write_path, file_->path, error);
+        if (error) {
+            fail_file("Cannot move the accepted file into place: " + error.message(),
+                      /*remove_partial=*/true);
+            return;
+        }
+    }
+
     const std::filesystem::path path = file_->path;
     const std::string name = file_->name;
     const std::uint64_t size = file_->size;
@@ -333,7 +400,7 @@ void IncomingTransfers::fail_file(const std::string& message, bool remove_partia
                           false,                 Outcome::Failed};
     if (remove_partial) {
         std::error_code ignored;
-        std::filesystem::remove(file_->path, ignored);
+        std::filesystem::remove(file_->write_path, ignored);
     }
     file_.reset();
     emit_error(message);

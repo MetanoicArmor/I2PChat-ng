@@ -111,6 +111,11 @@ def _safe_member_name(name: str) -> str:
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SAFE_BLINDBOX_SUFFIX_RE = re.compile(r"^blindbox\.[A-Za-z0-9._-]+\.json$")
 
+# Bundles are small (keys, contacts, chat history); these bounds keep a
+# crafted archive from expanding into memory without limit.
+MAX_BUNDLE_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_TOTAL_BYTES = 512 * 1024 * 1024
+
 
 def _is_safe_path_segment(segment: str) -> bool:
     """True if ``segment`` is a single, separator-free, non-parent path component."""
@@ -166,16 +171,24 @@ def _read_tar_payload(payload: bytes) -> tuple[dict[str, object], dict[str, byte
                 raise BackupError("Backup manifest must be a JSON object")
 
             files: dict[str, bytes] = {}
+            total = 0
             for member in tf.getmembers():
                 if not member.isfile() or member.name == "manifest.json":
                     continue
                 if not member.name.startswith("payload/"):
                     raise BackupError(f"Unexpected bundle member: {member.name}")
                 logical_name = _safe_member_name(member.name[len("payload/") :])
+                # Sizes come from the tar header; the whole payload is held
+                # in memory, so a crafted bundle must not dictate how much.
+                if member.size < 0 or member.size > MAX_BUNDLE_MEMBER_BYTES:
+                    raise BackupError(f"Bundle member too large: {member.name}")
+                total += member.size
+                if total > MAX_BUNDLE_TOTAL_BYTES:
+                    raise BackupError("Backup bundle exceeds the size limit")
                 extracted = tf.extractfile(member)
                 if extracted is None:
                     raise BackupError(f"Cannot read bundle member: {member.name}")
-                files[logical_name] = extracted.read()
+                files[logical_name] = extracted.read(member.size)
     except (tarfile.TarError, OSError, json.JSONDecodeError) as exc:
         raise BackupError(f"Failed to parse backup payload: {exc}") from exc
     return manifest, files
@@ -511,6 +524,8 @@ def import_history_bundle(
         if not logical_name.startswith("history/"):
             raise BackupError(f"Unexpected file in history bundle: {logical_name}")
         suffix = logical_name[len("history/") :]
+        if not _is_safe_path_segment(suffix):
+            raise BackupError(f"Unsafe history entry in history bundle: {logical_name}")
         dest_path = os.path.join(pdir, f"{target_profile}.history.{suffix}")
         history_files += 1
         if os.path.exists(dest_path) and conflict_mode == "skip":

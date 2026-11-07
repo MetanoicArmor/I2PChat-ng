@@ -22,7 +22,18 @@ object NativeEngine {
         fun onContactsChanged()
         fun onGroupMessage(groupId: String)
         fun onLocalAddress(addr: String)
+        /**
+         * A peer presented an unknown or changed key. The handshake has
+         * already been refused; answer with [nativeTrustRespond] and the
+         * engine pins the key and dials the peer again on accept.
+         */
         fun onTrustPrompt(kind: String, peer: String, newKey: String, oldKey: String)
+        /**
+         * A peer offers a file. Bytes are spooled to a `.pending` file in the
+         * app-private downloads directory until [nativeFileRespond] answers;
+         * nothing is named, acknowledged or shown before that.
+         */
+        fun onFileOffer(peer: String, name: String, size: Long)
         fun onStarted()
         fun onStartFailed(message: String)
     }
@@ -45,9 +56,12 @@ object NativeEngine {
         samPort: Int,
         maxMessages: Int,
         maxAgeDays: Int,
+        tunnelLength: Int,
     ): String
     @JvmStatic external fun nativeStop()
-    @JvmStatic external fun nativeTrustRespond(accept: Boolean)
+    @JvmStatic external fun nativeTrustRespond(peer: String, keyHex: String, accept: Boolean)
+    /** Returns false when the offer is no longer pending (peer dropped, newer offer). */
+    @JvmStatic external fun nativeFileRespond(peer: String, accept: Boolean): Boolean
     @JvmStatic external fun nativeConnectPeer(peer: String): Boolean
     @JvmStatic external fun nativeDisconnectPeer(peer: String)
     @JvmStatic external fun nativeSendText(peer: String, text: String): String

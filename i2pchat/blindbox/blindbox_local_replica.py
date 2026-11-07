@@ -27,12 +27,19 @@ class BlindBoxLocalReplicaServer:
         max_blob_size: int = 1_048_576,
         max_entries: int = 4096,
         auth_token: str = "",
+        max_connections: int = 64,
+        command_timeout: float = 30.0,
     ) -> None:
         self.host = host
         self.port = int(port)
         self.max_blob_size = int(max_blob_size)
         self.max_entries = int(max_entries)
         self.auth_token = str(auth_token or "").strip()
+        # A stalled client must not hold a slot forever, and a crowd of them
+        # must not crowd real peers out.
+        self.max_connections = max(1, int(max_connections))
+        self.command_timeout = float(command_timeout)
+        self._active_connections = 0
         self._server: Optional[asyncio.AbstractServer] = None
         self._storage: dict[str, bytes] = {}
 
@@ -59,77 +66,100 @@ class BlindBoxLocalReplicaServer:
         self._server = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._active_connections >= self.max_connections:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+        self._active_connections += 1
         try:
-            while True:
-                line = await reader.readline()
-                if not line:
-                    return
-                parts = line.decode("utf-8", errors="ignore").strip().split()
-                if not parts:
-                    writer.write(b"ERR\n")
-                    await writer.drain()
-                    return
-                cmd = parts[0]
-                if cmd == "PING" and len(parts) == 1:
-                    writer.write(f"{BLINDBOX_LOCAL_REPLICA_MAGIC}\n".encode("utf-8"))
-                    await writer.drain()
-                    continue
-                if cmd == "AUTH" and len(parts) == 2:
-                    if self._is_probe_authorized(parts[1]):
-                        writer.write(b"OK\n")
-                    else:
-                        writer.write(b"ERR\n")
-                    await writer.drain()
-                    continue
-                if cmd == "PUT" and len(parts) >= 3:
-                    if not self._is_authorized(parts, token_index=3):
-                        writer.write(b"ERR\n")
-                        await writer.drain()
-                        return
-                    key = parts[1]
-                    try:
-                        size = int(parts[2])
-                    except Exception:
-                        writer.write(b"ERR\n")
-                        await writer.drain()
-                        return
-                    if size <= 0 or size > self.max_blob_size:
-                        writer.write(b"ERR\n")
-                        await writer.drain()
-                        return
-                    body = await reader.readexactly(size)
-                    if key in self._storage:
-                        writer.write(b"EXISTS\n")
-                    else:
-                        if len(self._storage) >= self.max_entries:
-                            writer.write(b"FULL\n")
-                            await writer.drain()
-                            return
-                        self._storage[key] = body
-                        writer.write(b"OK\n")
-                    await writer.drain()
-                    return
-                if cmd == "GET" and len(parts) >= 2:
-                    if not self._is_authorized(parts, token_index=2):
-                        writer.write(b"ERR\n")
-                        await writer.drain()
-                        return
-                    key = parts[1]
-                    data = self._storage.get(key)
-                    if data is None:
-                        writer.write(b"MISS\n")
-                        await writer.drain()
-                        return
-                    writer.write(f"OK {len(data)}\n".encode("utf-8"))
-                    writer.write(data)
-                    await writer.drain()
-                    return
+            await self._serve(reader, writer)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            self._active_connections -= 1
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _read_line(self, reader: asyncio.StreamReader) -> bytes:
+        return await asyncio.wait_for(reader.readline(), timeout=self.command_timeout)
+
+    async def _read_exactly(self, reader: asyncio.StreamReader, size: int) -> bytes:
+        return await asyncio.wait_for(reader.readexactly(size), timeout=self.command_timeout)
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while True:
+            line = await self._read_line(reader)
+            if not line:
+                return
+            parts = line.decode("utf-8", errors="ignore").strip().split()
+            if not parts:
                 writer.write(b"ERR\n")
                 await writer.drain()
                 return
-        finally:
-            writer.close()
-            await writer.wait_closed()
+            cmd = parts[0]
+            if cmd == "PING" and len(parts) == 1:
+                writer.write(f"{BLINDBOX_LOCAL_REPLICA_MAGIC}\n".encode("utf-8"))
+                await writer.drain()
+                continue
+            if cmd == "AUTH" and len(parts) == 2:
+                if self._is_probe_authorized(parts[1]):
+                    writer.write(b"OK\n")
+                else:
+                    writer.write(b"ERR\n")
+                await writer.drain()
+                continue
+            if cmd == "PUT" and len(parts) >= 3:
+                if not self._is_authorized(parts, token_index=3):
+                    writer.write(b"ERR\n")
+                    await writer.drain()
+                    return
+                key = parts[1]
+                try:
+                    size = int(parts[2])
+                except Exception:
+                    writer.write(b"ERR\n")
+                    await writer.drain()
+                    return
+                if size <= 0 or size > self.max_blob_size:
+                    writer.write(b"ERR\n")
+                    await writer.drain()
+                    return
+                body = await self._read_exactly(reader, size)
+                if key in self._storage:
+                    writer.write(b"EXISTS\n")
+                else:
+                    if len(self._storage) >= self.max_entries:
+                        writer.write(b"FULL\n")
+                        await writer.drain()
+                        return
+                    self._storage[key] = body
+                    writer.write(b"OK\n")
+                await writer.drain()
+                return
+            if cmd == "GET" and len(parts) >= 2:
+                if not self._is_authorized(parts, token_index=2):
+                    writer.write(b"ERR\n")
+                    await writer.drain()
+                    return
+                key = parts[1]
+                data = self._storage.get(key)
+                if data is None:
+                    writer.write(b"MISS\n")
+                    await writer.drain()
+                    return
+                writer.write(f"OK {len(data)}\n".encode("utf-8"))
+                writer.write(data)
+                await writer.drain()
+                return
+            writer.write(b"ERR\n")
+            await writer.drain()
+            return
 
     def _is_authorized(self, parts: list[str], *, token_index: int) -> bool:
         if not self.auth_token:

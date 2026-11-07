@@ -30,6 +30,11 @@ jobs:
     steps:
       - name: Resolve tag and checkout ref
         id: meta
+        env:
+          # Inputs are passed through the environment, not pasted into the
+          # script, so they can never be interpreted as shell syntax.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_SOURCE_REF: ${{ github.event.inputs.source_ref }}
         run: |
           trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
           # Strip leading v and a mistaken dot (v.1.2.3 typo -> 1.2.3)
@@ -40,26 +45,29 @@ jobs:
             x="${x#.}"
             echo "$x"
           }
-          R="$(to_ver "${{ github.event.inputs.tag }}")"
+          R="$(to_ver "$INPUT_TAG")"
           if [ -z "$R" ]; then
             echo "ERROR: empty tag" >&2
             exit 1
           fi
           if ! echo "$R" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: tag must be semver X.Y.Z (e.g. v1.2.3), got: ${{ github.event.inputs.tag }}" >&2
+            echo "ERROR: tag must be semver X.Y.Z (e.g. v1.2.3), got: ${INPUT_TAG}" >&2
             exit 1
           fi
           echo "tag=v${R}" >> "$GITHUB_OUTPUT"
           echo "ver=${R}" >> "$GITHUB_OUTPUT"
-          SRC_RAW="$(trim "${{ github.event.inputs.source_ref }}")"
+          SRC_RAW="$(trim "$INPUT_SOURCE_REF")"
           if [ -z "$SRC_RAW" ]; then
             SRC="v${R}"
           else
             TMP="$(to_ver "$SRC_RAW")"
             if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
               SRC="v${TMP}"
-            else
+            elif echo "$SRC_RAW" | grep -qE '^[A-Za-z0-9._/-]+$'; then
               SRC="$SRC_RAW"
+            else
+              echo "ERROR: source_ref contains characters not allowed in a git ref: ${SRC_RAW}" >&2
+              exit 1
             fi
           fi
           echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
@@ -67,6 +75,7 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           ref: ${{ steps.meta.outputs.checkout_ref }}
 
       # Tags like v1.2.3 predate I2PChat-tui.spec / TUI zip in build-linux.sh — users often leave source_ref empty.
@@ -104,6 +113,9 @@ jobs:
             libxcb1 libxcb-xinerama0 libxcb-xfixes0 libxcb-shape0 libxcb-render0 \
             libxcb-shm0 libxcb-randr0 libxcb-keysyms1 libxcb-image0 libxcb-icccm4 \
             libxcb-util1 libxcb-sync1 libxcb-xinput0 libxcb-cursor0
+
+      - name: Verify bundled i2pd against committed checksums
+        run: scripts/verify_bundled_i2pd.sh --desktop-only
 
       - name: Build Linux zips (PyInstaller + AppImage)
         run: ./build-linux.sh
@@ -173,6 +185,11 @@ jobs:
     steps:
       - name: Resolve tag and checkout ref
         id: meta
+        env:
+          # Inputs are passed through the environment, not pasted into the
+          # script, so they can never be interpreted as shell syntax.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_SOURCE_REF: ${{ github.event.inputs.source_ref }}
         run: |
           trim() { echo "$1" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
           to_ver() {
@@ -182,26 +199,29 @@ jobs:
             x="${x#.}"
             echo "$x"
           }
-          R="$(to_ver "${{ github.event.inputs.tag }}")"
+          R="$(to_ver "$INPUT_TAG")"
           if [ -z "$R" ]; then
             echo "ERROR: empty tag" >&2
             exit 1
           fi
           if ! echo "$R" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: tag must be semver X.Y.Z (e.g. v1.2.3), got: ${{ github.event.inputs.tag }}" >&2
+            echo "ERROR: tag must be semver X.Y.Z (e.g. v1.2.3), got: ${INPUT_TAG}" >&2
             exit 1
           fi
           echo "tag=v${R}" >> "$GITHUB_OUTPUT"
           echo "ver=${R}" >> "$GITHUB_OUTPUT"
-          SRC_RAW="$(trim "${{ github.event.inputs.source_ref }}")"
+          SRC_RAW="$(trim "$INPUT_SOURCE_REF")"
           if [ -z "$SRC_RAW" ]; then
             SRC="v${R}"
           else
             TMP="$(to_ver "$SRC_RAW")"
             if echo "$TMP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
               SRC="v${TMP}"
-            else
+            elif echo "$SRC_RAW" | grep -qE '^[A-Za-z0-9._/-]+$'; then
               SRC="$SRC_RAW"
+            else
+              echo "ERROR: source_ref contains characters not allowed in a git ref: ${SRC_RAW}" >&2
+              exit 1
             fi
           fi
           echo "checkout_ref=${SRC}" >> "$GITHUB_OUTPUT"
@@ -209,6 +229,7 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          persist-credentials: false
           ref: ${{ steps.meta.outputs.checkout_ref }}
 
       - name: Use python for packaging when tag tree has no TUI spec
@@ -254,6 +275,9 @@ jobs:
           else
             echo "No bundled aarch64 i2pd found; building portable artifacts without embedded router."
           fi
+
+      - name: Verify bundled i2pd against committed checksums
+        run: scripts/verify_bundled_i2pd.sh --desktop-only
 
       - name: Build Linux aarch64 zips (PyInstaller + AppImage)
         run: ./build-linux.sh

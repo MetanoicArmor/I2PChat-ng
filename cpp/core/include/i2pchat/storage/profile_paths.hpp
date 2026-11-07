@@ -32,6 +32,10 @@ inline constexpr std::size_t kLegacyPeerIdHexLength = 16;
 /// SHA-256 of the group id, full hex digest.
 [[nodiscard]] std::string group_token(std::string_view group_id);
 
+/// A profile name is a single path segment: 1..64 of `A-Z a-z 0-9 . _ -`,
+/// and neither `.` nor `..`. Anything else could escape `profiles/`.
+[[nodiscard]] bool is_valid_profile_name(std::string_view name);
+
 class ProfilePaths {
 public:
     ProfilePaths(std::filesystem::path data_dir, std::string profile);

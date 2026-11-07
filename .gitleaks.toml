@@ -1,14 +1,32 @@
 # Local overrides; CI runs: gitleaks detect --source . --config .gitleaks.toml --redact
 # Gitleaks auto-discovers this file in the repo root.
+#
+# The allowlist is deliberately narrow: it only silences the *generic-api-key*
+# heuristic inside test fixtures and golden vectors (synthetic keys that are
+# part of the test suite). Every other rule still applies to those files, and
+# the generic rule still applies everywhere else, so a real token pasted into
+# a fixture under a different rule's signature, or anywhere outside these
+# paths, is still reported.
 
 title = "I2PChat"
 
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Test fixtures and golden vectors (synthetic keys, not production secrets)"
-paths = [
-  '''tests/test_clear_locked_peer\.py''',
-  '''tests/test_profile_dat\.py''',
-]
+# Appends to the default rule's allowlists instead of replacing the rule.
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Synthetic keys in Python test fixtures"
+  paths = [
+    '''^tests/test_clear_locked_peer\.py$''',
+    '''^tests/test_profile_dat\.py$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Golden vectors shared by the Python and C++ test suites"
+  paths = [
+    '''^cpp/testdata/vectors/[^/]+\.json$''',
+    '''^cpp/tests/test_[^/]+\.cpp$''',
+  ]

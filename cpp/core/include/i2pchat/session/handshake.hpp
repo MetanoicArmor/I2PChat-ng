@@ -58,6 +58,10 @@ enum class TrustDecision {
     Accept,
     /// Key contradicts an existing pin, or the user refused. Abort.
     Reject,
+    /// The user has been asked but has not answered. The handshake is
+    /// aborted like a rejection, without blocking the transport on the
+    /// dialog; the peer reconnects once the answer has been recorded.
+    Deferred,
 };
 
 /// Verifies a peer's Ed25519 signing key against the TOFU store. Called after
@@ -114,7 +118,9 @@ private:
 
     void ensure_ephemeral();
     void install_keys(bool is_initiator);
-    void fail(const std::string& reason);
+    /// Run the trust verifier; fails the handshake on anything but Accept.
+    void check_trust(const Bytes& peer_signing_public);
+    [[noreturn]] void fail(const std::string& reason);
 
     HandshakeConfig config_;
     HandshakeState state_ = HandshakeState::Idle;

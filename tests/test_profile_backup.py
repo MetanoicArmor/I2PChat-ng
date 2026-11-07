@@ -1,7 +1,11 @@
+import io
+import json
 import os
 import secrets
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from i2pchat import crypto
 from i2pchat.core.i2p_chat_core import get_profile_data_dir
@@ -79,6 +83,78 @@ class ProfileBackupTests(unittest.TestCase):
                 f.write(_encrypt_payload(payload, "passphrase"))
             with self.assertRaises(BackupError):
                 import_profile_bundle(bundle_path, td, "passphrase")
+
+    def test_import_rejects_dot_dot_profile_name_from_manifest(self) -> None:
+        # ".." passes the profile-name charset but names the parent of the
+        # profiles dir, so the identity file would land outside any profile.
+        for evil in ("..", "."):
+            with tempfile.TemporaryDirectory() as td:
+                profiles_dir = os.path.join(td, "profiles")
+                os.makedirs(profiles_dir)
+                files = {"profile.dat": b"legit-identity"}
+                manifest = _build_manifest(bundle_type="profile", profile=evil, files=files)
+                payload = _build_tar_payload(manifest, files)
+                bundle_path = os.path.join(td, "evil.i2pchat-profile-backup")
+                with open(bundle_path, "wb") as f:
+                    f.write(_encrypt_payload(payload, "passphrase"))
+                with self.assertRaises((BackupError, ValueError)):
+                    import_profile_bundle(bundle_path, profiles_dir, "passphrase")
+                self.assertEqual(
+                    sorted(os.listdir(td)), ["evil.i2pchat-profile-backup", "profiles"]
+                )
+                self.assertEqual(os.listdir(profiles_dir), [])
+
+    def _write_bundle(self, td: str, bundle_type: str, files: dict[str, bytes], name: str) -> str:
+        # Built with tarfile directly: the exporter refuses unsafe names, and
+        # the point here is what the importer does with a bundle that was not
+        # produced by our exporter.
+        manifest = _build_manifest(bundle_type=bundle_type, profile="alice", files=files)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            raw = json.dumps(manifest).encode("utf-8")
+            info = tarfile.TarInfo("manifest.json")
+            info.size = len(raw)
+            tf.addfile(info, io.BytesIO(raw))
+            for logical, content in files.items():
+                info = tarfile.TarInfo(f"payload/{logical}")
+                info.size = len(content)
+                tf.addfile(info, io.BytesIO(content))
+        bundle_path = os.path.join(td, name)
+        with open(bundle_path, "wb") as f:
+            f.write(_encrypt_payload(buf.getvalue(), "passphrase"))
+        return bundle_path
+
+    def test_history_import_rejects_unsafe_history_suffix(self) -> None:
+        # "history/<suffix>" becomes "<profile>.history.<suffix>"; a suffix with
+        # a separator or a parent component must not escape the profile dir.
+        for evil in ("../../escape.json", "sub/dir.json", ".."):
+            with tempfile.TemporaryDirectory() as td:
+                profiles_dir = os.path.join(td, "profiles")
+                os.makedirs(profiles_dir)
+                bundle_path = self._write_bundle(
+                    td, "history", {f"history/{evil}": b"{}"}, "evil.i2pchat-history-backup"
+                )
+                with self.assertRaises(BackupError):
+                    import_history_bundle(bundle_path, profiles_dir, "alice", "passphrase")
+                self.assertEqual(
+                    sorted(os.listdir(td)), ["evil.i2pchat-history-backup", "profiles"]
+                )
+
+    def test_bundle_member_size_is_bounded(self) -> None:
+        from i2pchat.storage import profile_backup as pb
+
+        with tempfile.TemporaryDirectory() as td:
+            profiles_dir = os.path.join(td, "profiles")
+            os.makedirs(profiles_dir)
+            bundle_path = self._write_bundle(
+                td, "history", {"history/big.json": b"0" * 4096}, "big.i2pchat-history-backup"
+            )
+            with patch.object(pb, "MAX_BUNDLE_MEMBER_BYTES", 1024):
+                with self.assertRaises(BackupError):
+                    import_history_bundle(bundle_path, profiles_dir, "alice", "passphrase")
+            with patch.object(pb, "MAX_BUNDLE_TOTAL_BYTES", 1024):
+                with self.assertRaises(BackupError):
+                    import_history_bundle(bundle_path, profiles_dir, "alice", "passphrase")
 
     def test_history_backup_roundtrip_skip_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as src_td, tempfile.TemporaryDirectory() as dst_td:

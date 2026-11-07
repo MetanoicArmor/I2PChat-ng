@@ -57,6 +57,13 @@ struct ReplicaServerConfig {
     std::size_t max_prefix_files = 256;
     std::uint64_t max_prefix_bytes = 32ull * 1024 * 1024;
 
+    /// Simultaneous client connections (blob and status listeners together).
+    /// Beyond this, new connections are closed without a reply.
+    std::size_t max_connections = 256;
+    /// A whole command — request line, PUT body, reply — must finish within
+    /// this, so a client that stalls between bytes cannot hold a slot.
+    std::chrono::seconds command_timeout{30};
+
     std::uint64_t audit_log_max_bytes = 1024 * 1024;
     int audit_log_backups = 3;
     bool log_json = true;

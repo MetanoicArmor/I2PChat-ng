@@ -22,6 +22,11 @@ class LivePeerSession:
     peer_id: str
     conn: Optional[Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = None
     announce_lifecycle: bool = True
+    # The remote side opened this stream. Inbound sessions that have not
+    # finished the handshake are counted against a separate, smaller limit
+    # and get their own deadline, so a stranger cannot hold live-session
+    # slots by connecting and going silent.
+    inbound: bool = False
     current_peer_dest_b64: Optional[str] = None
     peer_identity_binding_verified: bool = False
     proven: bool = False
@@ -121,3 +126,26 @@ def max_concurrent_live_sessions() -> int:
     except ValueError:
         n = 8
     return max(1, min(n, 64))
+
+
+def max_pending_inbound_handshakes() -> int:
+    """How many inbound streams may sit in the pre-handshake state at once.
+
+    Smaller than the live-session limit on purpose: a handshake takes seconds,
+    so a few slots are plenty for real peers, while an attacker opening
+    streams and never finishing cannot exhaust the live-session budget.
+    """
+    import os
+
+    raw = os.environ.get("I2PCHAT_MAX_PENDING_HANDSHAKES", "3").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 3
+    return max(1, min(n, 16))
+
+
+#: Seconds an inbound stream may spend before its handshake completes. Shorter
+#: than the general handshake watchdog, which exists for the user's own
+#: outbound dials (where a TOFU dialog may be open).
+PRE_HANDSHAKE_TIMEOUT = 30.0

@@ -12,6 +12,18 @@ if [[ ! -f "$REL" ]]; then
   exit 1
 fi
 
+# Sign from an isolated keyring: the caller imports the release key into it
+# (or into the default one, which is still honoured when GNUPGHOME is unset),
+# and nothing else on the machine's keyring can be picked as "the first
+# secret key". A fresh home also leaves no agent state behind on CI runners.
+if [[ -z "${GNUPGHOME:-}" && -n "${APT_REPO_GPG_PRIVATE_KEY:-}" ]]; then
+  export GNUPGHOME
+  GNUPGHOME="$(mktemp -d)"
+  chmod 700 "$GNUPGHOME"
+  trap 'rm -rf "$GNUPGHOME"' EXIT
+  printf '%s\n' "$APT_REPO_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+fi
+
 GPG_OPTS=(--batch --yes)
 if [[ -n "${APT_REPO_GPG_PASSPHRASE:-}" ]]; then
   GPG_OPTS+=(--pinentry-mode loopback --passphrase-fd 0)

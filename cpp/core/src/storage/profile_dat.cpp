@@ -94,23 +94,42 @@ std::string dat_wrap_keyring_account(std::string_view profile) {
     return std::string(profile) + std::string(kDatWrapKeyringSuffix);
 }
 
-Bytes get_or_create_dat_wrap_key(std::string_view profile,
-                                 const std::filesystem::path& profile_data_dir) {
-    if (const std::optional<Bytes> existing = keyring_wrap_key(profile)) {
-        return *existing;
+namespace {
+
+struct WrapKeyLookup {
+    Bytes key;
+    bool in_keyring = false;
+};
+
+// The sidecar sits next to the .dat it protects, so while it exists the
+// encryption adds nothing against whoever copies the profile directory. It is
+// created only when the keyring cannot hold the key; an existing sidecar is
+// kept (and promoted into the keyring) so copied profiles keep opening.
+WrapKeyLookup get_or_create_dat_wrap_key_impl(std::string_view profile,
+                                              const std::filesystem::path& profile_data_dir) {
+    if (std::optional<Bytes> existing = keyring_wrap_key(profile)) {
+        return {std::move(*existing), true};
     }
 
     const std::filesystem::path sidecar = profile_dat_wrap_path(profile_data_dir, profile);
-    if (const std::optional<Bytes> existing = read_wrap_sidecar(sidecar)) {
-        // Promote the sidecar into the keyring, where the OS can protect it.
-        (void)store_keyring_wrap_key(profile, ByteView(*existing));
-        return *existing;
+    if (std::optional<Bytes> existing = read_wrap_sidecar(sidecar)) {
+        const bool promoted = store_keyring_wrap_key(profile, ByteView(*existing));
+        return {std::move(*existing), promoted};
     }
 
-    const Bytes wrap_key = crypto::random_bytes(32);
-    (void)store_keyring_wrap_key(profile, ByteView(wrap_key));
+    Bytes wrap_key = crypto::random_bytes(32);
+    if (store_keyring_wrap_key(profile, ByteView(wrap_key))) {
+        return {std::move(wrap_key), true};
+    }
     write_wrap_sidecar(sidecar, ByteView(wrap_key));
-    return wrap_key;
+    return {std::move(wrap_key), false};
+}
+
+}  // namespace
+
+Bytes get_or_create_dat_wrap_key(std::string_view profile,
+                                 const std::filesystem::path& profile_data_dir) {
+    return get_or_create_dat_wrap_key_impl(profile, profile_data_dir).key;
 }
 
 std::optional<Bytes> load_dat_wrap_key(std::string_view profile,
@@ -240,12 +259,19 @@ void write_encrypted_profile_dat(const std::filesystem::path& path,
                                  std::string_view private_key_base64,
                                  std::string_view profile,
                                  const std::filesystem::path& profile_data_dir) {
-    const Bytes wrap = get_or_create_dat_wrap_key(profile, profile_data_dir);
+    const WrapKeyLookup lookup = get_or_create_dat_wrap_key_impl(profile, profile_data_dir);
+    const Bytes& wrap = lookup.key;
 
-    // Keep the sidecar in step with the key actually in use, so a copied profile
-    // directory stays openable on a machine with no keyring.
+    // No sidecar is created while the keyring holds the key, so a copied
+    // profile directory (or a leaked .dat) stays opaque. An already-present
+    // sidecar is kept in step with the key in use rather than deleted.
     const std::filesystem::path sidecar = profile_dat_wrap_path(profile_data_dir, profile);
-    if (read_wrap_sidecar(sidecar) != std::optional<Bytes>(wrap)) {
+    const std::optional<Bytes> existing_sidecar = read_wrap_sidecar(sidecar);
+    if (!existing_sidecar.has_value()) {
+        if (!lookup.in_keyring) {
+            write_wrap_sidecar(sidecar, ByteView(wrap));
+        }
+    } else if (*existing_sidecar != wrap) {
         write_wrap_sidecar(sidecar, ByteView(wrap));
     }
 

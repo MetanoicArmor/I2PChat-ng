@@ -106,6 +106,18 @@ private:
     std::shared_ptr<std::ifstream> stream_;
 };
 
+/// What the UI says about an offered file.
+enum class OfferDecision {
+    Accept,
+    /// Sends REJECT_FILE; nothing is written.
+    Reject,
+    /// The UI will answer later through `resolve_pending_offer`. Chunks are
+    /// written to a `.pending` file next to the final name meanwhile, so the
+    /// receiving coroutine never has to block on a dialog; the file is only
+    /// given its real name, acknowledged and reported once the user accepts.
+    Deferred,
+};
+
 /// Receives the file, image and rendered-image flows for one peer.
 class IncomingTransfers {
 public:
@@ -123,7 +135,8 @@ public:
         /// Decides whether to accept an offered file. `name` is the name it
         /// would be saved under, after sanitising and collision resolution.
         /// Declining sends REJECT_FILE. Unset means accept.
-        std::function<bool(const std::string& name, std::uint64_t size)> accept_file;
+        std::function<OfferDecision(const std::string& name, std::uint64_t size)>
+            accept_file;
         std::function<void(const Frame&)> send;
         std::function<void(const Progress&)> on_progress;
         std::function<void(const std::string& message)> on_system;
@@ -150,16 +163,34 @@ public:
     /// Abandon whatever is in flight, for a connection that dropped.
     void reset();
 
+    /// Answer an offer that `accept_file` deferred. Accepting completes the
+    /// transfer (or lets it continue) under the real name; rejecting removes
+    /// the pending data and sends REJECT_FILE. Returns false when no offer is
+    /// waiting, which happens when the connection dropped or a newer offer
+    /// replaced it in the meantime.
+    bool resolve_pending_offer(bool accept);
+
+    [[nodiscard]] bool offer_pending() const noexcept {
+        return file_.has_value() && file_->pending;
+    }
+
     [[nodiscard]] bool receiving_file() const noexcept { return file_.has_value(); }
     [[nodiscard]] bool receiving_image() const noexcept { return image_.has_value(); }
 
 private:
     struct IncomingFile {
+        /// Final destination.
         std::filesystem::path path;
+        /// Where bytes are written: `path` once accepted, `path` + ".pending"
+        /// while the user has not answered yet.
+        std::filesystem::path write_path;
         std::string name;
         std::uint64_t size = 0;
         std::uint64_t received = 0;
         std::uint64_t message_id = 0;
+        bool pending = false;
+        /// All bytes arrived while still pending; waiting for the answer.
+        bool complete = false;
         std::ofstream stream;
     };
 
@@ -174,6 +205,7 @@ private:
     void begin_file(std::string_view body, std::uint64_t message_id);
     void append_file_chunk(std::string_view body);
     void finish_file();
+    void complete_file();
     void fail_file(const std::string& message, bool remove_partial);
 
     void begin_image(std::string_view body, std::uint64_t message_id);

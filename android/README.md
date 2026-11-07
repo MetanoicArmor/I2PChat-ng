@@ -23,7 +23,8 @@ From the **repository root** (needs JDK 17+, `ANDROID_HOME` / SDK, NDK):
 
 ```bash
 ./build-android.sh --debug              # default — signed with the debug keystore
-./build-android.sh --release            # release APK (upload keystore via I2PCHAT_ANDROID_* env, else debug keystore)
+./build-android.sh --release            # release APK; needs I2PCHAT_ANDROID_KEYSTORE/_KEYSTORE_PASSWORD/_KEY_ALIAS/_KEY_PASSWORD,
+                                        # or I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING=1 for a sideload-only build with the public debug key
 ./build-android.sh --debug --install    # build + adb install -r
 ./build-android.sh --arm32 --release    # 32-bit sideload APK, no bundled i2pd
 ```

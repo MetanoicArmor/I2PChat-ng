@@ -99,6 +99,73 @@ def _read_contacts(app_root: str, profile_name: str) -> Any:
         return json.load(f)
 
 
+#: GUI settings an archive may restore. Everything else in the bundle's
+#: ``gui_settings`` is dropped: an archive is a file the user received, and a
+#: hostile one must not be able to disable the privacy lock, replace its PIN
+#: hash, pre-acknowledge the custom-update-URL warnings or point the client
+#: at another release feed. Cosmetic and notification preferences only.
+RESTORABLE_GUI_SETTINGS: frozenset[str] = frozenset(
+    {
+        "theme",
+        "compose_enter_sends",
+        "compose_split_bottom_height",
+        "notify_sound_enabled",
+        "notify_sound",
+        "notify_quiet_mode",
+        "notify_hide_body",
+        "hide_notifications",
+        "history_enabled",
+        "history_max_messages",
+        "history_retention_days",
+        "history_retention",
+    }
+)
+
+_SCALAR_TYPES = (str, int, float, bool)
+_MAX_GUI_SETTING_STRING = 256
+
+
+def _restorable_value(value: Any) -> Any:
+    """Return a copy of *value* limited to scalars or a flat dict of scalars."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, _SCALAR_TYPES):
+        if isinstance(value, str) and len(value) > _MAX_GUI_SETTING_STRING:
+            raise ValueError("string too long")
+        return value
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("nested key is not a string")
+            if item is not None and not isinstance(item, _SCALAR_TYPES):
+                raise ValueError("nested value is not a scalar")
+            if isinstance(item, str) and len(item) > _MAX_GUI_SETTING_STRING:
+                raise ValueError("string too long")
+            out[key] = item
+        return out
+    raise ValueError("unsupported value type")
+
+
+def filter_restorable_gui_settings(settings: Any) -> dict[str, Any] | None:
+    """Keep only whitelisted, well-typed GUI settings from an imported bundle.
+
+    Returns ``None`` when the bundle carried no usable settings, so the
+    caller leaves the local file untouched rather than writing an empty one.
+    """
+    if not isinstance(settings, dict):
+        return None
+    kept: dict[str, Any] = {}
+    for key, value in settings.items():
+        if not isinstance(key, str) or key not in RESTORABLE_GUI_SETTINGS:
+            continue
+        try:
+            kept[key] = _restorable_value(value)
+        except ValueError:
+            continue
+    return kept or None
+
+
 def _read_gui_settings(profiles_dir: str) -> Any:
     """Read gui.json from profiles_dir or the parent ~/.i2pchat directory."""
     for candidate in [
@@ -294,7 +361,8 @@ def import_profile(
             "error"    — raise FileExistsError
             "rename"   — suffix with _1, _2, ... (allocate_unique_profile_name)
             "overwrite" — replace existing files
-        restore_gui_settings: if True, also write gui.json from the archive
+        restore_gui_settings: if True, also write gui.json from the archive,
+            keeping only the keys in ``RESTORABLE_GUI_SETTINGS``
 
     Returns:
         The final profile name (without .dat extension)
@@ -316,7 +384,11 @@ def import_profile(
 
     dat_bytes = base64.b64decode(payload["dat_content"])
     contacts = payload.get("contacts")
-    gui_settings = payload.get("gui_settings") if restore_gui_settings else None
+    gui_settings = (
+        filter_restorable_gui_settings(payload.get("gui_settings"))
+        if restore_gui_settings
+        else None
+    )
 
     # Infer profile name from archive filename
     archive_basename = os.path.basename(archive_path)

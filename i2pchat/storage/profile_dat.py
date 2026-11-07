@@ -15,6 +15,8 @@ Wrapping key:
   - Fallback when keyring is unavailable: ``{profile}.dat.wrap`` next to the
     ``.dat`` (mode 0600). Same local threat model as former plaintext ``.dat``,
     but a leaked ``.dat`` alone (without the wrap sidecar / keyring) is useless.
+    The sidecar is only created when the keyring cannot store the key; an
+    existing one is kept so a copied profile directory stays openable.
 
 Legacy plaintext UTF-8 ``.dat`` files are still readable; callers should
 re-write them encrypted after a successful load (transparent migration).
@@ -109,27 +111,36 @@ def _write_wrap_sidecar(path: str, wrap_key: bytes) -> None:
     atomic_write_text(path, base64.b64encode(wrap_key).decode("ascii") + "\n")
 
 
-def get_or_create_dat_wrap_key(profile: str, profile_data_dir: str) -> bytes:
-    """Return a stable 32-byte wrap key for this profile (keyring or sidecar)."""
+def _get_or_create_dat_wrap_key(profile: str, profile_data_dir: str) -> tuple[bytes, bool]:
+    """Return ``(wrap_key, in_keyring)``; the sidecar is written only as a fallback.
+
+    The sidecar sits next to the ``.dat`` it protects, so while it exists the
+    encryption adds nothing against an attacker who copies the profile
+    directory. It is therefore created only when the OS keyring cannot hold
+    the key. An existing sidecar is left in place (and promoted into the
+    keyring) so profiles copied between machines keep opening.
+    """
     existing = _try_keyring_get_wrap(profile)
     if existing is not None:
-        return existing
+        return existing, True
     sidecar = profile_dat_wrap_path(profile_data_dir, profile)
     existing = _read_wrap_sidecar(sidecar)
     if existing is not None:
         # Best-effort promote sidecar → keyring for stronger protection.
-        _try_keyring_set_wrap(profile, existing)
-        return existing
+        in_keyring = _try_keyring_set_wrap(profile, existing)
+        return existing, in_keyring
     wrap_key = secrets.token_bytes(32)
-    stored_in_keyring = _try_keyring_set_wrap(profile, wrap_key)
+    if _try_keyring_set_wrap(profile, wrap_key):
+        logger.info("Profile .dat wrap key stored in OS keyring")
+        return wrap_key, True
     _write_wrap_sidecar(sidecar, wrap_key)
-    if stored_in_keyring:
-        logger.info("Profile .dat wrap key stored in OS keyring (+ local sidecar)")
-    else:
-        logger.info(
-            "Profile .dat wrap key stored in local sidecar (OS keyring unavailable)"
-        )
-    return wrap_key
+    logger.info("Profile .dat wrap key stored in local sidecar (OS keyring unavailable)")
+    return wrap_key, False
+
+
+def get_or_create_dat_wrap_key(profile: str, profile_data_dir: str) -> bytes:
+    """Return a stable 32-byte wrap key for this profile (keyring or sidecar)."""
+    return _get_or_create_dat_wrap_key(profile, profile_data_dir)[0]
 
 
 def load_dat_wrap_key(profile: str, profile_data_dir: str) -> Optional[bytes]:
@@ -264,12 +275,17 @@ def write_encrypted_profile_dat(
         )
         atomic_write_text(path, (private_key_base64 or "").strip() + "\n")
         return
-    wrap = get_or_create_dat_wrap_key(profile, profile_data_dir)
-    # Always keep a 0600 sidecar so a copied profile directory remains openable
-    # even when OS keyring is unavailable on the destination machine. A leaked
-    # .dat alone (without .dat.wrap / keyring) stays opaque.
+    wrap, in_keyring = _get_or_create_dat_wrap_key(profile, profile_data_dir)
+    # The 0600 sidecar is a fallback for hosts without a usable OS keyring. When
+    # the keyring holds the key, no sidecar is created, so a copied profile
+    # directory (or a leaked .dat) stays opaque. An already-present sidecar is
+    # kept in step with the key in use rather than deleted.
     sidecar = profile_dat_wrap_path(profile_data_dir, profile)
-    if _read_wrap_sidecar(sidecar) != wrap:
+    existing_sidecar = _read_wrap_sidecar(sidecar)
+    if existing_sidecar is None:
+        if not in_keyring:
+            _write_wrap_sidecar(sidecar, wrap)
+    elif existing_sidecar != wrap:
         _write_wrap_sidecar(sidecar, wrap)
     blob = encrypt_profile_dat(private_key_base64, wrap)
     atomic_write_bytes(path, blob)

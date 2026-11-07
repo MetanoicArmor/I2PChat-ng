@@ -28,16 +28,12 @@ namespace {
 constexpr std::string_view kMagic = "I2PBKP1";
 constexpr std::uint8_t kVersion = 1;
 constexpr std::size_t kSaltSize = 32;
+/// Upper bound on the decompressed tar payload of a bundle.
+constexpr std::size_t kMaxBackupPayloadSize = 512ULL * 1024 * 1024;
 
 const std::regex kSafeSegment{R"(^[A-Za-z0-9._-]+$)"};
 const std::regex kSafeBlindbox{R"(^blindbox\.[A-Za-z0-9._-]+\.json$)"};
-const std::regex kProfileName{R"(^[A-Za-z0-9._-]{1,64}$)"};
-
 [[noreturn]] void fail(const std::string& message) { throw BackupError(message); }
-
-bool is_valid_profile_name(std::string_view name) {
-    return std::regex_match(std::string(name), kProfileName);
-}
 
 std::string require_profile_name(std::string_view name) {
     const std::string trimmed = std::string(name);
@@ -110,6 +106,13 @@ Bytes gunzip_bytes(ByteView raw) {
         stream.avail_out = static_cast<uInt>(buf.size());
         rc = inflate(&stream, Z_NO_FLUSH);
         out.insert(out.end(), buf.begin(), buf.begin() + (buf.size() - stream.avail_out));
+        // The bundle was encrypted with a passphrase the sender chose, so its
+        // contents are untrusted: a small gzip member can expand to gigabytes
+        // and the whole payload is held in memory.
+        if (out.size() > kMaxBackupPayloadSize) {
+            inflateEnd(&stream);
+            fail("Backup payload exceeds the size limit");
+        }
         if (rc == Z_STREAM_END) {
             break;
         }
@@ -560,6 +563,9 @@ BackupImportSummary import_history_bundle(const std::filesystem::path& bundle_pa
             fail("Unexpected file in history bundle: " + logical);
         }
         const std::string suffix = logical.substr(8);
+        if (!is_safe_path_segment(suffix)) {
+            fail("Unsafe history entry in history bundle: " + logical);
+        }
         const auto dest = pdir / (target + ".history." + suffix);
         ++history;
         std::error_code ec;

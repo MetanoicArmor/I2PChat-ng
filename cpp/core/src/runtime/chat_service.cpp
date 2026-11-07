@@ -111,6 +111,13 @@ ChatService::ChatService(asio::any_io_executor executor, ChatServiceConfig confi
       events_(std::move(events)),
       paths_(config_.app_root / "profiles" / config_.profile, config_.profile),
       sessions_(config_.sessions) {
+    // The profile name comes from the UI and becomes a directory under
+    // profiles/; a separator or ".." in it would put every profile file
+    // somewhere else.
+    if (!storage::is_valid_profile_name(config_.profile)) {
+        throw std::invalid_argument(
+            "Invalid profile name. Allowed characters: a-z A-Z 0-9 . _ - (1..64 chars).");
+    }
     crypto::init();
     if (config_.downloads_dir.empty()) {
         config_.downloads_dir = paths_.data_dir() / "downloads";
@@ -165,6 +172,11 @@ asio::awaitable<void> ChatService::start() {
     if (config_.profile != kTransientProfile) {
         trust_ = session::TrustStore(paths_.trust_store());
         trust_.load();
+        if (trust_.degraded()) {
+            emit_error(
+                "Trust store could not be read; the damaged file was kept as "
+                "*.trust.json.corrupt-*. Every peer will ask for confirmation again.");
+        }
     }
     if (events_.on_trust_prompt) {
         trust_.set_prompt_handler(events_.on_trust_prompt);
@@ -361,10 +373,11 @@ PeerLinkConfig ChatService::link_config(const std::string& peer_addr,
     config.session.handshake.signing_public = identity_.signing_public;
     config.session.handshake.trust_verifier = [this](const std::string& addr,
                                                      ByteView signing_key) {
-        const bool saved_contact = contacts_.has_peer(addr);
-        const bool auto_first =
-            saved_contact || config_.trust_auto_accept_first_sighting;
-        return trust_.verify_or_pin(addr, signing_key, auto_first);
+        // A saved contact is an address the user typed, not a key they have
+        // seen; its first key still goes through the prompt, as the reference
+        // implementation does. Silent pinning is a deliberate opt-in only.
+        return trust_.verify_or_pin(addr, signing_key,
+                                    config_.trust_auto_accept_first_sighting);
     };
     return config;
 }
@@ -382,7 +395,14 @@ void ChatService::wire_transfers(Peer& peer) {
         }
     };
     callbacks.accept_file = [this, addr](const std::string& name, std::uint64_t size) {
-        return events_.accept_file ? events_.accept_file(addr, name, size) : true;
+        if (events_.offer_file) {
+            return events_.offer_file(addr, name, size);
+        }
+        if (events_.accept_file) {
+            return events_.accept_file(addr, name, size) ? transfer::OfferDecision::Accept
+                                                         : transfer::OfferDecision::Reject;
+        }
+        return transfer::OfferDecision::Accept;
     };
     callbacks.on_progress = [this, addr](const transfer::Progress& progress) {
         if (events_.on_transfer) {
@@ -464,24 +484,57 @@ asio::awaitable<void> ChatService::accept_loop() {
             continue;
         }
 
-        // An inbound session must learn who is calling from the identity
-        // preface rather than from the router: the address SAM reports is not
-        // authenticated, and the session layer refuses to be told it in
-        // advance. So the link is created anonymously and registered against a
-        // peer once the handshake names one.
+        // Streams that never finish a handshake must not pile up: each one
+        // holds a socket, a coroutine and a slot in the session table.
+        if (pending_inbound_.size() >= config_.max_pending_inbound_handshakes) {
+            boost::system::error_code ignored;
+            stream.socket.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
+            stream.socket.close(ignored);
+            continue;
+        }
+
+        // An inbound session learns who is calling from the identity preface,
+        // and the session layer refuses to be told it in advance, so the link
+        // is created anonymously and registered against a peer once the
+        // handshake names one. The router, however, does report which
+        // destination opened the stream, and I2P guarantees that one: the
+        // preface must name the same destination, otherwise a stranger could
+        // introduce itself as a contact and have its key pinned under the
+        // contact's address.
+        std::string sam_peer_addr;
+        {
+            const std::string& reported = stream.peer_destination;
+            const std::string token = reported.substr(0, reported.find(' '));
+            try {
+                sam_peer_addr = sam::Destination::from_public_base64(token).base32();
+            } catch (const std::exception&) {
+                sam_peer_addr.clear();
+            }
+        }
         PeerLinkConfig config = link_config({}, session::ConnectionDirection::Inbound);
+        config.handshake_timeout = config_.inbound_handshake_timeout;
+        config.session.identity_verifier = [sam_peer_addr](const std::string& claimed,
+                                                            const std::string&) {
+            return !sam_peer_addr.empty() && claimed == sam_peer_addr;
+        };
         PeerLink::Callbacks callbacks;
-        callbacks.on_established = [this](PeerLink& link) { on_established(link); };
+        callbacks.on_established = [this](PeerLink& link) {
+            pending_inbound_.erase(&link);
+            on_established(link);
+        };
         callbacks.on_frame = [this](PeerLink& link, const PeerFrame& frame) {
             on_frame(link.peer_addr(), frame);
         };
         callbacks.on_closed = [this](PeerLink& link, const std::string& reason) {
+            pending_inbound_.erase(&link);
             on_link_closed(link.peer_addr(), reason, link.shared_from_this());
         };
 
-        PeerLink::create(std::move(stream.socket), std::move(stream.prebuffered), config,
-                         std::move(callbacks))
-            ->start();
+        const std::shared_ptr<PeerLink> link = PeerLink::create(
+            std::move(stream.socket), std::move(stream.prebuffered), config,
+            std::move(callbacks));
+        pending_inbound_.insert(link.get());
+        link->start();
     }
 }
 
@@ -1041,6 +1094,14 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
     co_return true;
 }
 
+bool ChatService::respond_file_offer(std::string_view peer, bool accept) {
+    Peer* entry = find_peer(sam::normalize_peer_address(peer));
+    if (entry == nullptr || !entry->incoming) {
+        return false;
+    }
+    return entry->incoming->resolve_pending_offer(accept);
+}
+
 asio::awaitable<void> ChatService::blindbox_loop() {
     asio::steady_timer timer(executor_);
     while (running_) {
@@ -1526,6 +1587,17 @@ std::optional<groups::TopologySnapshot> ChatService::group_topology(const std::s
 
 groups::GroupState ChatService::join_group_invite(std::string_view token) {
     const groups::GroupInvite invite = groups::decode_invite(token);
+    // decode_invite checked the signature against the key embedded in the
+    // invite. When the inviter's key is already pinned, the two must agree,
+    // otherwise anyone could mint an invite "from" a known contact.
+    if (const std::optional<session::TrustPin> pin =
+            trust_.pin_for(std::string(sam::normalize_peer_address(invite.inviter_id)));
+        pin.has_value() &&
+        !crypto::constant_time_equal(as_bytes(pin->signing_key_hex),
+                                     as_bytes(invite.inviter_signing_pub))) {
+        throw std::runtime_error(
+            "Group invite signing key does not match the inviter's pinned identity key");
+    }
     groups::GroupState state(invite.group_id, invite.epoch, invite.members, invite.title);
     return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
                                 ByteView(identity_.signing_seed), std::nullopt)

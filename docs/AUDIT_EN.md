@@ -1,5 +1,7 @@
 # I2PChat Security Audit
 
+> A newer audit of version 1.5.2 (Python, C++ core, Android, CI) is available: [docs/AUDIT_1.5.2_EN.md](AUDIT_1.5.2_EN.md).
+
 **Audit date:** 2026-08-11
 **Version audited:** 1.3.3 (see `VERSION`)
 **Remediation shipped in:** **1.4.0** — a deliberately **protocol-incompatible** release (see "v1.4.0 protocol-breaking changes" at the end).

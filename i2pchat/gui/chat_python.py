@@ -15,6 +15,7 @@ from rich.align import Align
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
@@ -24,6 +25,9 @@ from textual.widgets import Button, DataTable, Footer, Input, RadioSet, RichLog,
 from i2pchat.blindbox.blindbox_diagnostics import build_blindbox_diagnostics_text
 from i2pchat.router.bundled_i2pd import BundledI2pdManager
 from i2pchat.router.settings import (
+    DEFAULT_TUNNEL_LENGTH,
+    MAX_TUNNEL_LENGTH,
+    MIN_TUNNEL_LENGTH,
     RouterSettings,
     bundled_i2pd_allowed,
     load_router_settings,
@@ -125,6 +129,16 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 COMPOSE_DRAFTS_MAX_KEYS = 100
 _PROFILE_IMPORT_EXT = ".dat"
+
+# C0/C1 control characters other than tab and newline. Rich escapes markup but
+# passes these through to the terminal, where ESC sequences can retitle the
+# window, move the cursor or spoof lines of the log; a peer must not get that.
+_TERMINAL_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def strip_terminal_controls(text: str) -> str:
+    """Remove control characters a peer could use to drive the terminal."""
+    return _TERMINAL_CONTROL_CHARS.sub("", str(text))
 
 
 @dataclass
@@ -490,6 +504,7 @@ class I2PChat(App):
             on_trust_decision=self.handle_trust_decision,
             on_trust_mismatch_decision=self.handle_trust_mismatch_decision,
             on_saved_contacts_changed=self._reload_contacts_book_after_core_write,
+            tunnel_length=self._router_settings.tunnel_length,
         )
         setattr(
             core,
@@ -530,12 +545,38 @@ class I2PChat(App):
         host, port = self._active_http_proxy_address
         return f"http://{host}:{port}"
 
-    def handle_file_offer(self, filename: str, size: int) -> bool:
-        self.post(
-            "system",
-            f"Incoming file offer: {filename} ({size} bytes). TUI auto-accepts incoming files.",
+    async def handle_file_offer(self, filename: str, size: int) -> bool:
+        """Ask before a peer's file touches the disk, same as the Qt GUI does."""
+        from i2pchat.core.i2p_chat_core import sanitize_filename
+
+        shown_name = escape(sanitize_filename(filename))
+        loop = asyncio.get_running_loop()
+        decision_future: asyncio.Future[bool] = loop.create_future()
+
+        def _done(result: bool | None) -> None:
+            if not decision_future.done():
+                decision_future.set_result(bool(result))
+
+        self.post("system", f"Incoming file offer: {shown_name} ({size:,} bytes).")
+        self.push_screen(
+            TuiTrustDecisionScreen(
+                title="Accept incoming file?",
+                peer_addr=self._active_peer_label(),
+                body_lines=[
+                    f"File: {shown_name}",
+                    f"Size: {size:,} bytes",
+                    "It will be saved to the downloads folder. Reject if you were not expecting it.",
+                ],
+                confirm_label="Accept",
+            ),
+            callback=_done,
         )
-        return True
+        return await decision_future
+
+    def _active_peer_label(self) -> str:
+        core = getattr(self, "core", None)
+        peer = getattr(core, "current_peer_addr", None) if core is not None else None
+        return str(peer or "peer")
 
     async def handle_trust_decision(
         self, peer_addr: str, fingerprint: str, signing_key_hex: str
@@ -816,7 +857,8 @@ class I2PChat(App):
             "help": "[dim]HELP:[/] [gray62]{}[/]",
         }
 
-        safe_message = str(message) if allow_markup else escape(str(message))
+        cleaned = strip_terminal_controls(message)
+        safe_message = cleaned if allow_markup else escape(cleaned)
         address_pattern = r"([a-z0-9]+\.b32\.i2p|[a-z0-9]+\.i2p)"
         formatted_msg = re.sub(address_pattern, r"[bold cyan]\1[/]", safe_message)
         content = styles.get(type_name, "{}").format(formatted_msg)
@@ -899,8 +941,8 @@ class I2PChat(App):
             suffix_parts.append("history")
         suffix = " · ".join(suffix_parts)
         panel = Panel(
-            f"[white]{escape(text)}[/]",
-            title=f"[#5f5f5f][{timestamp} UTC][/] [bold {border_color}]{escape(sender_label)}[/] [dim]{escape(suffix)}[/]",
+            f"[white]{escape(strip_terminal_controls(text))}[/]",
+            title=f"[#5f5f5f][{timestamp} UTC][/] [bold {border_color}]{escape(strip_terminal_controls(sender_label))}[/] [dim]{escape(suffix)}[/]",
             title_align="left",
             border_style=border_color,
             box=box.ROUNDED,
@@ -1399,8 +1441,10 @@ class I2PChat(App):
     def handle_image_received(self, art: str) -> None:
         self._record_transfer_event("image", "inline-image", "received")
         now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        # The ASCII art is peer-supplied text: it is rendered as plain Text
+        # so that neither Rich markup nor control characters in it take effect.
         panel = Panel(
-            art,
+            Text(strip_terminal_controls(art)),
             title=f"[#5f5f5f][{now_utc} UTC][/] [bold cyan]{escape(self._peer_display_name(self._current_target_peer()))}[/] [dim]ASCII image[/]",
             title_align="left",
             border_style="cyan",
@@ -1943,7 +1987,8 @@ class I2PChat(App):
             f"Configured backend: {configured}\n"
             f"Selection source: {source}\n"
             f"Active runtime: {active_runtime}\n"
-            f"Active SAM address: {sam}"
+            f"Active SAM address: {sam}\n"
+            f"Tunnel length: {self._router_settings.tunnel_length} hops"
         )
 
     async def _apply_router_settings(
@@ -3498,6 +3543,11 @@ class TuiRouterScreen(ModalScreen[None]):
                 yield Switch(False, id="router_backend_toggle")
                 yield Static("Bundled i2pd", classes="router_backend_label")
             yield Static("", id="router_backend_caption")
+            yield Static(
+                f"Tunnel length, hops ({MIN_TUNNEL_LENGTH}-{MAX_TUNNEL_LENGTH}, default {DEFAULT_TUNNEL_LENGTH})",
+                classes="router_label",
+            )
+            yield Input("", id="router_tunnel_length")
             yield Static("System SAM host", classes="router_label")
             yield Input("", id="router_system_host")
             yield Static("System SAM port", classes="router_label")
@@ -3535,6 +3585,7 @@ class TuiRouterScreen(ModalScreen[None]):
         self.query_one("#router_backend_toggle", Switch).value = (
             settings.backend == "bundled"
         )
+        self.query_one("#router_tunnel_length", Input).value = str(settings.tunnel_length)
         self.query_one("#router_system_host", Input).value = settings.system_sam_host
         self.query_one("#router_system_port", Input).value = str(settings.system_sam_port)
         self.query_one("#router_bundled_host", Input).value = settings.bundled_sam_host
@@ -3575,6 +3626,17 @@ class TuiRouterScreen(ModalScreen[None]):
 
     def _settings_from_inputs(self) -> Optional[RouterSettings]:
         try:
+            tunnel_length = int(self.query_one("#router_tunnel_length", Input).value.strip())
+        except ValueError:
+            self.host.post("error", "Tunnel length must be an integer.")
+            return None
+        if not MIN_TUNNEL_LENGTH <= tunnel_length <= MAX_TUNNEL_LENGTH:
+            self.host.post(
+                "error",
+                f"Tunnel length must be between {MIN_TUNNEL_LENGTH} and {MAX_TUNNEL_LENGTH} hops.",
+            )
+            return None
+        try:
             return replace(
                 self.host._router_settings,
                 system_sam_host=self.query_one("#router_system_host", Input).value.strip() or "127.0.0.1",
@@ -3584,6 +3646,7 @@ class TuiRouterScreen(ModalScreen[None]):
                 bundled_http_proxy_port=int(self.query_one("#router_bundled_http_port", Input).value.strip()),
                 bundled_socks_proxy_port=int(self.query_one("#router_bundled_socks_port", Input).value.strip()),
                 bundled_control_http_port=int(self.query_one("#router_bundled_control_port", Input).value.strip()),
+                tunnel_length=tunnel_length,
             )
         except ValueError:
             self.host.post("error", "Router ports must be integers.")

@@ -64,7 +64,17 @@ private fun resolveMediaPath(text: String, prefix: String, appRoot: File, subdir
     val raw = text.removePrefix(prefix).trim()
     if (raw.isBlank()) return ""
     val direct = File(raw)
-    if (direct.isFile) return direct.absolutePath
+    val profilesDir = File(appRoot, "profiles").canonicalFile
+    // A peer can type "[image] /some/path" as plain text; only a path the core
+    // itself wrote under a profile's media directory counts as media.
+    if (direct.isAbsolute) {
+        val real = runCatching { direct.canonicalFile }.getOrNull() ?: return ""
+        if (!real.isFile) return ""
+        val allowed = profilesDir.listFiles()?.any { profile ->
+            subdirs.any { sub -> File(profile, sub).canonicalFile == real.parentFile }
+        } ?: false
+        return if (allowed) real.absolutePath else ""
+    }
     val name = direct.name
     if (name.isBlank()) return ""
     File(appRoot, "profiles").listFiles()?.forEach { profile ->
@@ -92,6 +102,12 @@ data class TofuPrompt(
     val oldKey: String,
 )
 
+data class FileOfferPrompt(
+    val peer: String,
+    val name: String,
+    val size: Long,
+)
+
 data class ChatUiState(
     val profiles: List<String> = emptyList(),
     val profile: String = "",
@@ -109,6 +125,7 @@ data class ChatUiState(
     val compose: String = "",
     val drafts: Map<String, String> = emptyMap(),
     val tofu: TofuPrompt? = null,
+    val fileOffer: FileOfferPrompt? = null,
     val error: String = "",
     val theme: String = "dark",
     val router: RouterPrefs = RouterPrefs().normalized(),
@@ -375,6 +392,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                         router.samPort,
                         ui.historyMaxMessages,
                         ui.historyRetentionDays,
+                        router.tunnelLength,
                     ),
                 )
             }.getOrElse { ex ->
@@ -536,15 +554,37 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (id.isBlank() || _state.value.selectedIsGroup) return
         viewModelScope.launch(Dispatchers.IO) {
             val copied = copyUri(uri) ?: return@launch
-            NativeEngine.nativeSendFile(id, copied.absolutePath, image)
+            try {
+                // The engine streams every chunk before returning, so the
+                // staged copy is no longer needed afterwards.
+                NativeEngine.nativeSendFile(id, copied.absolutePath, image)
+            } finally {
+                copied.delete()
+            }
             loadHistory()
             refreshSnapshot()
         }
     }
 
     fun answerTofu(accept: Boolean) {
+        val prompt = _state.value.tofu ?: return
         _state.update { it.copy(tofu = null) }
-        viewModelScope.launch(Dispatchers.IO) { NativeEngine.nativeTrustRespond(accept) }
+        viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeTrustRespond(prompt.peer, prompt.newKey, accept)
+            if (accept) {
+                refreshSnapshot()
+            }
+        }
+    }
+
+    fun answerFileOffer(accept: Boolean) {
+        val offer = _state.value.fileOffer ?: return
+        _state.update { it.copy(fileOffer = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!NativeEngine.nativeFileRespond(offer.peer, accept)) {
+                onMain { appendNotice("system", "Предложение файла «${offer.name}» уже неактуально") }
+            }
+        }
     }
 
     fun setPeerProfile(addr: String, name: String, note: String) {
@@ -633,20 +673,27 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun backup(op: String, uri: Uri, passphrase: String, includeHistory: Boolean = true) {
         viewModelScope.launch(Dispatchers.IO) {
             val dest = copyUri(uri, outgoing = op.startsWith("export")) ?: return@launch
-            val result = JSONObject(
-                NativeEngine.nativeBackup(
-                    op,
-                    appRoot.absolutePath,
-                    _state.value.profile,
-                    dest.absolutePath,
-                    passphrase,
-                    includeHistory,
-                ),
-            )
-            if (op.startsWith("export") && dest.exists()) {
-                getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
-                    dest.inputStream().use { it.copyTo(out) }
+            val result = try {
+                val json = JSONObject(
+                    NativeEngine.nativeBackup(
+                        op,
+                        appRoot.absolutePath,
+                        _state.value.profile,
+                        dest.absolutePath,
+                        passphrase,
+                        includeHistory,
+                    ),
+                )
+                if (op.startsWith("export") && dest.exists()) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                        dest.inputStream().use { it.copyTo(out) }
+                    }
                 }
+                json
+            } finally {
+                // Bundles hold identity keys (encrypted) and plaintext history;
+                // the staged copy in cacheDir must not outlive the operation.
+                dest.delete()
             }
             _state.update {
                 it.copy(
@@ -818,8 +865,12 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     private fun copyUri(uri: Uri, outgoing: Boolean = false): File? {
         val resolver = getApplication<Application>().contentResolver
-        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file-${System.currentTimeMillis()}"
-        val dest = File(getApplication<Application>().cacheDir, name)
+        val name = safeLocalFileName(uri.lastPathSegment)
+        val stagingDir = File(getApplication<Application>().cacheDir, "staging").apply { mkdirs() }
+        val dest = File(stagingDir, name)
+        // The name came from another app's content provider; it must stay a
+        // plain file directly inside the staging directory.
+        if (dest.canonicalFile.parentFile != stagingDir.canonicalFile) return null
         return try {
             if (outgoing) {
                 dest
@@ -832,6 +883,16 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun safeLocalFileName(raw: String?): String {
+        val base = raw.orEmpty().substringAfterLast('/').substringAfterLast('\\').trim()
+        val cleaned = base.replace(Regex("[^A-Za-z0-9._ ()\\-\\p{L}\\p{N}]"), "_").trim('.', ' ')
+        if (cleaned.isBlank() || cleaned.length > 200) {
+            val ext = base.substringAfterLast('.', "").take(10).filter { it.isLetterOrDigit() }
+            return "file-${System.currentTimeMillis()}" + if (ext.isNotEmpty()) ".$ext" else ""
+        }
+        return cleaned
     }
 
     private fun onMain(block: () -> Unit) {
@@ -959,9 +1020,24 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onTrustPrompt(kind: String, peer: String, newKey: String, oldKey: String) = onMain {
+        // The handshake was refused without blocking the engine; answering
+        // pins the key and reconnects.
         _state.update { it.copy(tofu = TofuPrompt(kind, peer, newKey, oldKey)) }
         NotificationHelper.notifyTrustPrompt(getApplication(), peer)
         appendNotice("system", "Нужно подтвердить ключ $peer для handshake")
+    }
+
+    override fun onFileOffer(peer: String, name: String, size: Long) = onMain {
+        // Bytes spool to a .pending file meanwhile; the dialog is the only way to say yes.
+        _state.update { it.copy(fileOffer = FileOfferPrompt(peer, name, size)) }
+        appendNotice("system", "$peer предлагает файл «$name» (${formatSize(size)})")
+    }
+
+    private fun formatSize(size: Long): String = when {
+        size >= 1L shl 30 -> "%.1f GiB".format(size / (1L shl 30).toDouble())
+        size >= 1L shl 20 -> "%.1f MiB".format(size / (1L shl 20).toDouble())
+        size >= 1L shl 10 -> "%.1f KiB".format(size / (1L shl 10).toDouble())
+        else -> "$size B"
     }
 
     override fun onStarted() = onMain {

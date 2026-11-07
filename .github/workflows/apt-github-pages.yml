@@ -12,8 +12,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: apt-github-pages
@@ -22,20 +20,29 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Resolve version
         id: meta
+        env:
+          # Passed through the environment rather than interpolated into the
+          # script, so the input is data and never shell syntax.
+          RAW_VERSION: ${{ github.event.inputs.version }}
         run: |
-          VER="${{ github.event.inputs.version }}"
-          VER="$(echo "$VER" | tr -d ' \t\r\n')"
+          VER="$(echo "$RAW_VERSION" | tr -d ' \t\r\n')"
           VER="${VER#v}"
-          if [ -z "$VER" ]; then
-            echo "ERROR: empty version" >&2
+          if ! echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: version must look like x.y.z, got '$VER'" >&2
             exit 1
           fi
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
@@ -112,7 +119,7 @@ jobs:
             export DEB_ARM64_PATH_2="${{ github.workspace }}/i2pchat-tui_${VER}_arm64.deb"
           fi
           ./packaging/apt/scripts/build-apt-site.sh
-          echo "$APT_REPO_GPG_PRIVATE_KEY" | gpg --import --batch
+          # sign-release.sh imports APT_REPO_GPG_PRIVATE_KEY into a throwaway GNUPGHOME.
           ./packaging/apt/scripts/sign-release.sh
 
       - name: Configure GitHub Pages

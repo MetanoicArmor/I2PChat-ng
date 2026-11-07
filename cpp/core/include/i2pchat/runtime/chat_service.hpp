@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,8 +62,8 @@ struct ChatServiceConfig {
     protocol::PaddingProfile padding = protocol::PaddingProfile::Balanced;
     /// I2CP tunnel options passed to SESSION CREATE.
     std::vector<std::pair<std::string, std::string>> sam_options{
-        {"inbound.length", "2"},
-        {"outbound.length", "2"},
+        {"inbound.length", "3"},
+        {"outbound.length", "3"},
         {"inbound.quantity", "3"},
         {"outbound.quantity", "3"},
     };
@@ -78,6 +79,13 @@ struct ChatServiceConfig {
     std::chrono::seconds blindbox_poll_interval{25};
     /// Pin unknown signing keys on first sighting without a blocking TOFU prompt.
     bool trust_auto_accept_first_sighting = false;
+    /// Inbound streams that may sit in the pre-handshake state at once. A
+    /// handshake takes seconds, so a few slots serve real peers, while a
+    /// stranger opening streams and going silent cannot hold more than this.
+    std::size_t max_pending_inbound_handshakes = 3;
+    /// Deadline for an inbound stream to complete its handshake. Shorter than
+    /// the outbound guard, which covers the user's own dials.
+    std::chrono::seconds inbound_handshake_timeout{30};
 };
 
 /// What happened to one outgoing message.
@@ -127,6 +135,12 @@ struct ChatEvents {
     std::function<bool(const std::string& peer, const std::string& name,
                        std::uint64_t size)>
         accept_file;
+    /// Like `accept_file` but may defer: the UI then answers later through
+    /// `respond_file_offer`, and the receiving coroutine is never blocked on
+    /// a dialog. Takes precedence over `accept_file` when both are set.
+    std::function<transfer::OfferDecision(const std::string& peer, const std::string& name,
+                                          std::uint64_t size)>
+        offer_file;
     /// First sighting or key change. Unset means reject a changed key and
     /// accept a first sighting, which is what trust on first use means.
     session::TrustPromptHandler on_trust_prompt;
@@ -177,6 +191,10 @@ public:
     asio::awaitable<bool> send_file(std::string peer, std::filesystem::path path);
     /// Send an image, inline when the peer can display it.
     asio::awaitable<bool> send_image(std::string peer, std::filesystem::path path);
+
+    /// Answer a file offer that `offer_file` deferred. Returns false when the
+    /// peer has no offer waiting any more.
+    bool respond_file_offer(std::string_view peer, bool accept);
 
     /// Collect whatever the replicas are holding for every known peer. Called
     /// on a timer while the service is running; exposed for the UI's manual
@@ -292,6 +310,9 @@ private:
     /// rewritten whole on every append.
     std::map<std::string, std::vector<storage::HistoryEntry>> history_;
     std::uint64_t next_msg_id_ = 1;
+    /// Inbound links accepted but not yet through the handshake, by identity.
+    /// Capped by `max_pending_inbound_handshakes`.
+    std::set<const PeerLink*> pending_inbound_;
     bool running_ = false;
     bool stopping_ = false;
     /// Cancelled by stop() so start()'s tunnel-warmup wait does not outlive us.

@@ -363,6 +363,55 @@ class TestImportProfile(unittest.TestCase):
             with open(gui_path) as f:
                 self.assertEqual(json.load(f), {"theme": "dark"})
 
+    def test_gui_settings_restore_is_whitelisted(self) -> None:
+        from i2pchat.storage import profile_export
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_profiles = os.path.join(tmp, "src_profiles")
+            os.makedirs(src_profiles)
+            spdir = get_profile_data_dir("alice", create=True, app_root=src_profiles)
+            with open(os.path.join(spdir, "alice.dat"), "wb") as f:
+                f.write(b"key")
+            hostile = {
+                "theme": "dark",
+                "history_retention": {"enabled": True, "days": 7},
+                # Must never come back from a bundle:
+                "privacy_mode": {"lock_enabled": False, "lock_hash": "x"},
+                "releases_custom_url_warn_ack": True,
+                "releases_custom_url": "http://evil.example/feed",
+                "pins": {"peer": "deadbeef"},
+                # Wrong shapes for allowed keys are dropped too:
+                "notify_sound": {"nested": {"deep": 1}},
+                "compose_enter_sends": ["list"],
+            }
+            with open(os.path.join(src_profiles, "gui.json"), "w") as f:
+                json.dump(hostile, f)
+            out_path, _ = profile_export.export_profile("alice", "pw", src_profiles)
+            dest_dir = os.path.join(tmp, "dest")
+            profile_export.import_profile(out_path, "pw", dest_dir, restore_gui_settings=True)
+            with open(os.path.join(dest_dir, "gui.json")) as f:
+                restored = json.load(f)
+            self.assertEqual(
+                restored,
+                {"theme": "dark", "history_retention": {"enabled": True, "days": 7}},
+            )
+
+    def test_gui_settings_restore_skips_file_when_nothing_allowed(self) -> None:
+        from i2pchat.storage import profile_export
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_profiles = os.path.join(tmp, "src_profiles")
+            os.makedirs(src_profiles)
+            spdir = get_profile_data_dir("alice", create=True, app_root=src_profiles)
+            with open(os.path.join(spdir, "alice.dat"), "wb") as f:
+                f.write(b"key")
+            with open(os.path.join(src_profiles, "gui.json"), "w") as f:
+                json.dump({"privacy_mode": {"lock_enabled": False}}, f)
+            out_path, _ = profile_export.export_profile("alice", "pw", src_profiles)
+            dest_dir = os.path.join(tmp, "dest")
+            profile_export.import_profile(out_path, "pw", dest_dir, restore_gui_settings=True)
+            self.assertFalse(os.path.exists(os.path.join(dest_dir, "gui.json")))
+
     def test_wrong_password_raises_value_error(self) -> None:
         from i2pchat.storage import profile_export
 

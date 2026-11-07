@@ -48,6 +48,15 @@ asio::awaitable<std::optional<std::string>> LineReader::read_line() {
             co_return line;
         }
 
+        // The longest legitimate line on either protocol is a SAM reply
+        // carrying a full destination (a few KiB). Past the cap the peer is
+        // never going to send a newline, and the buffer would otherwise grow
+        // until the process is killed for memory.
+        if (buffer_.size() > kMaxLineLength) {
+            buffer_.clear();
+            co_return std::nullopt;
+        }
+
         if (!co_await fill(kReadChunk)) {
             co_return std::nullopt;
         }

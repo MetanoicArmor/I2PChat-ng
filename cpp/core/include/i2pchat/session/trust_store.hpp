@@ -71,10 +71,17 @@ public:
     /// A store without a path never persists anything.
     [[nodiscard]] bool persistent() const noexcept { return !path_.empty(); }
 
+    /// True when the backing file could not be parsed at load time. The
+    /// pins it held are gone until the user restores the `.corrupt-*` copy,
+    /// so every peer will look like a first sighting; callers that would
+    /// otherwise pin silently should not while this is set.
+    [[nodiscard]] bool degraded() const noexcept { return degraded_; }
+
 private:
     std::filesystem::path path_;
     std::map<std::string, TrustPin> pins_;
     TrustPromptHandler prompt_;
+    bool degraded_ = false;
 };
 
 }  // namespace i2pchat::session

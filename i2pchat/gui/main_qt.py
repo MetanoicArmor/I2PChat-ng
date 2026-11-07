@@ -21,6 +21,8 @@ import qasync
 from i2pchat.router.bundled_i2pd import BundledI2pdManager
 from i2pchat.router.runtime import is_tcp_open, probe_sam_hello, wait_for_sam_ready
 from i2pchat.router.settings import (
+    MAX_TUNNEL_LENGTH,
+    MIN_TUNNEL_LENGTH,
     RouterSettings,
     bundled_i2pd_allowed,
     load_router_settings,
@@ -5722,8 +5724,19 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
         self._bundled_control_http_port.setRange(1, 65535)
         self._bundled_control_http_port.setValue(int(settings.bundled_control_http_port))
 
+        self._tunnel_length = QtWidgets.QSpinBox(self)
+        self._tunnel_length.setRange(MIN_TUNNEL_LENGTH, MAX_TUNNEL_LENGTH)
+        self._tunnel_length.setValue(int(settings.tunnel_length))
+        self._tunnel_length.setSuffix(" hops")
+        self._tunnel_length.setToolTip(
+            "Hops per inbound and outbound tunnel. More hops are more anonymous "
+            "but slower. Default: 3."
+        )
+
         self._system_host.setMinimumWidth(260)
 
+        form.addRow(_router_form_section_label("Tunnels"))
+        form.addRow("Tunnel length", _wrap_history_numeric_row(self._tunnel_length))
         form.addRow(_router_form_section_label("Built-in router (Bundled i2pd)"))
         form.addRow("SAM port", _wrap_history_numeric_row(self._bundled_sam_port))
         form.addRow("HTTP proxy", _wrap_history_numeric_row(self._bundled_http_proxy_port))
@@ -5883,6 +5896,7 @@ class _RouterSettingsDialog(QtWidgets.QDialog):
             bundled_socks_proxy_port=int(self._bundled_socks_proxy_port.value()),
             bundled_control_http_port=int(self._bundled_control_http_port.value()),
             bundled_auto_start=(backend == "bundled"),
+            tunnel_length=int(self._tunnel_length.value()),
         ))
 
 
@@ -10131,7 +10145,11 @@ class ChatWindow(QtWidgets.QMainWindow):
                         downloads_dir = get_downloads_dir()
                         saved_fp: Optional[str] = None
                         abs_fn = os.path.abspath(info.filename)
-                        if os.path.isfile(abs_fn):
+                        # "Open" hands the path to the OS; only a file the core
+                        # placed in the downloads sandbox gets that affordance.
+                        if os.path.isfile(abs_fn) and _is_path_within_directory(
+                            abs_fn, downloads_dir
+                        ):
                             saved_fp = abs_fn
                         disp_name = os.path.basename(abs_fn)
                         self.chat_model.update_item(
@@ -10414,6 +10432,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             on_trust_decision=self.handle_trust_decision,
             on_trust_mismatch_decision=self.handle_trust_mismatch_decision,
             on_saved_contacts_changed=self._reload_contacts_book_after_core_write,
+            tunnel_length=self._router_settings.tunnel_length,
         )
         # динамически навешиваем колбэк уведомлений,
         # чтобы не менять публичную сигнатуру конструктора ядра
@@ -10977,13 +10996,29 @@ class ChatWindow(QtWidgets.QMainWindow):
             or not result.ok
         ):
             open_btn = mb.addButton(
-                "Open downloads page",
+                "Copy downloads page address",
                 QtWidgets.QMessageBox.ButtonRole.ActionRole,
             )
         mb.addButton(QtWidgets.QMessageBox.StandardButton.Ok)
         mb.exec()
         if open_btn is not None and mb.clickedButton() == open_btn:
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl(downloads_page_url()))
+            # The page lives inside I2P. Handing the .i2p URL to the system
+            # browser would make the default browser resolve it through the
+            # clearnet DNS, which both fails and tells the resolver that this
+            # machine uses I2PChat. The address is copied instead, for a
+            # browser the user has configured with an I2P proxy.
+            url = downloads_page_url()
+            clipboard = QtWidgets.QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(url)
+            QtWidgets.QMessageBox.information(
+                self,
+                "Downloads page",
+                "The address was copied to the clipboard:\n\n"
+                f"{url}\n\n"
+                "Open it in a browser that is configured to use your I2P HTTP proxy "
+                "(for example 127.0.0.1:4444).",
+            )
 
     @QtCore.pyqtSlot()
     def on_theme_switch_clicked(self) -> None:

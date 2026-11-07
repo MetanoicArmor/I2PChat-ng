@@ -103,6 +103,16 @@ class ReleaseIndexCheckSyncTests(unittest.TestCase):
         self.assertTrue(r.ok)
         self.assertEqual(r.kind, "no_artifact")
 
+    def test_oversized_page_is_rejected(self) -> None:
+        # The page comes from an eepsite nobody here controls; it must not be
+        # allowed to grow unbounded in memory.
+        def fake_open(req, timeout=0, **_k):
+            return io.BytesIO(b"<a>" * 2048)
+
+        with patch.object(ri, "MAX_UPDATE_PAGE_BYTES", 1024):
+            with self.assertRaises(ValueError):
+                ri.fetch_releases_page("http://test.i2p/", opener=fake_open)
+
     def test_url_error(self) -> None:
         def boom(req, timeout=0, **_k):
             raise urllib.error.URLError("refused")

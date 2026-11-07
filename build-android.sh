@@ -197,7 +197,24 @@ ensure_debug_keystore() {
 }
 
 if [ "${BUILD_TYPE}" = "release" ] && [ -z "${I2PCHAT_ANDROID_KEYSTORE:-}" ]; then
+  if [ "${I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING:-}" != "1" ]; then
+    cat >&2 <<'EOF'
+ERROR: release build without an upload keystore.
+  Set I2PCHAT_ANDROID_KEYSTORE / I2PCHAT_ANDROID_KEYSTORE_PASSWORD /
+  I2PCHAT_ANDROID_KEY_ALIAS / I2PCHAT_ANDROID_KEY_PASSWORD for a real release,
+  or export I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING=1 to knowingly sign a
+  sideload-only APK with the public Android debug key.
+EOF
+    exit 1
+  fi
+  echo "WARNING: signing release APK with the public Android debug key (sideload only)" >&2
   ensure_debug_keystore
+fi
+
+# The bundled router is an opaque blob; refuse to package one that does not
+# match the committed checksum manifest.
+if [ "${ARM32}" -eq 0 ]; then
+  "${REPO_ROOT}/scripts/verify_bundled_i2pd.sh" --android-only
 fi
 
 FLAVOR="standard"

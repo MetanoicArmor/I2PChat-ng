@@ -127,6 +127,13 @@ fun I2PChatRoot(bridge: ChatBridge) {
     if (state.tofu != null) {
         TofuDialog(state.tofu!!, onAccept = { bridge.answerTofu(true) }, onReject = { bridge.answerTofu(false) })
     }
+    if (state.fileOffer != null) {
+        FileOfferDialog(
+            state.fileOffer!!,
+            onAccept = { bridge.answerFileOffer(true) },
+            onReject = { bridge.answerFileOffer(false) },
+        )
+    }
     if (!state.nativeLoaded) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
             Text("Native library failed to load", style = MaterialTheme.typography.headlineSmall)
@@ -193,12 +200,27 @@ fun ChatImageThumb(path: String) {
     }
 }
 
+/** True when `file` sits in a received-media directory of some profile (downloads/ or images/). */
+fun isReceivedMediaFile(context: android.content.Context, file: File): Boolean {
+    val profiles = File(File(context.filesDir, "i2pchat"), "profiles").canonicalFile
+    val real = runCatching { file.canonicalFile }.getOrNull() ?: return false
+    val mediaDir = real.parentFile ?: return false
+    if (mediaDir.name != "downloads" && mediaDir.name != "images") return false
+    // <profile>/images or the older <profile>/data/images layout.
+    var profileDir = mediaDir.parentFile ?: return false
+    if (profileDir.name == "data") profileDir = profileDir.parentFile ?: return false
+    return profileDir.parentFile == profiles
+}
+
 fun openReceivedFile(context: android.content.Context, path: String) {
     val file = File(path)
     if (!file.isFile) return
+    // Only files the core wrote for us are shared out, and only through the
+    // provider: a file:// URI would hand the viewer a path into our sandbox.
+    if (!isReceivedMediaFile(context, file)) return
     val uri = runCatching {
-        FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-    }.getOrElse { Uri.fromFile(file) }
+        FileProvider.getUriForFile(context, "${context.packageName}.files", file.canonicalFile)
+    }.getOrNull() ?: return
     val ext = file.extension.lowercase()
     val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
         ?: when {
@@ -792,6 +814,13 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
                 Text("This 32-bit build has no bundled router. Install i2pd separately and point SAM at it (loopback only, usually 127.0.0.1:7656).")
             }
             Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                prefs.tunnelLength.toString(),
+                { prefs = prefs.copy(tunnelLength = it.toIntOrNull() ?: prefs.tunnelLength) },
+                label = { Text("Tunnel length, hops (${RouterPrefs.MIN_TUNNEL_LENGTH}-${RouterPrefs.MAX_TUNNEL_LENGTH})") },
+                supportingText = { Text("More hops are more anonymous but slower. Default ${RouterPrefs.DEFAULT_TUNNEL_LENGTH}. Applies on the next Open.") },
+                modifier = Modifier.fillMaxWidth(),
+            )
             OutlinedTextField(prefs.systemSamHost, { prefs = prefs.copy(systemSamHost = it) }, label = { Text("External host") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(prefs.systemSamPort.toString(), { prefs = prefs.copy(systemSamPort = it.toIntOrNull() ?: prefs.systemSamPort) }, label = { Text("External SAM port") }, modifier = Modifier.fillMaxWidth())
             if (BuildConfig.BUNDLED_I2PD) {
@@ -970,6 +999,22 @@ fun TofuDialog(prompt: TofuPrompt, onAccept: () -> Unit, onReject: () -> Unit) {
         text = {
             Text(
                 "Peer ${prompt.peer}\nNew: ${prompt.newKey}\nOld: ${prompt.oldKey.ifBlank { "(none)" }}\n\nAccept only if you expected this identity.",
+            )
+        },
+        confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },
+        dismissButton = { TextButton(onClick = onReject) { Text("Reject") } },
+    )
+}
+
+@Composable
+fun FileOfferDialog(prompt: FileOfferPrompt, onAccept: () -> Unit, onReject: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onReject,
+        title = { Text("Incoming file") },
+        text = {
+            Text(
+                "Peer ${prompt.peer} wants to send\n${prompt.name}\n(${prompt.size} bytes)\n\n" +
+                    "Accept only if you expected this file from this contact.",
             )
         },
         confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },

@@ -15,7 +15,7 @@ dependencies = [
     "pyperclip",
     "PyQt6",
     "qasync",
-    "Pillow>=12.3.0",
+    "Pillow>=13.0.0",
     "pynacl",
     "keyring",
     "cryptography>=50.0.0; sys_platform == 'linux'",

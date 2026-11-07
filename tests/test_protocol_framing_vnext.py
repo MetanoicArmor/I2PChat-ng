@@ -873,6 +873,66 @@ class ProtocolFramingVnextTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self._restore_crypto_identity(patched_module, original_crypto)
 
+    async def test_repeated_file_offer_closes_previous_partial_file(self) -> None:
+        """A second F header while a transfer is open must not leak the first.
+
+        Before the fix every repeated header left the previous descriptor open
+        and its partial file on disk, so a peer could exhaust descriptors and
+        fill the downloads directory without ever finishing a transfer.
+        """
+        import i2pchat.core.i2p_chat_core as core_module
+
+        errors: list[str] = []
+        events: list[object] = []
+        original_get_downloads_dir = core_module.get_downloads_dir
+        patched_module, original_crypto = self._patch_crypto_identity()
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                core_module.get_downloads_dir = lambda: tmp_dir  # type: ignore[assignment]
+                try:
+                    core = I2PChatCore(
+                        on_error=errors.append,
+                        on_file_offer=lambda _name, _size: True,
+                        on_file_event=events.append,
+                    )
+                    core.handshake_complete = True
+                    core.use_encryption = True
+                    core.shared_key = b"x" * 32
+                    core._reset_crypto_state = lambda: None  # type: ignore[assignment]
+                    payload = (
+                        core.frame_message("F", "first.bin|8")
+                        + core.frame_message("D", base64.b64encode(b"half").decode("ascii"))
+                        + core.frame_message("F", "second.bin|3")
+                        + core.frame_message("D", base64.b64encode(b"new").decode("ascii"))
+                        + core.frame_message("E", "done")
+                    )
+                    conn = (_Reader(payload), _Writer())
+                    k = attach_mock_live_session(
+                        core,
+                        PEER_CTX_A,
+                        conn,
+                        handshake_complete=True,
+                        use_encryption=True,
+                        shared_key=b"x" * 32,
+                    )
+                    ls = core._live_sessions[k]
+                    await core.receive_loop(conn, peer_id=k)
+                finally:
+                    core_module.get_downloads_dir = original_get_downloads_dir  # type: ignore[assignment]
+
+                # The abandoned transfer is gone from disk and from the session.
+                self.assertEqual(sorted(os.listdir(tmp_dir)), ["second.bin"])
+                with open(os.path.join(tmp_dir, "second.bin"), "rb") as f:
+                    self.assertEqual(f.read(), b"new")
+                self.assertIsNone(ls.incoming_file)
+                failed = [
+                    e for e in events
+                    if getattr(e, "received", 0) < 0 and "first.bin" in getattr(e, "filename", "")
+                ]
+                self.assertEqual(len(failed), 1)
+        finally:
+            self._restore_crypto_identity(patched_module, original_crypto)
+
 
 if __name__ == "__main__":
     unittest.main()

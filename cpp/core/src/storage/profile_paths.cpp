@@ -13,6 +13,19 @@ std::string sha256_hex(std::string_view text) {
 
 }  // namespace
 
+bool is_valid_profile_name(std::string_view name) {
+    if (name.empty() || name.size() > 64 || name == "." || name == "..") {
+        return false;
+    }
+    for (const char ch : name) {
+        const auto uc = static_cast<unsigned char>(ch);
+        if (!(std::isalnum(uc) != 0 || ch == '.' || ch == '_' || ch == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string history_peer_key(std::string_view peer_addr) {
     const auto first = peer_addr.find_first_not_of(" \t\r\n\f\v");
     if (first == std::string_view::npos) {

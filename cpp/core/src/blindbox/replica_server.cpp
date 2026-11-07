@@ -264,6 +264,10 @@ ReplicaServerConfig config_from_environment(
         static_cast<std::size_t>(number("BLINDBOX_MAX_PREFIX_FILES", 256, 0));
     config.max_prefix_bytes =
         number("BLINDBOX_MAX_PREFIX_BYTES", 32ull * 1024 * 1024, 0);
+    config.max_connections =
+        static_cast<std::size_t>(number("BLINDBOX_MAX_CONNECTIONS", 256, 1));
+    config.command_timeout = std::chrono::seconds(
+        static_cast<std::int64_t>(number("BLINDBOX_COMMAND_TIMEOUT_SEC", 30, 1)));
     config.audit_log_max_bytes =
         number("BLINDBOX_AUDIT_LOG_MAX_BYTES", 1024 * 1024, 0);
     config.audit_log_backups =
@@ -986,6 +990,51 @@ struct ReplicaServer::Impl {
     std::optional<tcp::acceptor> status_acceptor;
     std::optional<asio::steady_timer> gc_timer;
     bool stopped = false;
+    std::size_t active_connections = 0;
+
+    /// Takes a connection slot for the lifetime of the returned guard; the
+    /// socket is closed unanswered when none is free.
+    struct Slot {
+        Impl* owner = nullptr;
+        ~Slot() {
+            if (owner != nullptr) {
+                --owner->active_connections;
+            }
+        }
+    };
+
+    bool admit(tcp::socket& socket, Slot& slot) {
+        if (active_connections >= service->config().max_connections) {
+            boost::system::error_code ignored;
+            socket.shutdown(tcp::socket::shutdown_both, ignored);
+            socket.close(ignored);
+            return false;
+        }
+        ++active_connections;
+        slot.owner = this;
+        return true;
+    }
+
+    /// Closes `socket` once `deadline` passes, unless `done` is set first.
+    /// Closing makes the pending read fail, which ends the serving coroutine.
+    asio::awaitable<void> command_deadline(std::shared_ptr<tcp::socket> socket,
+                                           std::shared_ptr<asio::steady_timer> timer,
+                                           std::shared_ptr<bool> done) {
+        while (!*done) {
+            boost::system::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+            if (*done) {
+                co_return;
+            }
+            if (!error && timer->expiry() <= std::chrono::steady_clock::now()) {
+                boost::system::error_code ignored;
+                socket->shutdown(tcp::socket::shutdown_both, ignored);
+                socket->close(ignored);
+                co_return;
+            }
+            // Cancelled because the deadline moved: wait for the new one.
+        }
+    }
 
     static PeerInfo peer_of(const tcp::socket& socket) {
         boost::system::error_code error;
@@ -1024,11 +1073,26 @@ struct ReplicaServer::Impl {
     }
 
     asio::awaitable<void> serve(std::shared_ptr<tcp::socket> socket) {
+        Slot slot;
+        if (!admit(*socket, slot)) {
+            co_return;
+        }
         const PeerInfo peer = peer_of(*socket);
         net::LineReader reader(*socket, {}, std::chrono::milliseconds(30000));
         boost::system::error_code ignored;
+
+        // One deadline per command: re-armed when a new request line is
+        // awaited, so a slow-loris client gets `command_timeout` per command
+        // rather than per byte.
+        const auto deadline_timer = std::make_shared<asio::steady_timer>(executor);
+        const auto done = std::make_shared<bool>(false);
+        const std::chrono::seconds command_timeout = service->config().command_timeout;
+        deadline_timer->expires_after(command_timeout);
+        asio::co_spawn(executor, command_deadline(socket, deadline_timer, done),
+                       asio::detached);
         try {
             while (true) {
+                deadline_timer->expires_after(command_timeout);
                 const std::optional<std::string> line = co_await reader.read_line();
                 if (!line) {
                     break;
@@ -1055,14 +1119,26 @@ struct ReplicaServer::Impl {
             // A client that vanishes mid-command is ordinary, not an error
             // worth logging: the audit log already carries what it asked for.
         }
+        *done = true;
+        deadline_timer->cancel();
         socket->shutdown(tcp::socket::shutdown_both, ignored);
         socket->close(ignored);
     }
 
     asio::awaitable<void> serve_status(std::shared_ptr<tcp::socket> socket) {
+        Slot slot;
+        if (!admit(*socket, slot)) {
+            co_return;
+        }
         const PeerInfo peer = peer_of(*socket);
         net::LineReader reader(*socket, {}, std::chrono::milliseconds(10000));
         boost::system::error_code ignored;
+
+        const auto deadline_timer = std::make_shared<asio::steady_timer>(executor);
+        const auto done = std::make_shared<bool>(false);
+        deadline_timer->expires_after(service->config().command_timeout);
+        asio::co_spawn(executor, command_deadline(socket, deadline_timer, done),
+                       asio::detached);
         try {
             const std::optional<std::string> request = co_await reader.read_line();
             if (request && !request->empty()) {
@@ -1100,6 +1176,8 @@ struct ReplicaServer::Impl {
             }
         } catch (const std::exception&) {
         }
+        *done = true;
+        deadline_timer->cancel();
         socket->shutdown(tcp::socket::shutdown_both, ignored);
         socket->close(ignored);
     }

@@ -44,9 +44,12 @@ android {
 
     // Release APKs must be signed or PackageManager rejects them
     // (INSTALL_PARSE_FAILED_NO_CERTIFICATES). Prefer a real upload keystore via
-    // env when cutting Play/production builds; otherwise fall back to the
-    // Android debug keystore so GitHub Release APKs remain sideloadable.
+    // env when cutting Play/production builds. The Android debug keystore is
+    // accepted only when I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING=1 says so
+    // explicitly: its key is public, so anyone can produce an APK that
+    // installs as an "update" over such a build.
     val releaseStoreFile = System.getenv("I2PCHAT_ANDROID_KEYSTORE")
+    val allowDebugSigning = System.getenv("I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING") == "1"
     val releaseStorePassword = System.getenv("I2PCHAT_ANDROID_KEYSTORE_PASSWORD")
     val releaseKeyAlias = System.getenv("I2PCHAT_ANDROID_KEY_ALIAS")
     val releaseKeyPassword = System.getenv("I2PCHAT_ANDROID_KEY_PASSWORD")
@@ -64,13 +67,27 @@ android {
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
-            } else {
+            } else if (allowDebugSigning) {
                 // Same defaults as the Android Studio debug keystore.
+                logger.warn(
+                    "WARNING: release APK will be signed with the public Android debug key " +
+                        "(I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING=1). Do not ship this to a store.",
+                )
                 val debugStore = file("${System.getProperty("user.home")}/.android/debug.keystore")
                 storeFile = debugStore
                 storePassword = "android"
                 keyAlias = "androiddebugkey"
                 keyPassword = "android"
+            } else {
+                gradle.taskGraph.whenReady {
+                    if (allTasks.any { it.name.contains("Release") && it.project == project }) {
+                        throw GradleException(
+                            "Release signing is not configured. Set I2PCHAT_ANDROID_KEYSTORE / " +
+                                "_KEYSTORE_PASSWORD / _KEY_ALIAS / _KEY_PASSWORD, or set " +
+                                "I2PCHAT_ANDROID_ALLOW_DEBUG_SIGNING=1 for a sideload-only build.",
+                        )
+                    }
+                }
             }
         }
     }

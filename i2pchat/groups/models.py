@@ -22,6 +22,23 @@ def normalize_member_id(value: str) -> str:
     return raw
 
 
+#: Longest group title kept. Titles arrive from any member over the wire and
+#: end up in window titles, notifications and the TUI, so they are bounded
+#: and stripped of control characters at the model boundary.
+MAX_GROUP_TITLE_LENGTH = 128
+
+
+def sanitize_group_title(value: str | None) -> str | None:
+    text = str(value or "")
+    cleaned = "".join(
+        ch if (ch.isprintable() or ch == " ") else " " for ch in text
+    )
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return None
+    return cleaned[:MAX_GROUP_TITLE_LENGTH]
+
+
 class GroupContentType(StrEnum):
     GROUP_TEXT = "GROUP_TEXT"
     GROUP_CONTROL = "GROUP_CONTROL"
@@ -58,7 +75,7 @@ class GroupState:
             seen.add(member_id)
             members.append(member_id)
         object.__setattr__(self, "group_id", (self.group_id or "").strip())
-        object.__setattr__(self, "title", (self.title or "").strip() or None)
+        object.__setattr__(self, "title", sanitize_group_title(self.title))
         object.__setattr__(self, "members", tuple(members))
 
 

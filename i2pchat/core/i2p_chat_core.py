@@ -128,7 +128,12 @@ from i2pchat.core.session_manager import (
     SessionManager,
     TransportState,
 )
-from i2pchat.core.live_peer_session import LivePeerSession, max_concurrent_live_sessions
+from i2pchat.core.live_peer_session import (
+    PRE_HANDSHAKE_TIMEOUT,
+    LivePeerSession,
+    max_concurrent_live_sessions,
+    max_pending_inbound_handshakes,
+)
 
 logger = logging.getLogger("i2pchat")
 PROTOCOL_VERSION = 4
@@ -982,6 +987,11 @@ BLINDBOX_PRIVACY_DEFAULTS: dict[str, dict[str, float | int]] = {
 
 def is_valid_profile_name(name: str) -> bool:
     candidate = (name or "").strip()
+    # "." and ".." pass the charset check but name the profiles dir itself or
+    # its parent, so a bundle manifest carrying one would write outside any
+    # profile directory.
+    if candidate in {".", ".."}:
+        return False
     return bool(PROFILE_NAME_RE.fullmatch(candidate))
 
 
@@ -1361,8 +1371,10 @@ class I2PChatCore:
         on_trust_decision: Optional[TrustDecisionCallback] = None,
         on_trust_mismatch_decision: Optional[TrustMismatchDecisionCallback] = None,
         on_saved_contacts_changed: Optional[Callable[[], None]] = None,
+        tunnel_length: int = 3,
     ) -> None:
         self.sam_address = sam_address
+        self.tunnel_length = max(1, min(7, int(tunnel_length)))
         self._sam_session_create_timeout = max(
             15.0,
             float(os.environ.get("I2PCHAT_SAM_SESSION_CREATE_TIMEOUT", "180")),
@@ -2216,6 +2228,53 @@ class I2PChatCore:
 
     def _live_stream_count(self) -> int:
         return sum(1 for s in self._live_sessions.values() if s.conn)
+
+    @staticmethod
+    def _inbound_handshake_pending(s: LivePeerSession) -> bool:
+        # A stream whose FINISHED has been exchanged and is only waiting on
+        # the local TOFU dialog has proven it holds the peer's key; it is the
+        # user's decision, not the stranger's, that is pending.
+        return bool(
+            s.conn
+            and s.inbound
+            and not s.handshake_complete
+            and not s._hs_tofu_awaiting_ui
+        )
+
+    def _pending_inbound_handshake_count(self) -> int:
+        return sum(
+            1 for s in self._live_sessions.values() if self._inbound_handshake_pending(s)
+        )
+
+    async def _pre_handshake_deadline(
+        self,
+        connection: Tuple[asyncio.StreamReader, asyncio.StreamWriter],
+        peer_id: str,
+    ) -> None:
+        """Drop an inbound stream that has not completed the handshake in time.
+
+        One task per inbound stream, unlike the global handshake watchdog,
+        which is re-armed by every new connection and so would leave earlier
+        pending streams unguarded.
+        """
+        await asyncio.sleep(PRE_HANDSHAKE_TIMEOUT)
+        k = self._normalize_peer_addr(peer_id)
+        ls = self._live_sessions.get(k)
+        if ls is None or ls.conn is not connection or not self._inbound_handshake_pending(ls):
+            return
+        logger.info(
+            "Inbound stream from %s did not finish the handshake in %.0fs; closing.",
+            k[:24],
+            PRE_HANDSHAKE_TIMEOUT,
+        )
+        self.session_manager.mark_peer_failed(k, reason="pre-handshake-timeout")
+        try:
+            await self.disconnect_peer(k)
+        except Exception:
+            try:
+                connection[1].close()
+            except Exception:
+                pass
 
     def _has_live_session_slot_for_peer(self, peer_id: str) -> bool:
         k = self._normalize_peer_addr(peer_id)
@@ -5314,6 +5373,15 @@ class I2PChatCore:
         )
         return payload.encode("utf-8")
 
+    def _sam_tunnel_options(self, *, quantity: int) -> dict[str, str]:
+        length = str(self.tunnel_length)
+        return {
+            "inbound.length": length,
+            "outbound.length": length,
+            "inbound.quantity": str(quantity),
+            "outbound.quantity": str(quantity),
+        }
+
     async def init_session(self) -> None:
         """Создать/загрузить идентичность и SAM-сессию."""
         try:
@@ -5448,12 +5516,7 @@ class I2PChatCore:
             self.session_id,
             destination=self.my_dest,
             sam_address=self.sam_address,
-            options={
-                "inbound.length": "2",
-                "outbound.length": "2",
-                "inbound.quantity": "3",
-                "outbound.quantity": "3",
-            },
+            options=self._sam_tunnel_options(quantity=3),
             session_create_timeout=self._sam_session_create_timeout,
         )
         self.session_manager.transition_transport(
@@ -6259,6 +6322,7 @@ class I2PChatCore:
                         self.blindbox_get_quorum, len(self.blindbox_replicas)
                     ),
                     sam_session_timeout=bb_sam_sess_timeout,
+                    sam_options=self._sam_tunnel_options(quantity=2),
                     local_auth_token=self._blindbox_local_auth_token,
                     replica_auth=self._blindbox_replica_auth,
                 )
@@ -10573,8 +10637,20 @@ class I2PChatCore:
                         )
                         writer.close()
                         continue
+                    max_pending = max_pending_inbound_handshakes()
+                    if self._pending_inbound_handshake_count() >= max_pending:
+                        # Not surfaced as a UI error: this is the path an
+                        # attacker exercises, and it must not be able to
+                        # flood the chat log.
+                        logger.warning(
+                            "Incoming connection from %s dropped: %d inbound handshakes already pending.",
+                            peer_addr[:24],
+                            max_pending,
+                        )
+                        writer.close()
+                        continue
 
-                    extra_ls = LivePeerSession(peer_id=peer_addr_norm)
+                    extra_ls = LivePeerSession(peer_id=peer_addr_norm, inbound=True)
                     extra_ls.current_peer_dest_b64 = canonical_dest
                     extra_ls.peer_identity_binding_verified = True
                     self._live_sessions[peer_addr_norm] = extra_ls
@@ -10615,6 +10691,9 @@ class I2PChatCore:
                 self._start_receive_loop_task(connection, peer_id=peer_addr_norm)
                 self._start_handshake_watchdog(
                     connection, peer_id=peer_addr_norm
+                )
+                loop.create_task(
+                    self._pre_handshake_deadline(connection, peer_addr_norm)
                 )
                 if (
                     self.session_manager.keepalive_task is None
@@ -11048,6 +11127,30 @@ class I2PChatCore:
 
                 elif msg_type == "F":
                     try:
+                        if sess.incoming_file is not None:
+                            # A new offer while a transfer is still open: the
+                            # previous descriptor and its partial file would
+                            # otherwise leak with every repeated header.
+                            stale_info = sess.incoming_info
+                            try:
+                                sess.incoming_file.close()
+                            except Exception:
+                                pass
+                            sess.incoming_file = None
+                            sess.incoming_info = None
+                            if stale_info is not None:
+                                try:
+                                    os.remove(stale_info.filename)
+                                except OSError:
+                                    pass
+                                self._emit_file_event(
+                                    FileTransferInfo(
+                                        filename=stale_info.filename,
+                                        size=stale_info.size,
+                                        received=-1,
+                                        is_sending=False,
+                                    )
+                                )
                         filename, size_str = body.split("|")
                         filename = sanitize_filename(filename)
                         size = int(size_str)

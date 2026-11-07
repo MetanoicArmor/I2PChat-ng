@@ -12,7 +12,9 @@ data class RouterPrefs(
     val bundledHttpProxyPort: Int = 14444,
     val bundledSocksProxyPort: Int = 14447,
     val bundledControlHttpPort: Int = 17070,
-        val bundledAutoStart: Boolean = true,
+    val bundledAutoStart: Boolean = true,
+    /** Hops per inbound and outbound tunnel (I2CP inbound.length / outbound.length). */
+    val tunnelLength: Int = DEFAULT_TUNNEL_LENGTH,
 ) {
     val usingBundled: Boolean get() = backend == "bundled"
     val samHost: String get() = if (usingBundled) bundledSamHost else systemSamHost
@@ -28,8 +30,13 @@ data class RouterPrefs(
         .put("bundled_socks_proxy_port", bundledSocksProxyPort)
         .put("bundled_control_http_port", bundledControlHttpPort)
         .put("bundled_auto_start", bundledAutoStart)
+        .put("tunnel_length", tunnelLength)
 
     companion object {
+        const val DEFAULT_TUNNEL_LENGTH = 3
+        const val MIN_TUNNEL_LENGTH = 1
+        const val MAX_TUNNEL_LENGTH = 7
+
         fun file(appRoot: File) = File(appRoot, "router_prefs.json")
 
         fun load(appRoot: File): RouterPrefs {
@@ -47,6 +54,7 @@ data class RouterPrefs(
                     bundledSocksProxyPort = raw.optInt("bundled_socks_proxy_port", 14447),
                     bundledControlHttpPort = raw.optInt("bundled_control_http_port", 17070),
                     bundledAutoStart = raw.optBoolean("bundled_auto_start", false),
+                    tunnelLength = raw.optInt("tunnel_length", DEFAULT_TUNNEL_LENGTH),
                 ).normalized()
             } catch (_: Exception) {
                 RouterPrefs().normalized()
@@ -75,6 +83,7 @@ data class RouterPrefs(
             systemSamHost = systemHost,
             bundledSamHost = bundledHost,
             bundledAutoStart = backendOk == "bundled",
+            tunnelLength = tunnelLength.coerceIn(MIN_TUNNEL_LENGTH, MAX_TUNNEL_LENGTH),
         )
     }
 

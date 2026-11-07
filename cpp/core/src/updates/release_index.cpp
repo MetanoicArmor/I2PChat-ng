@@ -6,6 +6,8 @@
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -18,7 +20,41 @@ namespace {
 
 const std::regex kReleaseZip{
     R"(^I2PChat-(linux|macOS|windows)-([A-Za-z0-9_]+)-v(\d+\.\d+\.\d+)\.zip$)"};
-const std::regex kZipCandidate{R"(I2PChat-[^\s\"'<>]+\.zip)"};
+
+/// Longest artifact name worth considering; real ones are ~40 characters.
+constexpr std::size_t kMaxCandidateLength = 256;
+/// Upper bound on the part of the page that is scanned at all.
+constexpr std::size_t kMaxScannedHtml = 4 * 1024 * 1024;
+
+bool is_candidate_char(unsigned char c) {
+    return !std::isspace(c) && c != '"' && c != '\'' && c != '<' && c != '>';
+}
+
+/// Equivalent of the Python `I2PChat-[^\s"'<>]+\.zip` scan, without regex.
+std::vector<std::string> zip_candidates(std::string_view html) {
+    static constexpr std::string_view kStart = "I2PChat-";
+    static constexpr std::string_view kEnd = ".zip";
+    if (html.size() > kMaxScannedHtml) {
+        html = html.substr(0, kMaxScannedHtml);
+    }
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    while ((pos = html.find(kStart, pos)) != std::string_view::npos) {
+        std::size_t end = pos + kStart.size();
+        while (end < html.size() && end - pos < kMaxCandidateLength &&
+               is_candidate_char(static_cast<unsigned char>(html[end]))) {
+            ++end;
+        }
+        const std::string_view token = html.substr(pos, end - pos);
+        // Like the regex, take the last ".zip" inside the run.
+        const std::size_t zip = token.rfind(kEnd);
+        if (zip != std::string_view::npos && zip > kStart.size()) {
+            out.emplace_back(token.substr(0, zip + kEnd.size()));
+        }
+        pos = end > pos ? end : pos + 1;
+    }
+    return out;
+}
 
 std::array<int, 3> parse_version_tuple(std::string_view version) {
     const std::string text(version);
@@ -114,9 +150,11 @@ std::optional<std::pair<std::string, std::string>> find_latest_for_prefix(
     const std::string prefix_with_v = std::string(artifact_prefix) + "-v";
     std::optional<std::array<int, 3>> best_vt;
     std::optional<std::pair<std::string, std::string>> best;
-    const std::string page(html);
-    for (std::sregex_iterator it(page.begin(), page.end(), kZipCandidate), end; it != end; ++it) {
-        const std::string name = it->str();
+    // The page is served by an eepsite nobody here controls. std::regex is
+    // backtracking and recursive, so it is not run over the whole document;
+    // candidates are cut out by a plain scan with a hard length cap, and only
+    // those short names are regex-matched.
+    for (const std::string& name : zip_candidates(html)) {
         std::smatch match;
         if (!std::regex_match(name, match, kReleaseZip)) {
             continue;

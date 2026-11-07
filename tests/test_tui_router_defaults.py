@@ -445,6 +445,7 @@ def test_tui_show_router_pushes_router_screen() -> None:
 
 def test_tui_create_core_wires_trust_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     from i2pchat.gui.chat_python import I2PChat
+    from i2pchat.router.settings import RouterSettings
 
     captured: dict[str, object] = {}
 
@@ -468,11 +469,13 @@ def test_tui_create_core_wires_trust_callbacks(monkeypatch: pytest.MonkeyPatch) 
     app.handle_file_delivered = lambda *_a, **_k: None
     app.handle_trust_decision = lambda *_a, **_k: True
     app.handle_trust_mismatch_decision = lambda *_a, **_k: True
+    app._router_settings = RouterSettings(tunnel_length=5)
 
     I2PChat._create_core(app, "default", ("127.0.0.1", 7656))
 
     assert captured["on_trust_decision"] is app.handle_trust_decision
     assert captured["on_trust_mismatch_decision"] is app.handle_trust_mismatch_decision
+    assert captured["tunnel_length"] == 5
 
 
 def test_tui_show_settings_pushes_settings_screen() -> None:

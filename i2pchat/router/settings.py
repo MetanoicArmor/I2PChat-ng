@@ -24,6 +24,11 @@ _DISABLE_BUNDLED_MARKERS = (
     "/usr/local/share/i2pchat/system-router-only",
 )
 
+DEFAULT_TUNNEL_LENGTH = 3
+# Zero hops would expose the client's own router as the tunnel endpoint.
+MIN_TUNNEL_LENGTH = 1
+MAX_TUNNEL_LENGTH = 7
+
 
 def allow_remote_system_sam() -> bool:
     return os.environ.get(_ALLOW_REMOTE_SAM_ENV, "").strip().lower() in {
@@ -80,6 +85,18 @@ class RouterSettings:
 
     bundled_auto_start: bool = False
 
+    # Hops per inbound and outbound tunnel (I2CP inbound.length / outbound.length).
+    tunnel_length: int = DEFAULT_TUNNEL_LENGTH
+
+
+def coerce_tunnel_length(value: Any) -> int:
+    return _coerce_int_setting(
+        value,
+        DEFAULT_TUNNEL_LENGTH,
+        minimum=MIN_TUNNEL_LENGTH,
+        maximum=MAX_TUNNEL_LENGTH,
+    )
+
 
 def bundled_i2pd_allowed() -> bool:
     raw = os.environ.get(_DISABLE_BUNDLED_ENV, "").strip().lower()
@@ -94,6 +111,7 @@ def normalize_router_settings(settings: RouterSettings) -> RouterSettings:
             **asdict(settings),
             "bundled_sam_host": require_loopback_host(settings.bundled_sam_host),
             "system_sam_host": require_system_sam_host(settings.system_sam_host),
+            "tunnel_length": coerce_tunnel_length(settings.tunnel_length),
         }
     )
     if bundled_i2pd_allowed():
@@ -110,6 +128,7 @@ def normalize_router_settings(settings: RouterSettings) -> RouterSettings:
         bundled_socks_proxy_port=settings.bundled_socks_proxy_port,
         bundled_control_http_port=settings.bundled_control_http_port,
         bundled_auto_start=False,
+        tunnel_length=settings.tunnel_length,
     )
 
 
@@ -217,6 +236,7 @@ def _coerce_router_settings(raw: dict[str, Any]) -> RouterSettings:
             raw.get("bundled_auto_start"),
             defaults["bundled_auto_start"],
         ),
+        tunnel_length=coerce_tunnel_length(raw.get("tunnel_length")),
     )
 
 

@@ -7,12 +7,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <condition_variable>
+#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "i2pchat/bytes.hpp"
+#include "i2pchat/encoding.hpp"
 
 #include "i2pchat/groups/coordinator.hpp"
 #include "i2pchat/groups/models.hpp"
@@ -30,6 +32,7 @@
 #include "i2pchat/router/i2pd.hpp"
 #include "i2pchat/runtime/chat_service.hpp"
 #include "i2pchat/runtime/identity.hpp"
+#include "i2pchat/sam/destination.hpp"
 #include "i2pchat/session/manager.hpp"
 #include "i2pchat/session/peer_session.hpp"
 #include "i2pchat/session/trust_store.hpp"
@@ -37,6 +40,7 @@
 #include "i2pchat/storage/compose_drafts.hpp"
 #include "i2pchat/storage/contacts.hpp"
 #include "i2pchat/storage/profile_backup.hpp"
+#include "i2pchat/storage/profile_paths.hpp"
 #include "i2pchat/storage/replica_settings.hpp"
 #include "storage/keyring_backend.hpp"
 
@@ -49,6 +53,15 @@ using i2pchat::runtime::DeliveryReport;
 using i2pchat::runtime::kTransientProfile;
 
 namespace {
+
+/// A trust decision the user already made for one (peer, key) pair, consumed
+/// by the next handshake with that peer. Prompts never block the io thread:
+/// the handshake that raised the question is refused with Deferred, the
+/// answer is recorded here, and the peer is dialled again on Accept.
+struct TrustAnswer {
+    std::string key_hex;
+    i2pchat::session::TrustDecision decision = i2pchat::session::TrustDecision::Reject;
+};
 
 std::string jstring_to_utf8(JNIEnv* env, jstring value) {
     if (value == nullptr) {
@@ -100,6 +113,21 @@ nlohmann::json group_history_json(const i2pchat::groups::HistoryEntry& entry) {
     };
 }
 
+/// Members arrive from Kotlin as a JSON array; anything that is not a string
+/// is dropped rather than letting nlohmann throw through the JNI boundary.
+std::vector<std::string> parse_member_list(const std::string& raw) {
+    std::vector<std::string> list;
+    const auto members = nlohmann::json::parse(raw, nullptr, false);
+    if (members.is_array()) {
+        for (const auto& item : members) {
+            if (item.is_string()) {
+                list.push_back(item.get<std::string>());
+            }
+        }
+    }
+    return list;
+}
+
 nlohmann::json group_state_json(const i2pchat::groups::GroupState& state) {
     return {
         {"groupId", state.group_id()},
@@ -116,10 +144,12 @@ struct Engine {
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work;
     std::thread thread;
     std::unique_ptr<ChatService> service;
-    std::mutex trust_mu;
-    std::condition_variable trust_cv;
-    std::optional<i2pchat::session::TrustDecision> trust_decision;
-    bool stopping = false;
+    // Touched only on the io thread (prompt handler, on_core lambdas).
+    std::map<std::string, TrustAnswer> trust_answers;
+    // Peers whose prompt is currently shown, so a reconnecting peer does not
+    // re-raise the same dialog every attempt.
+    std::map<std::string, std::string> trust_asked;
+    std::atomic<bool> stopping{false};
 
     JNIEnv* env() {
         JNIEnv* local = nullptr;
@@ -295,20 +325,26 @@ Java_org_i2pchat_android_NativeEngine_nativeListProfiles(JNIEnv* env, jclass, js
     nlohmann::json names = nlohmann::json::array();
     const fs::path dir = root / "profiles";
     std::error_code ec;
-    if (fs::exists(dir, ec)) {
-        for (const auto& entry : fs::directory_iterator(dir, ec)) {
-            if (!entry.is_directory()) {
-                continue;
-            }
-            const std::string name = entry.path().filename().string();
-            if (name.empty() || name == kTransientProfile) {
-                continue;
-            }
-            std::error_code dat_ec;
-            if (fs::is_regular_file(entry.path() / (name + ".dat"), dat_ec)) {
-                names.push_back(name);
+    try {
+        if (fs::exists(dir, ec)) {
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                std::error_code entry_ec;
+                if (!entry.is_directory(entry_ec)) {
+                    continue;
+                }
+                const std::string name = entry.path().filename().string();
+                if (name.empty() || name == kTransientProfile ||
+                    !i2pchat::storage::is_valid_profile_name(name)) {
+                    continue;
+                }
+                std::error_code dat_ec;
+                if (fs::is_regular_file(entry.path() / (name + ".dat"), dat_ec)) {
+                    names.push_back(name);
+                }
             }
         }
+    } catch (...) {
+        // A directory that cannot be listed yields an empty profile list.
     }
     return utf8_to_jstring(env, names.dump());
 }
@@ -345,7 +381,8 @@ Java_org_i2pchat_android_NativeEngine_nativePrepareRouter(
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j_root,
                                                   jstring j_profile, jstring j_host, jint port,
-                                                  jint max_messages, jint max_age_days) {
+                                                  jint max_messages, jint max_age_days,
+                                                  jint tunnel_length) {
     try {
         if (g_engine.thread.joinable()) {
             g_engine.join_io();
@@ -359,6 +396,12 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         config.profile = jstring_to_utf8(env, j_profile);
         config.sam.host = jstring_to_utf8(env, j_host);
         config.sam.port = static_cast<std::uint16_t>(port);
+        const std::string hops = std::to_string(std::clamp<jint>(tunnel_length, 1, 7));
+        for (auto& [key, value] : config.sam_options) {
+            if (key == "inbound.length" || key == "outbound.length") {
+                value = hops;
+            }
+        }
         config.retention.max_messages = static_cast<std::size_t>(std::max(0, max_messages));
         config.retention.max_age_days = static_cast<unsigned>(std::max(0, max_age_days));
         // An unknown peer stays out until the Trust dialog accepts the key.
@@ -420,10 +463,23 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         };
         events.on_trust_prompt = [](i2pchat::session::TrustPrompt prompt, const std::string& peer,
                                     const std::string& neu, const std::string& old) {
-            {
-                std::lock_guard lock(g_engine.trust_mu);
-                g_engine.trust_decision.reset();
+            // Runs on the io thread inside the handshake. Never wait here:
+            // one unanswered dialog would stall every other session.
+            if (const auto answered = g_engine.trust_answers.find(peer);
+                answered != g_engine.trust_answers.end() && answered->second.key_hex == neu) {
+                const auto decision = answered->second.decision;
+                if (decision == i2pchat::session::TrustDecision::Accept) {
+                    // Consumed: a later key change must ask again.
+                    g_engine.trust_answers.erase(answered);
+                }
+                return decision;
             }
+            if (const auto asked = g_engine.trust_asked.find(peer);
+                asked != g_engine.trust_asked.end() && asked->second == neu) {
+                // Already on screen; the peer is just retrying.
+                return i2pchat::session::TrustDecision::Deferred;
+            }
+            g_engine.trust_asked[peer] = neu;
             const char* kind =
                 prompt == i2pchat::session::TrustPrompt::KeyChanged ? "keyChanged" : "firstSighting";
             JNIEnv* local = g_engine.env();
@@ -441,11 +497,25 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
                 local->DeleteLocalRef(j_new);
                 local->DeleteLocalRef(j_old);
             }
-            std::unique_lock lock(g_engine.trust_mu);
-            g_engine.trust_cv.wait(lock, [] {
-                return g_engine.trust_decision.has_value() || g_engine.stopping;
-            });
-            return g_engine.trust_decision.value_or(i2pchat::session::TrustDecision::Reject);
+            return i2pchat::session::TrustDecision::Deferred;
+        };
+        events.offer_file = [](const std::string& peer, const std::string& name,
+                               std::uint64_t size) {
+            JNIEnv* local = g_engine.env();
+            if (local == nullptr) {
+                return i2pchat::transfer::OfferDecision::Reject;
+            }
+            jstring j_peer = utf8_to_jstring(local, peer);
+            jstring j_name = utf8_to_jstring(local, name);
+            g_engine.call_void("onFileOffer", "(Ljava/lang/String;Ljava/lang/String;J)V", j_peer,
+                               j_name, static_cast<jlong>(std::min<std::uint64_t>(
+                                           size, static_cast<std::uint64_t>(INT64_MAX))));
+            local->DeleteLocalRef(j_peer);
+            local->DeleteLocalRef(j_name);
+            // The bytes are spooled to a `.pending` file in the app-private
+            // downloads directory while the dialog is up; they only get the
+            // real name (and the ACK goes out) once the user says yes.
+            return i2pchat::transfer::OfferDecision::Deferred;
         };
 
         g_engine.service = std::make_unique<ChatService>(g_engine.io.get_executor(),
@@ -471,13 +541,6 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
 extern "C" JNIEXPORT void JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeStop(JNIEnv*, jclass) {
     g_engine.stopping = true;
-    {
-        std::lock_guard lock(g_engine.trust_mu);
-        if (!g_engine.trust_decision) {
-            g_engine.trust_decision = i2pchat::session::TrustDecision::Reject;
-        }
-        g_engine.trust_cv.notify_all();
-    }
     try {
         if (g_engine.service) {
             g_engine.await_core<void>([]() -> asio::awaitable<void> {
@@ -488,14 +551,68 @@ Java_org_i2pchat_android_NativeEngine_nativeStop(JNIEnv*, jclass) {
     }
     g_engine.service.reset();
     g_engine.join_io();
+    g_engine.trust_answers.clear();
+    g_engine.trust_asked.clear();
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_org_i2pchat_android_NativeEngine_nativeTrustRespond(JNIEnv*, jclass, jboolean accept) {
-    std::lock_guard lock(g_engine.trust_mu);
-    g_engine.trust_decision = accept == JNI_TRUE ? i2pchat::session::TrustDecision::Accept
-                                                 : i2pchat::session::TrustDecision::Reject;
-    g_engine.trust_cv.notify_all();
+Java_org_i2pchat_android_NativeEngine_nativeTrustRespond(JNIEnv* env, jclass, jstring j_peer,
+                                                         jstring j_key_hex, jboolean accept) {
+    if (!g_engine.service) {
+        return;
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    const std::string key_hex = jstring_to_utf8(env, j_key_hex);
+    const bool yes = accept == JNI_TRUE;
+    try {
+        g_engine.on_core<void>([peer, key_hex, yes] {
+            g_engine.trust_asked.erase(peer);
+            g_engine.trust_answers[peer] =
+                TrustAnswer{key_hex, yes ? i2pchat::session::TrustDecision::Accept
+                                         : i2pchat::session::TrustDecision::Reject};
+            if (!yes) {
+                // Remembered so the peer's retries stay silent until the
+                // user dials them deliberately (nativeConnectPeer clears it).
+                return;
+            }
+            // Pin now, so the reconnect below sees a known key and no second
+            // prompt. verify_or_pin routes a key change through the prompt
+            // handler, which finds the recorded answer.
+            const std::optional<i2pchat::Bytes> key = i2pchat::encoding::hex_decode(key_hex);
+            if (key.has_value()) {
+                (void)g_engine.service->trust().verify_or_pin(peer, i2pchat::ByteView(*key),
+                                                              /*auto_accept_first_sighting=*/true);
+            }
+            g_engine.trust_answers.erase(peer);
+            asio::co_spawn(
+                g_engine.io,
+                [peer]() -> asio::awaitable<void> {
+                    if (g_engine.service) {
+                        (void)co_await g_engine.service->connect_peer(peer);
+                    }
+                },
+                asio::detached);
+        });
+    } catch (...) {
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeFileRespond(JNIEnv* env, jclass, jstring j_peer,
+                                                        jboolean accept) {
+    if (!g_engine.service) {
+        return JNI_FALSE;
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    const bool yes = accept == JNI_TRUE;
+    try {
+        return g_engine.on_core<bool>(
+                   [peer, yes] { return g_engine.service->respond_file_offer(peer, yes); })
+                   ? JNI_TRUE
+                   : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -506,6 +623,14 @@ Java_org_i2pchat_android_NativeEngine_nativeConnectPeer(JNIEnv* env, jclass, jst
     const std::string peer = jstring_to_utf8(env, j_peer);
     try {
         return g_engine.await_core<bool>([peer]() -> asio::awaitable<bool> {
+            // A deliberate dial re-opens the question for a peer the user
+            // previously declined.
+            if (const auto answer = g_engine.trust_answers.find(
+                    std::string(i2pchat::sam::normalize_peer_address(peer)));
+                answer != g_engine.trust_answers.end() &&
+                answer->second.decision == i2pchat::session::TrustDecision::Reject) {
+                g_engine.trust_answers.erase(answer);
+            }
             co_return co_await g_engine.service->connect_peer(peer);
         })
                    ? JNI_TRUE
@@ -521,7 +646,10 @@ Java_org_i2pchat_android_NativeEngine_nativeDisconnectPeer(JNIEnv* env, jclass, 
         return;
     }
     const std::string peer = jstring_to_utf8(env, j_peer);
-    g_engine.on_core<void>([peer] { g_engine.service->disconnect_peer(peer); });
+    try {
+        g_engine.on_core<void>([peer] { g_engine.service->disconnect_peer(peer); });
+    } catch (...) {
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -675,10 +803,14 @@ Java_org_i2pchat_android_NativeEngine_nativeSetPeerProfile(JNIEnv* env, jclass, 
     const std::string addr = jstring_to_utf8(env, j_addr);
     const std::string name = jstring_to_utf8(env, j_name);
     const std::string note = jstring_to_utf8(env, j_note);
-    g_engine.on_core<void>([addr, name, note] {
-        g_engine.service->contacts().set_peer_profile(addr, name, note);
-        g_engine.service->save_contacts();
-    });
+    try {
+        g_engine.on_core<void>([addr, name, note] {
+            g_engine.service->contacts().set_peer_profile(addr, name, note);
+            g_engine.service->save_contacts();
+        });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -687,11 +819,15 @@ Java_org_i2pchat_android_NativeEngine_nativeRemovePeer(JNIEnv* env, jclass, jstr
         return;
     }
     const std::string addr = jstring_to_utf8(env, j_addr);
-    g_engine.on_core<void>([addr] {
-        g_engine.service->contacts().remove_peer(addr);
-        g_engine.service->save_contacts();
-        i2pchat::storage::delete_history(g_engine.service->paths(), addr);
-    });
+    try {
+        g_engine.on_core<void>([addr] {
+            g_engine.service->contacts().remove_peer(addr);
+            g_engine.service->save_contacts();
+            i2pchat::storage::delete_history(g_engine.service->paths(), addr);
+        });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -700,7 +836,11 @@ Java_org_i2pchat_android_NativeEngine_nativeForgetPin(JNIEnv* env, jclass, jstri
         return;
     }
     const std::string addr = jstring_to_utf8(env, j_addr);
-    g_engine.on_core<void>([addr] { g_engine.service->trust().forget(addr); });
+    try {
+        g_engine.on_core<void>([addr] { g_engine.service->trust().forget(addr); });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -709,8 +849,12 @@ Java_org_i2pchat_android_NativeEngine_nativeClearHistory(JNIEnv* env, jclass, js
         return;
     }
     const std::string addr = jstring_to_utf8(env, j_addr);
-    g_engine.on_core<void>(
-        [addr] { i2pchat::storage::delete_history(g_engine.service->paths(), addr); });
+    try {
+        g_engine.on_core<void>(
+            [addr] { i2pchat::storage::delete_history(g_engine.service->paths(), addr); });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -720,12 +864,9 @@ Java_org_i2pchat_android_NativeEngine_nativeCreateGroup(JNIEnv* env, jclass, jst
         return utf8_to_jstring(env, "{}");
     }
     const std::string title = jstring_to_utf8(env, j_title);
-    const auto members = nlohmann::json::parse(jstring_to_utf8(env, j_members), nullptr, false);
-    std::vector<std::string> list;
-    if (members.is_array()) {
-        list = members.get<std::vector<std::string>>();
-    }
     try {
+        const std::vector<std::string> list =
+            parse_member_list(jstring_to_utf8(env, j_members));
         const std::string json = g_engine.on_core<std::string>([title, list] {
             return group_state_json(g_engine.service->create_group(title, list)).dump();
         });
@@ -743,12 +884,9 @@ Java_org_i2pchat_android_NativeEngine_nativeUpdateGroup(JNIEnv* env, jclass, jst
     }
     const std::string id = jstring_to_utf8(env, j_id);
     const std::string title = jstring_to_utf8(env, j_title);
-    const auto members = nlohmann::json::parse(jstring_to_utf8(env, j_members), nullptr, false);
-    std::vector<std::string> list;
-    if (members.is_array()) {
-        list = members.get<std::vector<std::string>>();
-    }
     try {
+        const std::vector<std::string> list =
+            parse_member_list(jstring_to_utf8(env, j_members));
         const std::string json = g_engine.on_core<std::string>([id, title, list] {
             return group_state_json(g_engine.service->update_group(id, title, list)).dump();
         });
@@ -764,8 +902,13 @@ Java_org_i2pchat_android_NativeEngine_nativeDeleteGroup(JNIEnv* env, jclass, jst
         return JNI_FALSE;
     }
     const std::string id = jstring_to_utf8(env, j_id);
-    return g_engine.on_core<bool>([id] { return g_engine.service->delete_group(id); }) ? JNI_TRUE
-                                                                                      : JNI_FALSE;
+    try {
+        return g_engine.on_core<bool>([id] { return g_engine.service->delete_group(id); })
+                   ? JNI_TRUE
+                   : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -806,9 +949,13 @@ Java_org_i2pchat_android_NativeEngine_nativeEncodeInvite(JNIEnv* env, jclass, js
         return utf8_to_jstring(env, "");
     }
     const std::string id = jstring_to_utf8(env, j_id);
-    const std::string token =
-        g_engine.on_core<std::string>([id] { return g_engine.service->encode_group_invite(id); });
-    return utf8_to_jstring(env, token);
+    try {
+        const std::string token = g_engine.on_core<std::string>(
+            [id] { return g_engine.service->encode_group_invite(id); });
+        return utf8_to_jstring(env, token);
+    } catch (...) {
+        return utf8_to_jstring(env, "");
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -817,6 +964,7 @@ Java_org_i2pchat_android_NativeEngine_nativeGroupTopology(JNIEnv* env, jclass, j
         return utf8_to_jstring(env, "{}");
     }
     const std::string id = jstring_to_utf8(env, j_id);
+    try {
     const std::string json = g_engine.on_core<std::string>([id] {
         const auto snap = g_engine.service->group_topology(id);
         if (!snap) {
@@ -846,6 +994,9 @@ Java_org_i2pchat_android_NativeEngine_nativeGroupTopology(JNIEnv* env, jclass, j
             .dump();
     });
     return utf8_to_jstring(env, json);
+    } catch (...) {
+        return utf8_to_jstring(env, "{}");
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -934,19 +1085,27 @@ Java_org_i2pchat_android_NativeEngine_nativeSaveReplicas(JNIEnv* env, jclass, js
     if (!g_engine.service) {
         return;
     }
-    const auto parsed = nlohmann::json::parse(jstring_to_utf8(env, j_json), nullptr, false);
-    i2pchat::storage::ReplicaSettings settings;
-    if (parsed.contains("endpoints") && parsed["endpoints"].is_array()) {
-        settings.endpoints = parsed["endpoints"].get<std::vector<std::string>>();
-    }
-    if (parsed.contains("auth") && parsed["auth"].is_object()) {
-        for (auto it = parsed["auth"].begin(); it != parsed["auth"].end(); ++it) {
-            if (it.value().is_string()) {
-                settings.auth[it.key()] = it.value().get<std::string>();
+    try {
+        const auto parsed = nlohmann::json::parse(jstring_to_utf8(env, j_json), nullptr, false);
+        i2pchat::storage::ReplicaSettings settings;
+        if (parsed.is_object() && parsed.contains("endpoints") && parsed["endpoints"].is_array()) {
+            for (const auto& item : parsed["endpoints"]) {
+                if (item.is_string()) {
+                    settings.endpoints.push_back(item.get<std::string>());
+                }
             }
         }
+        if (parsed.is_object() && parsed.contains("auth") && parsed["auth"].is_object()) {
+            for (auto it = parsed["auth"].begin(); it != parsed["auth"].end(); ++it) {
+                if (it.value().is_string()) {
+                    settings.auth[it.key()] = it.value().get<std::string>();
+                }
+            }
+        }
+        g_engine.on_core<void>([settings] { g_engine.service->save_replica_settings(settings); });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
     }
-    g_engine.on_core<void>([settings] { g_engine.service->save_replica_settings(settings); });
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -958,5 +1117,8 @@ Java_org_i2pchat_android_NativeEngine_nativeSetRetention(JNIEnv*, jclass, jint m
     i2pchat::storage::RetentionPolicy policy;
     policy.max_messages = static_cast<std::size_t>(std::max(0, max_messages));
     policy.max_age_days = static_cast<unsigned>(std::max(0, max_age_days));
-    g_engine.on_core<void>([policy] { g_engine.service->set_retention(policy); });
+    try {
+        g_engine.on_core<void>([policy] { g_engine.service->set_retention(policy); });
+    } catch (...) {
+    }
 }

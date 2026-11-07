@@ -24,6 +24,11 @@ namespace asio = boost::asio;
 /// forget.
 class LineReader {
 public:
+    /// Upper bound on one line. A peer that streams bytes without a newline
+    /// is cut off here instead of growing the buffer without limit; in that
+    /// case `read_line` returns nothing, same as a closed connection.
+    static constexpr std::size_t kMaxLineLength = 64 * 1024;
+
     /// `timeout` bounds each individual read. Without one a peer that opens a
     /// connection and says nothing keeps the operation pending forever.
     explicit LineReader(asio::ip::tcp::socket& socket, Bytes prebuffered = {},

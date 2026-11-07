@@ -171,6 +171,21 @@ void HandshakeMachine::fail(const std::string& reason) {
     throw HandshakeError(reason);
 }
 
+void HandshakeMachine::check_trust(const Bytes& peer_signing_public) {
+    if (!config_.trust_verifier) {
+        return;
+    }
+    switch (config_.trust_verifier(config_.peer_addr, ByteView(peer_signing_public))) {
+        case TrustDecision::Accept:
+            return;
+        case TrustDecision::Deferred:
+            fail("Peer signing key awaits the user's decision");
+        case TrustDecision::Reject:
+            break;
+    }
+    fail("Peer signing key does not match the pinned key");
+}
+
 void HandshakeMachine::install_keys(bool is_initiator) {
     if (my_ephemeral_private_.empty() || peer_ephemeral_public_.empty()) {
         fail("Missing ephemeral keys");
@@ -264,11 +279,7 @@ HandshakeOutput HandshakeMachine::handle_init(std::string_view payload) {
                                   ByteView(parsed.signature))) {
         fail("INIT signature verification failed");
     }
-    if (config_.trust_verifier &&
-        config_.trust_verifier(config_.peer_addr, ByteView(parsed.sign_pub)) !=
-            TrustDecision::Accept) {
-        fail("Peer signing key does not match the pinned key");
-    }
+    check_trust(parsed.sign_pub);
 
     peer_nonce_ = parsed.nonce;
     peer_ephemeral_public_ = parsed.eph_pub;
@@ -326,11 +337,7 @@ HandshakeOutput HandshakeMachine::handle_resp(std::string_view payload) {
                                   ByteView(parsed.signature))) {
         fail("RESP signature verification failed");
     }
-    if (config_.trust_verifier &&
-        config_.trust_verifier(config_.peer_addr, ByteView(parsed.sign_pub)) !=
-            TrustDecision::Accept) {
-        fail("Peer signing key does not match the pinned key");
-    }
+    check_trust(parsed.sign_pub);
 
     peer_nonce_ = parsed.nonce;
     peer_ephemeral_public_ = parsed.eph_pub;

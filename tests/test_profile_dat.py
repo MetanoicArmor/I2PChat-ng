@@ -63,7 +63,51 @@ class ProfileDatEncryptionTests(unittest.TestCase):
             self.assertEqual(key2, plaintext_key)
             self.assertIsNone(peer2)
             self.assertFalse(was_plain2)
-            self.assertTrue(os.path.isfile(os.path.join(td, "alice.dat.wrap")))
+
+    def test_sidecar_written_only_without_keyring(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "erin.dat")
+            sidecar = os.path.join(td, "erin.dat.wrap")
+            with (
+                patch("i2pchat.storage.profile_dat._try_keyring_get_wrap", return_value=None),
+                patch("i2pchat.storage.profile_dat._try_keyring_set_wrap", return_value=False),
+            ):
+                write_encrypted_profile_dat(path, "k1", profile="erin", profile_data_dir=td)
+                self.assertTrue(os.path.isfile(sidecar))
+                key, _peer, _plain = read_profile_dat_file(
+                    path, profile="erin", profile_data_dir=td
+                )
+                self.assertEqual(key, "k1")
+
+    def test_no_sidecar_when_keyring_holds_key(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "frank.dat")
+            sidecar = os.path.join(td, "frank.dat.wrap")
+            store: dict[str, bytes] = {}
+
+            def fake_get(profile: str):
+                return store.get(profile)
+
+            def fake_set(profile: str, wrap_key: bytes) -> bool:
+                store[profile] = wrap_key
+                return True
+
+            with (
+                patch("i2pchat.storage.profile_dat._try_keyring_get_wrap", side_effect=fake_get),
+                patch("i2pchat.storage.profile_dat._try_keyring_set_wrap", side_effect=fake_set),
+            ):
+                write_encrypted_profile_dat(path, "k2", profile="frank", profile_data_dir=td)
+                self.assertFalse(os.path.exists(sidecar))
+                key, _peer, _plain = read_profile_dat_file(
+                    path, profile="frank", profile_data_dir=td
+                )
+                self.assertEqual(key, "k2")
+                # A pre-existing sidecar (copied profile) is kept and promoted,
+                # not deleted.
+                with open(sidecar, "w", encoding="utf-8") as f:
+                    f.write("AAAA\n")  # invalid -> ignored, then rewritten with the real key
+                write_encrypted_profile_dat(path, "k3", profile="frank", profile_data_dir=td)
+                self.assertTrue(os.path.isfile(sidecar))
 
     def test_backup_export_returns_portable_plaintext(self) -> None:
         with tempfile.TemporaryDirectory() as td:
