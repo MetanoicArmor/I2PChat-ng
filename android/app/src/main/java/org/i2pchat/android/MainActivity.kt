@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -178,7 +179,8 @@ fun I2PChatRoot(bridge: ChatBridge) {
         return
     }
     NavHost(navController = nav, startDestination = if (state.running) "chats" else "profile") {
-        composable("profile") { ProfileScreen(bridge, nav) }
+        composable("profile") { ProfileScreen(bridge, nav, switching = false) }
+        composable("switchProfile") { ProfileScreen(bridge, nav, switching = true) }
         composable("status") { StatusScreen(bridge, nav) }
         composable("chats") { ChatListScreen(bridge, nav) }
         composable("conversation") { ConversationScreen(bridge, nav) }
@@ -481,10 +483,14 @@ fun NoticeRow(notice: NoticeUi, technical: Boolean = false) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
+fun ProfileScreen(bridge: ChatBridge, nav: NavHostController, switching: Boolean = false) {
     val state by bridge.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var name by remember { mutableStateOf(state.profiles.firstOrNull().orEmpty()) }
+    var name by remember {
+        mutableStateOf(state.profile.ifBlank { "random_address" })
+    }
+    var opened by remember { mutableStateOf(!switching) }
+    var sawStart by remember { mutableStateOf(false) }
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renameFrom by remember { mutableStateOf<String?>(null) }
     var renameText by remember { mutableStateOf("") }
@@ -499,8 +505,16 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
         bridge.refreshProfiles()
         bridge.warmRouter()
     }
-    LaunchedEffect(state.running, state.starting) {
-        if (state.running || state.starting) {
+    LaunchedEffect(state.starting) {
+        if (state.starting) sawStart = true
+    }
+    LaunchedEffect(state.running, state.starting, opened, sawStart) {
+        if (!opened) return@LaunchedEffect
+        val ready = if (switching) sawStart && state.running && !state.starting else state.running || state.starting
+        if (!ready) return@LaunchedEffect
+        if (switching) {
+            nav.navigate("chats") { popUpTo("chats") { inclusive = true } }
+        } else {
             nav.navigate("chats") { popUpTo("profile") { inclusive = true } }
         }
     }
@@ -524,8 +538,28 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             }
         }
     }
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { padding ->
-        Column(Modifier.padding(padding).padding(20.dp).fillMaxSize()) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(if (switching) R.string.menu_switch_profile else R.string.app_name)) },
+                navigationIcon = {
+                    if (switching) {
+                        IconButton(onClick = { nav.popBackStack() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_cancel))
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier
+                .padding(padding)
+                .imePadding()
+                .padding(20.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+        ) {
             Text(stringResource(R.string.profile_title), style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(stringResource(R.string.profile_intro))
@@ -546,8 +580,8 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             )
             Text(stringResource(R.string.profile_password_hint), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-                items(state.profiles) { profile ->
+            Column(Modifier.fillMaxWidth()) {
+                for (profile in state.profiles) {
                     val saved = profile != "random_address"
                     val address = state.profileAddresses[profile].orEmpty()
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -632,7 +666,10 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
             Text(state.status, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(12.dp))
             Button(
-                onClick = { bridge.start(name.ifBlank { "random_address" }, profilePassword) },
+                onClick = {
+                    opened = true
+                    bridge.start(name.ifBlank { "random_address" }, profilePassword)
+                },
                 enabled = !state.starting,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -643,6 +680,11 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController) {
                         stringResource(R.string.action_open)
                     },
                 )
+            }
+            if (switching) {
+                TextButton(onClick = { nav.popBackStack() }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             }
             TextButton(onClick = { nav.navigate("router") }) { Text(stringResource(R.string.router_settings)) }
         }
@@ -1227,11 +1269,23 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
         ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(stringResource(R.string.your_address), fontWeight = FontWeight.SemiBold)
+                        Text(state.localAddr.ifBlank { stringResource(R.string.waiting_for_address) })
+                        TextButton(onClick = {
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard.setPrimaryClip(ClipData.newPlainText("i2p", state.localAddr))
+                        }) { Text(stringResource(R.string.copy_address)) }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
                 Button(
-                    onClick = {
-                        bridge.stop()
-                        nav.navigate("profile") { popUpTo("chats") { inclusive = true } }
-                    },
+                    onClick = { nav.navigate("switchProfile") },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.menu_switch_profile)) }
                 Spacer(Modifier.height(16.dp))
@@ -1274,13 +1328,6 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
-                Text(stringResource(R.string.your_address), fontWeight = FontWeight.SemiBold)
-                Text(state.localAddr.ifBlank { stringResource(R.string.waiting_for_address) })
-                TextButton(onClick = {
-                    val clipboard = context.getSystemService(ClipboardManager::class.java)
-                    clipboard.setPrimaryClip(ClipData.newPlainText("i2p", state.localAddr))
-                }) { Text(stringResource(R.string.copy_address)) }
-                Spacer(Modifier.height(12.dp))
                 Button(onClick = { nav.navigate("router") }, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.i2p_router))
                 }

@@ -6354,6 +6354,7 @@ def _privacy_mode_shortcut_portable() -> str:
 # В QKeySequence строка Ctrl+… на macOS даёт ⌘ (как остальные хоткеи окна).
 _CONNECT_SHORTCUT_PORTABLE = "Ctrl+1"
 _DISCONNECT_SHORTCUT_PORTABLE = "Ctrl+0"
+_STATUS_PAGE_SHORTCUT_PORTABLE = "Ctrl+S"
 _MORE_MENU_SHORTCUT_PORTABLE = "Ctrl+."
 _LOCK_TO_PEER_SHORTCUT_PORTABLE = "Ctrl+L"
 _EMOJI_PICKER_SHORTCUT_PORTABLE = "Ctrl+;"
@@ -6789,7 +6790,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         # диагностическая строка статуса
         self.status_label = _ClickableStatusLabel("Status: initializing", self)
         self.status_label.clicked.connect(self._on_status_bar_clicked)
-        self.status_label.setToolTip(tr("status.open_hint"))
+        self.status_label.setToolTip(self._status_bar_tooltip())
         self.status_label.setObjectName("StatusLabel")
         self.status_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -7623,8 +7624,10 @@ class ChatWindow(QtWidgets.QMainWindow):
 
     def _status_bar_tooltip(self) -> str:
         if hasattr(self, "_center_stack") and self._status_page_visible():
-            return tr("status.close_hint")
-        return tr("status.open_hint")
+            base = tr("status.close_hint")
+        else:
+            base = tr("status.open_hint")
+        return _tooltip_with_portable_shortcut(base, _STATUS_PAGE_SHORTCUT_PORTABLE)
 
     def _on_status_bar_clicked(self) -> None:
         if self._status_page_visible():
@@ -9933,6 +9936,9 @@ class ChatWindow(QtWidgets.QMainWindow):
             return True
         if _physical_key_matches(event, win_vk=0x52, mac_vk=0x0F, linux_evdev=19):
             self._open_router_settings_dialog()
+            return True
+        if _physical_key_matches(event, win_vk=0x53, mac_vk=0x01, linux_evdev=31):
+            self._on_status_bar_clicked()
             return True
         if self._is_emoji_picker_keyboard_toggle(event):
             self.compose_input_wrap.toggle_emoji_picker()

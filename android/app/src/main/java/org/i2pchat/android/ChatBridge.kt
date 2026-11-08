@@ -475,6 +475,25 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     fun start(profile: String, profilePassword: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
+            if (_state.value.running || _state.value.starting) {
+                pollJob?.cancel()
+                tunnelWatchJob?.cancel()
+                runCatching { NativeEngine.nativeStop() }
+                _state.update {
+                    it.copy(
+                        running = false,
+                        starting = false,
+                        localAddr = "",
+                        contacts = emptyList(),
+                        groups = emptyList(),
+                        messages = emptyList(),
+                        notices = emptyList(),
+                        verboseLog = emptyList(),
+                        peerStates = emptyMap(),
+                        selectedId = "",
+                    )
+                }
+            }
             val router = RouterPrefs.load(appRoot)
             val ui = UiPrefs.load(appRoot)
             val sam = "${router.samHost}:${router.samPort}"
