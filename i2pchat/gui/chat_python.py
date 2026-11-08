@@ -4473,6 +4473,11 @@ class TuiSettingsScreen(ModalScreen[None]):
             yield Static(
                 "A profile backup moves the address and contacts between a computer and a phone. Its passphrase is separate from the profile password."
             )
+            yield Static(
+                "Profile name. A new name creates a profile. Use profile switches to it.",
+                classes="settings_label",
+            )
+            yield Input("", placeholder="alice", id="settings_switch_profile")
             yield Static("Save local history", classes="settings_label")
             yield Switch(False, id="settings_history_enabled")
             yield Static(tr("status.verbose"), classes="settings_label")
@@ -4500,12 +4505,13 @@ class TuiSettingsScreen(ModalScreen[None]):
             yield Static("Imported profile name", classes="settings_label")
             yield Input("", placeholder="alice", id="settings_profile_name")
             yield Static(
-                "Ctrl+S apply · Import loads .dat and switches profile.\n"
-                "Router and Backups are opened from here.",
+                "Ctrl+S apply · Use profile switches or creates the name above.\n"
+                "Import loads .dat and switches profile. Router and Backups are opened from here.",
                 id="settings_help",
             )
             with Horizontal(classes="settings_buttons_row"):
                 yield Button("Apply", id="settings_apply", variant="primary", classes="settings_button")
+                yield Button("Use profile", id="settings_switch_profile_btn", classes="settings_button")
                 yield Button("Import .dat", id="settings_import", classes="settings_button")
                 yield Button("Router…", id="settings_router", classes="settings_button")
             with Horizontal(classes="settings_buttons_row"):
@@ -4528,6 +4534,7 @@ class TuiSettingsScreen(ModalScreen[None]):
             self.host._load_history_retention_days()
         )
         self.query_one("#settings_profile_name", Input).value = self.host.profile
+        self.query_one("#settings_switch_profile", Input).value = self.host.profile
         from i2pchat.storage.media_prefs import load_media_prefs
 
         files_dir, images_dir, ephemeral = load_media_prefs()
@@ -4573,6 +4580,20 @@ class TuiSettingsScreen(ModalScreen[None]):
         self.host.post("success", "Settings applied.")
         self.dismiss(None)
 
+    def _switch_named_profile(self) -> None:
+        name = self.query_one("#settings_switch_profile", Input).value.strip()
+        if not name:
+            self.host.post("error", "Enter a profile name.")
+            return
+        if name != TRANSIENT_PROFILE_NAME:
+            try:
+                ensure_valid_profile_name(name)
+            except ValueError as exc:
+                self.host.post("error", str(exc))
+                return
+        self.dismiss(None)
+        self.host.run_worker(self.host._switch_profile(name))
+
     def _import_profile(self) -> None:
         path = os.path.expanduser(self.query_one("#settings_profile_path", Input).value.strip())
         name = self.query_one("#settings_profile_name", Input).value.strip()
@@ -4588,6 +4609,8 @@ class TuiSettingsScreen(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "settings_apply":
             self.action_apply_settings()
+        elif event.button.id == "settings_switch_profile_btn":
+            self._switch_named_profile()
         elif event.button.id == "settings_import":
             self._import_profile()
         elif event.button.id == "settings_router":
