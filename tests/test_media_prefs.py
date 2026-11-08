@@ -41,10 +41,13 @@ def test_ephemeral_mode_uses_a_cache_that_exit_deletes(profiles):
     save_media_prefs(files_dir=str(profiles / "media"), images_dir="", ephemeral=True)
     files = incoming_files_dir()
     images = incoming_images_dir()
-    assert files.endswith(os.path.join("cache", "incoming-files"))
-    assert images.endswith(os.path.join("cache", "incoming-images"))
+    assert files.endswith(os.path.join("incoming-files"))
+    assert images.endswith(os.path.join("incoming-images"))
+    assert str(profiles) not in files
+    assert str(profiles) not in images
     open(os.path.join(files, "secret.bin"), "w").close()
     clear_ephemeral_media()
+    assert not os.path.isdir(files)
     assert not os.path.isdir(os.path.join(str(profiles), "cache"))
 
 

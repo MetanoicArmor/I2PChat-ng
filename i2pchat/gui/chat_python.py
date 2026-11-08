@@ -1043,7 +1043,7 @@ class I2PChat(App):
         border = "green" if is_from_me else "cyan"
         align = "left" if is_from_me else "right"
         panel = Panel(
-            art,
+            Text(strip_terminal_controls(art)),
             title=(
                 f"[#5f5f5f][{now_utc} UTC][/] [bold {border}]{escape(label)}[/] "
                 f"[dim]{escape(os.path.basename(path))}[/]"
@@ -3078,7 +3078,7 @@ class I2PChat(App):
         now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
         img_text = "\n".join(lines)
         panel = Panel(
-            img_text,
+            Text(strip_terminal_controls(img_text)),
             title=f"[#5f5f5f][{now_utc} UTC][/] [bold green]Me[/] [dim]ASCII image[/]",
             title_align="left",
             border_style="green",
@@ -5048,12 +5048,14 @@ class TuiFileOfferScreen(ModalScreen[object]):
     def __init__(self, *, filename: str, size: int) -> None:
         super().__init__()
         self._filename = filename
-        self._size = size
+        # Widget._size is Textual's layout size. Storing the byte count there
+        # makes the next refresh crash with "'int' object has no attribute 'region'".
+        self._byte_count = size
 
     def compose(self) -> ComposeResult:
         with Vertical(id="trust_dialog"):
             yield Static("Accept incoming file?")
-            yield Static(f"{self._filename}\n{self._size:,} bytes")
+            yield Static(f"{self._filename}\n{self._byte_count:,} bytes")
             yield Static(
                 "Accept uses the folder from Settings. Save as… asks for a path for this file only."
             )

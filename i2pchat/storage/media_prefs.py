@@ -2,7 +2,9 @@
 
 Empty paths mean the usual ``downloads/`` and ``images/`` directories under the
 app data root. Both paths may be the same directory. Ephemeral mode writes into
-a cache that ``clear_ephemeral_media`` deletes on exit and on profile switch.
+a directory under ``/dev/shm`` when that tmpfs is writable, otherwise the
+system temp dir, and ``clear_ephemeral_media`` deletes it on exit and on
+profile switch.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from typing import Optional
 
 from i2pchat.core.i2p_chat_core import get_profiles_dir
@@ -55,8 +58,19 @@ def save_media_prefs(*, files_dir: str, images_dir: str, ephemeral: bool) -> Non
     _write(data)
 
 
+def ephemeral_root() -> str:
+    """RAM when ``/dev/shm`` is writable, otherwise the process temp directory."""
+    ram = "/dev/shm"
+    base = ram if os.path.isdir(ram) and os.access(ram, os.W_OK) else tempfile.gettempdir()
+    try:
+        ident = str(os.getuid())
+    except AttributeError:
+        ident = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    return os.path.join(base, f"i2pchat-{ident}")
+
+
 def _cache_dir(kind: str) -> str:
-    return os.path.join(get_profiles_dir(), "cache", f"incoming-{kind}")
+    return os.path.join(ephemeral_root(), f"incoming-{kind}")
 
 
 def _prepare(path: str, *, private: bool) -> str:
@@ -88,10 +102,10 @@ def incoming_images_dir() -> str:
 
 
 def clear_ephemeral_media() -> None:
-    """Delete the cache used by ephemeral mode. Safe to call when it is off."""
-    cache = os.path.join(get_profiles_dir(), "cache")
-    if os.path.isdir(cache):
-        shutil.rmtree(cache, ignore_errors=True)
+    """Delete the temp incoming cache. Safe to call when ephemeral mode is off."""
+    for cache in (ephemeral_root(), os.path.join(get_profiles_dir(), "cache")):
+        if os.path.isdir(cache):
+            shutil.rmtree(cache, ignore_errors=True)
 
 
 def resolve_save_as(path: str) -> Optional[str]:
