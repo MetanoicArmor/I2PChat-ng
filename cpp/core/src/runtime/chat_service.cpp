@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include "i2pchat/blindbox/state.hpp"
@@ -34,6 +35,32 @@ namespace {
 /// A destination in I2P-base64 is 516 characters or more; a base32 host is 52.
 /// Nothing in between is a valid peer identifier, so the length decides.
 constexpr std::size_t kMinDestinationLength = 300;
+
+/// True when a SAM call failed because the router process or its socket is gone,
+/// not because one peer handshake failed.
+bool sam_transport_lost(std::string_view what) {
+    static constexpr std::string_view kNeedles[] = {
+        "refused",
+        "reset",
+        "Broken pipe",
+        "End of file",
+        "Connection aborted",
+        "Software caused connection abort",
+        "not open",
+        "closed",
+        "timed out",
+        "unreachable",
+        "Bad file descriptor",
+        "Network is down",
+        "Network is unreachable",
+    };
+    for (const std::string_view needle : kNeedles) {
+        if (what.find(needle) != std::string_view::npos) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::int64_t unix_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -469,6 +496,7 @@ void ChatService::attach_link(Peer& peer, std::shared_ptr<PeerLink> link) {
 }
 
 asio::awaitable<void> ChatService::accept_loop() {
+    bool reported_router_loss = false;
     while (running_) {
         const std::shared_ptr<sam::SamSession> sam = sam_;
         if (!sam) {
@@ -481,8 +509,23 @@ asio::awaitable<void> ChatService::accept_loop() {
             accepted = true;
         } catch (const std::exception& error) {
             if (running_) {
-                emit_error(std::string("accepting a peer failed: ") + error.what());
+                const std::string what = error.what();
+                if (sam_transport_lost(what)) {
+                    // The router socket is gone. Status must leave "ok"; repeating
+                    // the same line every two seconds only floods Events.
+                    sessions_.set_transport_state(session::TransportState::Failed, what);
+                    if (!reported_router_loss) {
+                        reported_router_loss = true;
+                        emit_error(std::string("I2P router connection lost: ") + what);
+                    }
+                } else {
+                    emit_error(std::string("accepting a peer failed: ") + what);
+                }
             }
+        }
+        if (accepted && reported_router_loss) {
+            reported_router_loss = false;
+            sessions_.set_transport_state(session::TransportState::Ready, "router-back");
         }
         if (!accepted) {
             if (!running_) {
@@ -618,11 +661,19 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     try {
         stream = co_await sam_->connect_stream(destination);
     } catch (const std::exception& error) {
-        const double delay = sessions_.schedule_reconnect(peer_addr, error.what());
-        sessions_.mark_live_failure(peer_addr, error.what());
-        emit_error(std::string("connecting to ") + peer_addr.substr(0, 16) + "… failed: " +
-                   error.what() + " (retry in " + std::to_string(static_cast<int>(delay)) +
-                   "s)");
+        const std::string what = error.what();
+        const bool router_lost = sam_transport_lost(what);
+        const session::TransportState before = sessions_.transport_state();
+        if (router_lost) {
+            sessions_.set_transport_state(session::TransportState::Failed, what);
+        }
+        const double delay = sessions_.schedule_reconnect(peer_addr, what);
+        sessions_.mark_live_failure(peer_addr, what);
+        // One Events line when the router dies; later retries stay quiet.
+        if (!router_lost || before != session::TransportState::Failed) {
+            emit_error(std::string("connecting to ") + peer_addr.substr(0, 16) + "… failed: " +
+                       what + " (retry in " + std::to_string(static_cast<int>(delay)) + "s)");
+        }
         co_return false;
     }
 

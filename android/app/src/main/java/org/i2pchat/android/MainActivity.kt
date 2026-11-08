@@ -838,15 +838,17 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
     val router = state.router
     val active = state.running || state.starting
     val issue = state.routerIssue
+    val routerDown = state.transport == "failed"
     val routerCheck = when {
+        routerDown -> "failed"
         state.samReady -> "ok"
         issue != null -> "failed"
         state.starting -> "pending"
-        state.transport == "failed" -> "failed"
         else -> "off"
     }
     val tunnelsCheck = when {
         state.tunnelsReady -> "ok"
+        routerDown -> "failed"
         state.running -> if (issue != null && issue.code != RouterIssueCode.TUNNELS_SLOW) "failed" else "pending"
         state.starting -> "pending"
         else -> "off"
@@ -927,13 +929,14 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                 CheckRow(
                     stringResource(R.string.check_sam),
                     "${router.samHost}:${router.samPort}",
-                    if (state.samReady) "ok" else routerCheck,
+                    if (routerDown) "failed" else if (state.samReady) "ok" else routerCheck,
                 )
                 CheckRow(stringResource(R.string.check_tunnels), "", tunnelsCheck)
                 CheckRow(
                     stringResource(R.string.check_address),
                     if (state.localAddr.isBlank()) "" else state.localAddr.take(24) + "…",
                     when {
+                        routerDown -> "failed"
                         state.localAddr.isNotBlank() -> "ok"
                         active -> "pending"
                         else -> "off"

@@ -1239,15 +1239,24 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onTransportState(state: String, reason: String) = onMain {
+        val router = _state.value.router
+        val lost = state == "failed"
+        val issue = when {
+            state == "ready" -> null
+            !lost -> _state.value.routerIssue
+            router.usingBundled -> RouterIssue(RouterIssueCode.ROUTER_CRASHED, reason)
+            else -> RouterDiagnostics.diagnoseSystemRouter(router.samHost, router.samPort, false)
+        }
         _state.update {
             it.copy(
                 transport = state,
+                samReady = if (lost) false else it.samReady,
                 status = when (state) {
                     "ready" -> str(R.string.status_online)
                     "failed" -> str(R.string.status_failed)
                     else -> str(R.string.status_warming)
                 },
-                routerIssue = if (state == "ready") null else it.routerIssue,
+                routerIssue = issue,
             )
         }
     }
