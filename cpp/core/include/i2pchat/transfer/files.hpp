@@ -55,4 +55,10 @@ inline constexpr std::size_t kMaxImageLines = 500;
 /// executable named `photo.png`.
 [[nodiscard]] std::optional<std::string> detect_inline_image_format(ByteView header);
 
+/// Copy of `data` with EXIF, XMP, IPTC, and text metadata removed.
+///
+/// Pixels are not recompressed. A buffer that is not a PNG, JPEG, or WebP, or
+/// that cannot be parsed, is returned unchanged.
+[[nodiscard]] Bytes strip_image_metadata(ByteView data);
+
 }  // namespace i2pchat::transfer

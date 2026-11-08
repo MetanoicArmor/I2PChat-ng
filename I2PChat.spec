@@ -57,7 +57,7 @@ if os.environ.get("I2PCHAT_OMIT_BUNDLED_I2PD", "").strip().lower() in ("1", "tru
 _analysis_datas = [
     ('VERSION', '.'),
     ('assets/sounds/notify.wav', 'assets/sounds'),
-    ('i2pchat/gui/fluent_emoji', 'i2pchat/gui/fluent_emoji'),
+    ('i2pchat/gui/twemoji', 'i2pchat/gui/twemoji'),
     ('i2pchat/gui/icons', 'i2pchat/gui/icons'),
     ('i2pchat/gui/assets', 'i2pchat/gui/assets'),
     ('i2pchat/blindbox/blindbox_server_example.py', 'i2pchat/blindbox'),

@@ -1,2 +1,2 @@
-# Fluent UI Emoji: бинарные PNG (без подмены окончаний строк, без merge-текста)
-i2pchat/gui/fluent_emoji/png/*.png binary
+# Twemoji: бинарные PNG (без подмены окончаний строк, без merge-текста)
+i2pchat/gui/twemoji/png/*.png binary

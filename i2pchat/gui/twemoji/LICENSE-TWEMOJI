@@ -1,0 +1,15 @@
+Twemoji graphics
+Copyright Twitter, Inc. and other contributors
+
+The PNG files in png/ are the 72×72 Twemoji images from
+https://github.com/jdecked/twemoji (tag 15.1.0, assets/72x72).
+
+Those graphics are licensed under Creative Commons Attribution 4.0
+International (CC-BY 4.0):
+
+  https://creativecommons.org/licenses/by/4.0/
+
+Attribution: "Twemoji by Twitter, licensed under CC-BY 4.0."
+
+The Twemoji library source is under a separate MIT license. This
+directory ships only the graphics, not that source.

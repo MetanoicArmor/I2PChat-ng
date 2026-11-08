@@ -1,4 +1,4 @@
-"""Кэш путей к PNG Fluent UI Emoji (manifest в fluent_emoji/)."""
+"""Кэш путей к PNG Twemoji (manifest в twemoji/)."""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ from typing import Optional
 _GUI_DIR = Path(__file__).resolve().parent
 
 
-def fluent_emoji_root() -> Path:
-    """Каталог fluent_emoji: исходники или PyInstaller _MEIPASS."""
+def twemoji_root() -> Path:
+    """Каталог twemoji: исходники или PyInstaller _MEIPASS."""
     meipass = getattr(sys, "_MEIPASS", None)
     if isinstance(meipass, str) and meipass:
-        bundled = Path(meipass) / "i2pchat" / "gui" / "fluent_emoji"
+        bundled = Path(meipass) / "i2pchat" / "gui" / "twemoji"
         if bundled.is_dir():
             return bundled
-    return _GUI_DIR / "fluent_emoji"
+    return _GUI_DIR / "twemoji"
 
 
 def _load_emoji_manifest_paths(root: Path) -> dict[str, Path]:
@@ -60,5 +60,5 @@ _paths_cache: Optional[dict[str, Path]] = None
 def emoji_paths_cached() -> dict[str, Path]:
     global _paths_cache
     if _paths_cache is None:
-        _paths_cache = _load_emoji_manifest_paths(fluent_emoji_root())
+        _paths_cache = _load_emoji_manifest_paths(twemoji_root())
     return _paths_cache

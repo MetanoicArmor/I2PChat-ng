@@ -104,6 +104,10 @@ private:
     bool cancelled_ = false;
     bool terminator_sent_ = false;
     std::shared_ptr<std::ifstream> stream_;
+    /// Inline images are rewritten without metadata before the first frame,
+    /// so the bytes on the wire are this buffer rather than the source file.
+    Bytes image_payload_;
+    std::size_t payload_offset_ = 0;
 };
 
 /// What the UI says about an offered file.

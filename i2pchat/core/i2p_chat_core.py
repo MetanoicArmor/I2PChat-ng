@@ -305,6 +305,7 @@ def _finalize_inline_image_worker(
     """
     import hashlib
 
+    image_bytes = strip_image_metadata(image_bytes)
     file_hash = hashlib.sha256(image_bytes).hexdigest()[:8]
     safe_filename = f"img_{int(time.time())}_{file_hash}.{detected_ext}"
     safe_path = os.path.join(images_dir, safe_filename)
@@ -1187,6 +1188,103 @@ def max_base64_chars_for_bytes(byte_count: int) -> int:
     if byte_count <= 0:
         return 0
     return ((byte_count + 2) // 3) * 4
+
+
+def strip_image_metadata(data: bytes) -> bytes:
+    """Drop EXIF, XMP, IPTC, and text chunks without recompressing pixels.
+
+    Unrecognised or malformed input is returned unchanged so a send never
+    turns into a different picture.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return _strip_png_metadata(data)
+    if data.startswith(b"\xff\xd8"):
+        return _strip_jpeg_metadata(data)
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return _strip_webp_metadata(data)
+    return data
+
+
+def _strip_png_metadata(data: bytes) -> bytes:
+    drop = {b"tEXt", b"iTXt", b"zTXt", b"eXIf", b"tIME"}
+    out = bytearray(data[:8])
+    index = 8
+    size = len(data)
+    while index + 12 <= size:
+        length = int.from_bytes(data[index : index + 4], "big")
+        chunk_type = data[index + 4 : index + 8]
+        end = index + 12 + length
+        if length < 0 or end > size:
+            return data
+        if chunk_type not in drop:
+            out += data[index:end]
+        index = end
+        if chunk_type == b"IEND":
+            return bytes(out)
+    return data
+
+
+def _strip_jpeg_metadata(data: bytes) -> bytes:
+    # APP1 is EXIF and XMP, APP13 is IPTC, COM is a text comment.
+    drop = {0xE1, 0xED, 0xFE}
+    out = bytearray(b"\xff\xd8")
+    index = 2
+    size = len(data)
+    while index < size:
+        if data[index] != 0xFF:
+            return data
+        while index < size and data[index] == 0xFF:
+            index += 1
+        if index >= size:
+            return data
+        marker = data[index]
+        index += 1
+        if marker == 0xD9:
+            out += b"\xff\xd9"
+            return bytes(out)
+        if marker == 0x00 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            out += bytes((0xFF, marker))
+            continue
+        if index + 2 > size:
+            return data
+        segment_length = int.from_bytes(data[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > size:
+            return data
+        if marker == 0xDA:
+            out += b"\xff\xda"
+            out += data[index:]
+            return bytes(out)
+        if marker not in drop:
+            out += bytes((0xFF, marker))
+            out += data[index : index + segment_length]
+        index += segment_length
+    return bytes(out)
+
+
+def _strip_webp_metadata(data: bytes) -> bytes:
+    body = bytearray()
+    index = 12
+    size = len(data)
+    while index + 8 <= size:
+        tag = data[index : index + 4]
+        payload_size = int.from_bytes(data[index + 4 : index + 8], "little")
+        index += 8
+        if index + payload_size > size:
+            return data
+        payload = data[index : index + payload_size]
+        index += payload_size
+        if payload_size % 2 == 1 and index < size:
+            index += 1
+        if tag in (b"EXIF", b"XMP "):
+            continue
+        body += tag
+        body += payload_size.to_bytes(4, "little")
+        body += payload
+        if payload_size % 2 == 1:
+            body += b"\x00"
+    if not body:
+        return data
+    return b"RIFF" + (4 + len(body)).to_bytes(4, "little") + b"WEBP" + bytes(body)
 
 
 def validate_image(path: str) -> Tuple[bool, str, Optional[str]]:
@@ -8957,19 +9055,28 @@ class I2PChatCore:
             return None
         
         filename = sanitize_filename(os.path.basename(path))
-        filesize = os.path.getsize(path)
-        
-        # Копируем изображение в images/ для локального отображения
         import hashlib
-        with open(path, 'rb') as f:
-            file_hash = hashlib.sha256(f.read()).hexdigest()[:8]
-        
+        try:
+            with open(path, "rb") as f:
+                payload = strip_image_metadata(f.read())
+        except OSError as e:
+            self._emit_error(f"Failed to read image: {e}")
+            return None
+        filesize = len(payload)
+        if filesize > MAX_IMAGE_SIZE:
+            self._emit_error(
+                f"Invalid image: Image too large: {filesize} bytes "
+                f"(max {MAX_IMAGE_SIZE // (1024 * 1024)} MB)"
+            )
+            return None
+
+        file_hash = hashlib.sha256(payload).hexdigest()[:8]
         local_filename = f"img_{int(time.time())}_{file_hash}.{detected_ext}"
         local_path = os.path.join(get_images_dir(), local_filename)
-        
+
         try:
-            import shutil
-            shutil.copy2(path, local_path)
+            with open(local_path, "wb") as f:
+                f.write(payload)
         except Exception as e:
             self._emit_error(f"Failed to copy image: {e}")
             return None
@@ -9038,51 +9145,52 @@ class I2PChatCore:
             drain_batch = _file_send_drain_batch()
             sent = 0
             pending_drains = 0
-            with open(path, "rb") as f:
-                while True:
-                    if sess._cancel_transfer:
-                        if pending_drains:
-                            try:
-                                await writer.drain()
-                            except Exception:
-                                pass
-                        raise Exception("Transfer cancelled by user")
-                    if not sess.conn:
-                        raise ConnectionError("Connection lost during transfer")
+            offset = 0
+            while offset < filesize:
+                if sess._cancel_transfer:
+                    if pending_drains:
+                        try:
+                            await writer.drain()
+                        except Exception:
+                            pass
+                    raise Exception("Transfer cancelled by user")
+                if not sess.conn:
+                    raise ConnectionError("Connection lost during transfer")
 
-                    chunk = await asyncio.to_thread(f.read, chunk_size)
-                    if not chunk:
-                        break
+                chunk = payload[offset : offset + chunk_size]
+                offset += len(chunk)
+                if not chunk:
+                    break
 
-                    encoded = base64.b64encode(chunk).decode()
-                    writer.write(self.frame_message("G", encoded, peer_id=fpid))
-                    pending_drains += 1
-                    if pending_drains >= drain_batch:
-                        t0 = time.monotonic()
-                        await writer.drain()
-                        if self._file_xfer_debug:
-                            dt = time.monotonic() - t0
-                            if dt >= 0.25:
-                                logger.info(
-                                    "file xfer image send: slow drain %.3fs bytes_sent=%s batch=%s",
-                                    dt,
-                                    sent + len(chunk),
-                                    drain_batch,
-                                )
-                        pending_drains = 0
-
-                    sent += len(chunk)
-                    if should_emit_file_progress(sent, len(chunk), filesize):
-                        self._emit_file_event(
-                            FileTransferInfo(
-                                filename=filename,
-                                size=filesize,
-                                received=sent,
-                                is_sending=True,
-                                is_inline_image=True,
-                                source_path=path,
+                encoded = base64.b64encode(chunk).decode()
+                writer.write(self.frame_message("G", encoded, peer_id=fpid))
+                pending_drains += 1
+                if pending_drains >= drain_batch:
+                    t0 = time.monotonic()
+                    await writer.drain()
+                    if self._file_xfer_debug:
+                        dt = time.monotonic() - t0
+                        if dt >= 0.25:
+                            logger.info(
+                                "file xfer image send: slow drain %.3fs bytes_sent=%s batch=%s",
+                                dt,
+                                sent + len(chunk),
+                                drain_batch,
                             )
+                    pending_drains = 0
+
+                sent += len(chunk)
+                if should_emit_file_progress(sent, len(chunk), filesize):
+                    self._emit_file_event(
+                        FileTransferInfo(
+                            filename=filename,
+                            size=filesize,
+                            received=sent,
+                            is_sending=True,
+                            is_inline_image=True,
+                            source_path=path,
                         )
+                    )
 
             if pending_drains:
                 await writer.drain()

@@ -135,4 +135,158 @@ std::optional<std::string> detect_inline_image_format(ByteView header) {
     return std::nullopt;
 }
 
+namespace {
+
+constexpr std::array<Byte, 8> kPngSignature{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+
+bool starts_with(ByteView data, ByteView prefix) {
+    return data.size() >= prefix.size() &&
+           std::equal(prefix.begin(), prefix.end(), data.begin());
+}
+
+Bytes copy_bytes(ByteView data) { return Bytes(data.begin(), data.end()); }
+
+void append_bytes(Bytes& target, ByteView data) {
+    target.insert(target.end(), data.begin(), data.end());
+}
+
+Bytes strip_png_metadata(ByteView data) {
+    static constexpr std::array<std::string_view, 5> kDrop{"tEXt", "iTXt", "zTXt", "eXIf",
+                                                           "tIME"};
+    Bytes out(data.begin(), data.begin() + 8);
+    std::size_t index = 8;
+    while (index + 12 <= data.size()) {
+        const std::uint32_t length = (std::uint32_t(data[index]) << 24) |
+                                     (std::uint32_t(data[index + 1]) << 16) |
+                                     (std::uint32_t(data[index + 2]) << 8) |
+                                     std::uint32_t(data[index + 3]);
+        const std::string_view type(reinterpret_cast<const char*>(data.data() + index + 4), 4);
+        const std::size_t end = index + 12 + static_cast<std::size_t>(length);
+        if (end > data.size()) {
+            return copy_bytes(data);
+        }
+        const bool drop = std::find(kDrop.begin(), kDrop.end(), type) != kDrop.end();
+        if (!drop) {
+            append_bytes(out, data.subspan(index, end - index));
+        }
+        index = end;
+        if (type == "IEND") {
+            return out;
+        }
+    }
+    return copy_bytes(data);
+}
+
+Bytes strip_jpeg_metadata(ByteView data) {
+    Bytes out{0xFF, 0xD8};
+    std::size_t index = 2;
+    while (index < data.size()) {
+        if (data[index] != 0xFF) {
+            return copy_bytes(data);
+        }
+        while (index < data.size() && data[index] == 0xFF) {
+            ++index;
+        }
+        if (index >= data.size()) {
+            return copy_bytes(data);
+        }
+        const Byte marker = data[index++];
+        if (marker == 0xD9) {
+            out.push_back(0xFF);
+            out.push_back(0xD9);
+            return out;
+        }
+        if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            out.push_back(0xFF);
+            out.push_back(marker);
+            continue;
+        }
+        if (index + 2 > data.size()) {
+            return copy_bytes(data);
+        }
+        const std::uint32_t segment_length =
+            (std::uint32_t(data[index]) << 8) | std::uint32_t(data[index + 1]);
+        if (segment_length < 2 || index + segment_length > data.size()) {
+            return copy_bytes(data);
+        }
+        if (marker == 0xDA) {
+            out.push_back(0xFF);
+            out.push_back(0xDA);
+            append_bytes(out, data.subspan(index));
+            return out;
+        }
+        // APP1 is EXIF and XMP, APP13 is IPTC, COM is a text comment.
+        if (marker != 0xE1 && marker != 0xED && marker != 0xFE) {
+            out.push_back(0xFF);
+            out.push_back(marker);
+            append_bytes(out, data.subspan(index, segment_length));
+        }
+        index += segment_length;
+    }
+    return out;
+}
+
+Bytes strip_webp_metadata(ByteView data) {
+    Bytes body;
+    std::size_t index = 12;
+    while (index + 8 <= data.size()) {
+        const std::string_view tag(reinterpret_cast<const char*>(data.data() + index), 4);
+        const std::uint32_t payload_size = std::uint32_t(data[index + 4]) |
+                                           (std::uint32_t(data[index + 5]) << 8) |
+                                           (std::uint32_t(data[index + 6]) << 16) |
+                                           (std::uint32_t(data[index + 7]) << 24);
+        index += 8;
+        if (index + payload_size > data.size()) {
+            return copy_bytes(data);
+        }
+        const ByteView payload = data.subspan(index, payload_size);
+        index += payload_size;
+        if (payload_size % 2 == 1 && index < data.size()) {
+            ++index;
+        }
+        if (tag == "EXIF" || tag == "XMP ") {
+            continue;
+        }
+        append_bytes(body, as_bytes(tag));
+        body.push_back(static_cast<Byte>(payload_size & 0xFF));
+        body.push_back(static_cast<Byte>((payload_size >> 8) & 0xFF));
+        body.push_back(static_cast<Byte>((payload_size >> 16) & 0xFF));
+        body.push_back(static_cast<Byte>((payload_size >> 24) & 0xFF));
+        append_bytes(body, payload);
+        if (payload_size % 2 == 1) {
+            body.push_back(0);
+        }
+    }
+    if (body.empty()) {
+        return copy_bytes(data);
+    }
+    const std::uint32_t riff_size = static_cast<std::uint32_t>(4 + body.size());
+    Bytes out{'R', 'I', 'F', 'F'};
+    out.push_back(static_cast<Byte>(riff_size & 0xFF));
+    out.push_back(static_cast<Byte>((riff_size >> 8) & 0xFF));
+    out.push_back(static_cast<Byte>((riff_size >> 16) & 0xFF));
+    out.push_back(static_cast<Byte>((riff_size >> 24) & 0xFF));
+    append_bytes(out, as_bytes("WEBP"));
+    append_bytes(out, ByteView(body));
+    return out;
+}
+
+}  // namespace
+
+Bytes strip_image_metadata(ByteView data) {
+    Bytes stripped = copy_bytes(data);
+    if (starts_with(data, ByteView(kPngSignature))) {
+        stripped = strip_png_metadata(data);
+    } else if (data.size() >= 3 && data[0] == 0xFF && data[1] == 0xD8) {
+        stripped = strip_jpeg_metadata(data);
+    } else if (data.size() >= 12 && to_string(data.subspan(0, 4)) == "RIFF" &&
+               to_string(data.subspan(8, 4)) == "WEBP") {
+        stripped = strip_webp_metadata(data);
+    }
+    if (!detect_inline_image_format(ByteView(stripped))) {
+        return copy_bytes(data);
+    }
+    return stripped;
+}
+
 }  // namespace i2pchat::transfer

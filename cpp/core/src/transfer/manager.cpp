@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <fstream>
 #include <stdexcept>
 #include <system_error>
 
@@ -76,6 +77,28 @@ OutgoingTransfer::OutgoingTransfer(std::filesystem::path path, bool inline_image
 
     size_ = size;
     name_ = sanitize_filename(path_.filename().string());
+    if (inline_image_) {
+        std::ifstream in(path_, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::filesystem::filesystem_error(
+                "Cannot open the file to send", path_,
+                std::make_error_code(std::errc::no_such_file_or_directory));
+        }
+        Bytes raw(static_cast<std::size_t>(size));
+        in.read(reinterpret_cast<char*>(raw.data()),
+                static_cast<std::streamsize>(raw.size()));
+        if (static_cast<std::uint64_t>(in.gcount()) != size) {
+            throw std::filesystem::filesystem_error(
+                "Cannot read the file to send", path_,
+                std::make_error_code(std::errc::io_error));
+        }
+        image_payload_ = strip_image_metadata(ByteView(raw));
+        if (image_payload_.size() > limit) {
+            throw std::length_error("File exceeds the maximum allowed size");
+        }
+        size_ = image_payload_.size();
+        return;
+    }
     stream_ = std::make_shared<std::ifstream>(path_, std::ios::binary);
     if (!stream_->is_open()) {
         throw std::filesystem::filesystem_error(
@@ -98,6 +121,21 @@ std::optional<Frame> OutgoingTransfer::next() {
     }
 
     if (!terminator_sent_) {
+        if (inline_image_) {
+            if (payload_offset_ < image_payload_.size()) {
+                const std::size_t count =
+                    std::min(chunk_bytes_, image_payload_.size() - payload_offset_);
+                const Bytes chunk(image_payload_.begin() +
+                                      static_cast<std::ptrdiff_t>(payload_offset_),
+                                  image_payload_.begin() +
+                                      static_cast<std::ptrdiff_t>(payload_offset_ + count));
+                payload_offset_ += count;
+                sent_ += count;
+                return Frame{'G', encoding::base64_encode(ByteView(chunk))};
+            }
+            terminator_sent_ = true;
+            return Frame{'G', std::string(kImageEndBody)};
+        }
         Bytes chunk(chunk_bytes_);
         stream_->read(reinterpret_cast<char*>(chunk.data()),
                       static_cast<std::streamsize>(chunk.size()));
@@ -485,9 +523,10 @@ void IncomingTransfers::finish_image() {
         return;
     }
 
+    const Bytes stored = strip_image_metadata(ByteView(image_->buffer));
     crypto::init();
     const std::string digest =
-        encoding::hex_encode(ByteView(crypto::sha256(ByteView(image_->buffer))))
+        encoding::hex_encode(ByteView(crypto::sha256(ByteView(stored))))
             .substr(0, 8);
     const std::string filename =
         "img_" + std::to_string(now()) + "_" + digest + "." + *extension;
@@ -500,8 +539,8 @@ void IncomingTransfers::finish_image() {
         fail_image("Cannot save the received image");
         return;
     }
-    out.write(reinterpret_cast<const char*>(image_->buffer.data()),
-              static_cast<std::streamsize>(image_->buffer.size()));
+    out.write(reinterpret_cast<const char*>(stored.data()),
+              static_cast<std::streamsize>(stored.size()));
     out.flush();
     if (!out) {
         out.close();
@@ -512,7 +551,7 @@ void IncomingTransfers::finish_image() {
     out.close();
 
     const std::string name = image_->name;
-    const std::uint64_t size = image_->size;
+    const std::uint64_t size = stored.size();
     const std::uint64_t message_id = image_->message_id;
     image_.reset();
 

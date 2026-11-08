@@ -1,0 +1,14 @@
+Twemoji (raster pack)
+=====================
+
+The files under png/ and manifest.json are the 72x72 PNGs from
+
+  https://github.com/jdecked/twemoji
+  tag 15.1.0, assets/72x72
+
+Graphics are by Twitter, Inc. and other contributors and are licensed
+under CC-BY 4.0. See LICENSE-TWEMOJI in this directory.
+
+Refresh after changing EMOJI_CHARS, from the repo root:
+
+  python3 scripts/vendor_twemoji.py
