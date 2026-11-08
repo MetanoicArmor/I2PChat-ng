@@ -41,6 +41,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -65,6 +66,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -1359,6 +1361,36 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     }
 }
 
+/**
+ * Integer field that keeps a string draft so the user can clear digits and type
+ * a replacement. Parsed ints are pushed up only when the draft is a valid number;
+ * empty input leaves the last committed [value] unchanged until Save.
+ */
+@Composable
+private fun IntDraftField(
+    value: Int,
+    onIntChange: (Int) -> Unit,
+    label: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    supportingText: @Composable (() -> Unit)? = null,
+    maxDigits: Int = 5,
+) {
+    var text by remember { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            val filtered = raw.filter { it.isDigit() }.take(maxDigits)
+            text = filtered
+            filtered.toIntOrNull()?.let(onIntChange)
+        },
+        label = label,
+        supportingText = supportingText,
+        modifier = modifier,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
@@ -1401,17 +1433,23 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
                 Text(stringResource(R.string.router_no_bundled))
             }
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                prefs.tunnelLength.toString(),
-                { prefs = prefs.copy(tunnelLength = it.toIntOrNull() ?: prefs.tunnelLength) },
+            IntDraftField(
+                value = prefs.tunnelLength,
+                onIntChange = { prefs = prefs.copy(tunnelLength = it) },
                 label = {
                     Text(stringResource(R.string.tunnel_length, RouterPrefs.MIN_TUNNEL_LENGTH, RouterPrefs.MAX_TUNNEL_LENGTH))
                 },
                 supportingText = { Text(stringResource(R.string.tunnel_length_hint, RouterPrefs.DEFAULT_TUNNEL_LENGTH)) },
                 modifier = Modifier.fillMaxWidth(),
+                maxDigits = 1,
             )
             OutlinedTextField(prefs.systemSamHost, { prefs = prefs.copy(systemSamHost = it); hostError = null }, label = { Text(stringResource(R.string.external_host)) }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(prefs.systemSamPort.toString(), { prefs = prefs.copy(systemSamPort = it.toIntOrNull() ?: prefs.systemSamPort) }, label = { Text(stringResource(R.string.external_sam_port)) }, modifier = Modifier.fillMaxWidth())
+            IntDraftField(
+                value = prefs.systemSamPort,
+                onIntChange = { prefs = prefs.copy(systemSamPort = it) },
+                label = { Text(stringResource(R.string.external_sam_port)) },
+                modifier = Modifier.fillMaxWidth(),
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.router_allow_remote), modifier = Modifier.weight(1f))
                 Switch(
@@ -1423,10 +1461,30 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
                 )
             }
             if (BuildConfig.BUNDLED_I2PD) {
-                OutlinedTextField(prefs.bundledSamPort.toString(), { prefs = prefs.copy(bundledSamPort = it.toIntOrNull() ?: prefs.bundledSamPort) }, label = { Text(stringResource(R.string.bundled_sam_port)) }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledHttpProxyPort.toString(), { prefs = prefs.copy(bundledHttpProxyPort = it.toIntOrNull() ?: prefs.bundledHttpProxyPort) }, label = { Text(stringResource(R.string.http_proxy)) }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledSocksProxyPort.toString(), { prefs = prefs.copy(bundledSocksProxyPort = it.toIntOrNull() ?: prefs.bundledSocksProxyPort) }, label = { Text(stringResource(R.string.socks_proxy)) }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(prefs.bundledControlHttpPort.toString(), { prefs = prefs.copy(bundledControlHttpPort = it.toIntOrNull() ?: prefs.bundledControlHttpPort) }, label = { Text(stringResource(R.string.control_http)) }, modifier = Modifier.fillMaxWidth())
+                IntDraftField(
+                    value = prefs.bundledSamPort,
+                    onIntChange = { prefs = prefs.copy(bundledSamPort = it) },
+                    label = { Text(stringResource(R.string.bundled_sam_port)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                IntDraftField(
+                    value = prefs.bundledHttpProxyPort,
+                    onIntChange = { prefs = prefs.copy(bundledHttpProxyPort = it) },
+                    label = { Text(stringResource(R.string.http_proxy)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                IntDraftField(
+                    value = prefs.bundledSocksProxyPort,
+                    onIntChange = { prefs = prefs.copy(bundledSocksProxyPort = it) },
+                    label = { Text(stringResource(R.string.socks_proxy)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                IntDraftField(
+                    value = prefs.bundledControlHttpPort,
+                    onIntChange = { prefs = prefs.copy(bundledControlHttpPort = it) },
+                    label = { Text(stringResource(R.string.control_http)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
             Spacer(Modifier.height(12.dp))
             hostError?.let {
