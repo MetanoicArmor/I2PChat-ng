@@ -157,12 +157,10 @@ _EN: dict[str, str] = {
     ),
     # TUI
     "tui.compose_placeholder": (
-        "Message. Enter = send, Shift+Enter / Ctrl+J / Alt+Enter = new line. "
-        "Type /help for commands."
+        "Message. Enter = send, Ctrl+J = new line. Type /help for commands."
     ),
     "tui.compose_help": (
-        "Compose: Enter sends; Shift+Enter, Ctrl+Enter (if your terminal reports it), "
-        "Ctrl+J or Alt+Enter insert a new line; Ctrl+S also sends."
+        "Compose: Enter sends; Ctrl+J inserts a new line; Ctrl+S also sends."
     ),
     "tui.status_hint": "F9 / Esc: back to chat · V: toggle verbose log",
     "tui.verbose_on": "Verbose log enabled.",
@@ -306,12 +304,10 @@ _RU: dict[str, str] = {
         "Встроенный роутер i2pd неожиданно остановился. Перезапустите его в настройках роутера."
     ),
     "tui.compose_placeholder": (
-        "Сообщение. Enter — отправить, Shift+Enter / Ctrl+J / Alt+Enter — новая строка. "
-        "/help — список команд."
+        "Сообщение. Enter — отправить, Ctrl+J — новая строка. /help — список команд."
     ),
     "tui.compose_help": (
-        "Ввод: Enter отправляет; Shift+Enter, Ctrl+Enter (если терминал его различает), "
-        "Ctrl+J или Alt+Enter — новая строка; Ctrl+S тоже отправляет."
+        "Ввод: Enter отправляет; Ctrl+J — новая строка; Ctrl+S тоже отправляет."
     ),
     "tui.status_hint": "F9 / Esc — назад в чат · V — подробный лог вкл/выкл",
     "tui.verbose_on": "Подробный лог включён.",

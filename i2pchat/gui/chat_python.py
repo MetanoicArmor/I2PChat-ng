@@ -187,11 +187,11 @@ _SERVICE_MESSAGE_KINDS = frozenset({"info", "success", "disconnect", "system"})
 
 
 class ComposeTextArea(TextArea):
-    """Compose box: Enter sends, newline via Shift/Ctrl/Alt+Enter or Ctrl+J.
+    """Compose box: Enter sends, Ctrl+J inserts a newline.
 
-    Most terminals send the same byte for Enter and Ctrl+Enter, so Ctrl+Enter
-    only inserts a newline where the terminal reports it as a distinct key
-    (kitty keyboard protocol); Ctrl+J and Alt+Enter work everywhere.
+    Shift+Enter, Ctrl+Enter and Alt+Enter are the same byte as Enter in most
+    terminals, so they send the message. If a terminal does report them as
+    separate keys, those still insert a newline.
     """
 
     NEWLINE_KEYS = frozenset({"shift+enter", "ctrl+enter", "alt+enter", "ctrl+j"})

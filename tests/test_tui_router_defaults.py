@@ -136,7 +136,8 @@ def test_tui_primary_function_key_order_is_sequential() -> None:
     labels = [label for _key, _action, label in I2PChat.BINDINGS[:3]]
 
     assert labels == ["Quit", "Quit", "Send"]
-    # Ctrl+Enter inserts a newline in the compose box (Enter sends).
+    # Enter sends. Ctrl+Enter is not a binding: most terminals cannot tell it
+    # from Enter, and the compose box only promises Ctrl+J for a new line.
     assert "ctrl+enter" not in bindings
 
     assert "ctrl+r" not in bindings

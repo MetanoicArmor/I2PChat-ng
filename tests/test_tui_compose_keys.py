@@ -1,4 +1,8 @@
-"""TUI compose box: Enter sends, Shift/Ctrl/Alt+Enter and Ctrl+J insert a newline."""
+"""TUI compose box: Enter sends, Ctrl+J inserts a newline.
+
+Shift/Ctrl/Alt+Enter insert a newline only when the terminal reports them
+as distinct keys. The placeholder advertises Ctrl+J, which always arrives.
+"""
 
 from __future__ import annotations
 
