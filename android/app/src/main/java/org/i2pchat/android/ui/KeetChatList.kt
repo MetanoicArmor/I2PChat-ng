@@ -116,11 +116,6 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
     }
     if (startSheet) {
         ModalBottomSheet(onDismissRequest = { startSheet = false }) {
-            Text(
-                stringResource(R.string.start_chat),
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-            )
             SheetAction(stringResource(R.string.menu_new_chat)) {
                 startSheet = false
                 newPeer = true

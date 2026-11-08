@@ -83,7 +83,6 @@
     <string name="search">Поиск</string>
     <string name="cd_search">Поиск</string>
     <string name="cd_attach">Вложение</string>
-    <string name="start_chat">Начать чат</string>
     <string name="paste_invite">Вставить приглашение</string>
     <string name="group_default_title">Группа</string>
     <string name="group_preview">Группа · %1$s</string>
