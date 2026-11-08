@@ -1183,18 +1183,28 @@ class I2PChat(App):
         """Выбранный в TUI пир важнее last transport session (мульти-live)."""
         return self.selected_peer or self.core.current_peer_addr or None
 
+    def _reset_chat_view(self) -> None:
+        """Drop the on-screen transcript so the next chat does not append under it."""
+        self._recent_messages.clear()
+        self._message_ref_by_id.clear()
+        try:
+            self.chat_log.clear()
+        except Exception:
+            return
+
     def _set_selected_peer(
         self,
         peer: Optional[str],
         *,
         remember: bool,
         announce: Optional[str] = None,
+        banner: bool = False,
     ) -> bool:
         normalized = normalize_peer_address(peer or "") if peer else None
         if peer and not normalized:
             return False
         old = self.selected_peer
-        if old == normalized:
+        if old == normalized and not banner:
             return True
         self._save_history_if_needed()
         self.selected_peer = normalized
@@ -1208,8 +1218,15 @@ class I2PChat(App):
                 changed = True
             if changed:
                 self._save_contacts_book()
+        if old != normalized or banner:
+            self._reset_chat_view()
+            if banner and normalized:
+                self.post(
+                    "system",
+                    f"Switched to chat with {self._peer_display_name(normalized)}.",
+                )
         self._try_load_history(force=True)
-        if announce and normalized:
+        if announce and normalized and not banner:
             self.post("system", f"{announce}: {normalized}")
         self._refresh_status_bar()
         return True
@@ -1365,13 +1382,15 @@ class I2PChat(App):
         self._refresh_status_bar()
         return True
 
-    def _clear_active_group(self) -> bool:
+    def _clear_active_group(self, *, reload_peer: bool = True) -> bool:
         if not self._active_group_id:
             return False
         self._active_group_id = None
         self._loaded_group_history_id = None
         self._sync_compose_draft_to_peer_key(self._current_target_peer())
-        self._try_load_history(force=True)
+        if reload_peer:
+            self._reset_chat_view()
+            self._try_load_history(force=True)
         self._refresh_status_bar()
         return True
 
@@ -1397,6 +1416,7 @@ class I2PChat(App):
             chat_log.clear()
         header = self._group_display_name(conversation.state.group_id, title=conversation.state.title)
         member_count = max(0, len(conversation.state.members) - 1)
+        self.post("system", f"Switched to group chat {header}.")
         self.post("system", f"--- Group: {header} ({member_count} peer{'s' if member_count != 1 else ''}) ---")
         if not conversation.history:
             self.post("system", "No local group messages yet.")
@@ -3463,8 +3483,8 @@ class TuiContactsScreen(ModalScreen[None]):
         peer = self._selected_peer()
         if not peer:
             return
-        self.host._clear_active_group()
-        self.host._set_selected_peer(peer, remember=True, announce="Selected peer")
+        self.host._clear_active_group(reload_peer=False)
+        self.host._set_selected_peer(peer, remember=True, banner=True)
         self.dismiss(None)
 
     def action_show_info(self) -> None:
