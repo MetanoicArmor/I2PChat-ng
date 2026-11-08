@@ -223,6 +223,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     val state: StateFlow<ChatUiState> = _state
     private var pollJob: Job? = null
     private var draftJob: Job? = null
+    /** Peers with a dial already in flight, so opening the chat twice does not start two handshakes. */
+    private val dialingPeers = mutableSetOf<String>()
 
     init {
         if (!NativeEngine.available) {
@@ -683,14 +685,64 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun selectConversation(id: String, group: Boolean) {
         persistDraft(_state.value.selectedId, _state.value.compose)
         val draft = _state.value.drafts[id].orEmpty()
+        val alreadySaved = group || id.isBlank() || _state.value.contacts.any { it.addr == id }
         _state.update {
+            val contacts = if (alreadySaved) {
+                it.contacts
+            } else {
+                listOf(
+                    ContactUi(addr = id, lastActivityTs = java.time.Instant.now().toString()),
+                ) + it.contacts
+            }
             it.copy(
                 selectedId = id,
                 selectedIsGroup = group,
                 compose = draft,
-                contacts = it.contacts.map { c -> if (c.addr == id) c.copy(unread = 0) else c },
+                contacts = contacts.map { c -> if (c.addr == id) c.copy(unread = 0) else c },
                 groups = it.groups.map { c -> if (c.addr == id) c.copy(unread = 0) else c },
             )
+        }
+        // A brand-new direct chat dials immediately. Reopening a saved chat does not.
+        val dial = !alreadySaved && _state.value.peerLink(id) != "secure"
+        if (dial) setPeerState(id, "connecting")
+        if (!group && id.isNotBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val canonical = runCatching { NativeEngine.nativeRememberPeer(id) }.getOrDefault("")
+                if (canonical.isBlank() && !alreadySaved) {
+                    onMain {
+                        _state.update { state ->
+                            state.copy(contacts = state.contacts.filterNot { it.addr == id })
+                        }
+                        if (dial) setPeerState(id, "failed")
+                    }
+                } else if (canonical.isNotBlank() && canonical != id) {
+                    onMain {
+                        _state.update { state ->
+                            if (state.selectedId != id) {
+                                state
+                            } else {
+                                val drafts = state.drafts.toMutableMap()
+                                drafts.remove(id)?.let { text -> drafts[canonical] = text }
+                                val link = state.peerStates[id]
+                                state.copy(
+                                    selectedId = canonical,
+                                    drafts = drafts,
+                                    contacts = state.contacts.map { contact ->
+                                        if (contact.addr == id) contact.copy(addr = canonical) else contact
+                                    },
+                                    peerStates = if (link == null) {
+                                        state.peerStates
+                                    } else {
+                                        state.peerStates + (canonical to link)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                refreshSnapshot()
+                if (dial && canonical.isNotBlank()) dialPeer(canonical)
+            }
         }
         loadHistory()
     }
@@ -768,6 +820,30 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             }
         }
         onMain { if (_state.value.peerStates[addr] == "connecting") setPeerState(addr, "failed") }
+    }
+
+    /** Same dial `/connect` starts on desktop: the badge leaves offline before the first message. */
+    private suspend fun dialPeer(addr: String) {
+        if (!synchronized(dialingPeers) { dialingPeers.add(addr) }) return
+        try {
+            if (peerLiveInSnapshot(addr)) {
+                onMain { setPeerState(addr, "secure") }
+                return
+            }
+            onMain { setPeerState(addr, "connecting") }
+            val ok = runCatching { NativeEngine.nativeConnectPeer(addr) }.getOrDefault(false)
+            if (!ok) {
+                onMain {
+                    setPeerState(addr, "failed")
+                    appendNotice("peer.connect_failed", NoticeUi.LEVEL_USER, addr)
+                }
+            } else {
+                onMain { setPeerState(addr, "secure") }
+            }
+            refreshSnapshot()
+        } finally {
+            synchronized(dialingPeers) { dialingPeers.remove(addr) }
+        }
     }
 
     fun connectSelected() {

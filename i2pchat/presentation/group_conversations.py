@@ -124,6 +124,17 @@ def render_group_control_text(
             return f"{actor} joined the group."
         return f"{actor} joined the group."
 
+    if op == "add":
+        raw_ids = control_payload.get("added_member_ids")
+        count = 0
+        if isinstance(raw_ids, (list, tuple)):
+            count = len([item for item in raw_ids if str(item).strip()])
+        if count == 1:
+            return f"{actor} added a member to the group."
+        if count:
+            return f"{actor} added {count} members to the group."
+        return f"{actor} updated the group members."
+
     detail_parts: list[str] = []
 
     title = str(control_payload.get("title") or "").strip()

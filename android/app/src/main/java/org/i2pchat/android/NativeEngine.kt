@@ -71,6 +71,8 @@ object NativeEngine {
     @JvmStatic external fun nativeTrustRespond(peer: String, keyHex: String, accept: Boolean)
     /** Returns false when the offer is no longer pending (peer dropped, newer offer). */
     @JvmStatic external fun nativeFileRespond(peer: String, accept: Boolean): Boolean
+    /** Saves a direct chat in the contact book. Returns the canonical address, or empty if it is not a destination. */
+    @JvmStatic external fun nativeRememberPeer(peer: String): String
     @JvmStatic external fun nativeConnectPeer(peer: String): Boolean
     @JvmStatic external fun nativeDisconnectPeer(peer: String)
     @JvmStatic external fun nativeSendText(peer: String, text: String): String

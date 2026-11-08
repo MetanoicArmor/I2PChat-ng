@@ -863,6 +863,34 @@ Java_org_i2pchat_android_NativeEngine_nativeFileRespond(JNIEnv* env, jclass, jst
     }
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeRememberPeer(JNIEnv* env, jclass, jstring j_peer) {
+    if (!g_engine.service) {
+        return utf8_to_jstring(env, "");
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    try {
+        const std::string normalized = g_engine.on_core<std::string>([peer] {
+            auto& service = *g_engine.service;
+            const std::string addr = i2pchat::storage::normalize_contact_address(peer);
+            if (addr.empty()) {
+                return std::string();
+            }
+            auto& book = service.contacts();
+            if (!book.has_peer(addr)) {
+                book.remember_peer(addr);
+                book.set_last_active_peer(addr);
+                book.touch_peer_message_meta(addr, "", i2pchat::storage::now_iso8601_utc());
+                service.save_contacts();
+            }
+            return addr;
+        });
+        return utf8_to_jstring(env, normalized);
+    } catch (...) {
+        return utf8_to_jstring(env, "");
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeConnectPeer(JNIEnv* env, jclass, jstring j_peer) {
     if (!g_engine.service) {

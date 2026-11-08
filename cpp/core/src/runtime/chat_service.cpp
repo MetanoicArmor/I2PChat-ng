@@ -116,6 +116,10 @@ struct ChatService::Peer {
     /// Cancelled to wake a `connect_peer` that is waiting on the handshake.
     std::shared_ptr<asio::steady_timer> connect_waiter;
     bool connect_succeeded = false;
+    /// True from the start of a dial until it returns, including the SAM connect
+    /// that happens before `connect_waiter` exists. A second dial waits this out
+    /// instead of opening another stream.
+    bool connect_inflight = false;
     /// Set once a secure channel existed this run. Cleared only by the user hanging up.
     bool had_secure = false;
     bool user_disconnected = false;
@@ -629,6 +633,31 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     if (live_link(peer_entry.link.get(), sessions_, peer_addr)) {
         co_return true;
     }
+
+    // The handshake timer does not exist yet while SAM is still building the
+    // stream. Cover that whole stretch so a send during the dial joins it.
+    // This must run before the dead-link reset below, which would otherwise
+    // drop a handshake that is still in progress.
+    if (peer_entry.connect_inflight) {
+        auto gate = std::make_shared<asio::steady_timer>(executor_);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(150);
+        while (std::chrono::steady_clock::now() < deadline) {
+            gate->expires_after(std::chrono::milliseconds(200));
+            boost::system::error_code ignored;
+            co_await gate->async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+            Peer* pending = find_peer(peer_addr);
+            if (pending == nullptr) {
+                co_return false;
+            }
+            if (!pending->connect_inflight) {
+                co_return live_link(pending->link.get(), sessions_, peer_addr) ||
+                         pending->connect_succeeded;
+            }
+        }
+        co_return false;
+    }
+
     if (peer_entry.link != nullptr &&
         (!peer_entry.link->secure() || peer_entry.link->closed() ||
          !sessions_.live_ready(peer_addr))) {
@@ -649,6 +678,12 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
         }
         co_return false;
     }
+
+    peer_entry.connect_inflight = true;
+    struct ClearInflight {
+        Peer& peer;
+        ~ClearInflight() { peer.connect_inflight = false; }
+    } clear_inflight{peer_entry};
 
     // Tie-break for simultaneous dials is handled in on_established (prefer inbound).
     // Do not wait here — that delayed the first message by up to 15s when the peer
@@ -1662,9 +1697,25 @@ groups::GroupState ChatService::update_group(const std::string& group_id, std::s
     }
     groups::GroupState state(existing->state.group_id(), existing->state.epoch() + 1,
                              std::move(roster), std::move(title));
-    return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
-                                ByteView(identity_.signing_seed), std::nullopt)
-        .state;
+    const groups::GroupState saved =
+        groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
+                             ByteView(identity_.signing_seed), std::nullopt)
+            .state;
+    nlohmann::json added = nlohmann::json::array();
+    const std::string local = groups::normalize_member_id(identity_.local_addr);
+    for (const std::string& member : saved.members()) {
+        if (!member.empty() && !storage::same_i2p_destination(member, local)) {
+            added.push_back(member);
+        }
+    }
+    if (!added.empty()) {
+        spawn_group_control(saved.group_id(),
+                            {{"op", "add"},
+                             {"added_member_ids", std::move(added)},
+                             {"epoch", saved.epoch()},
+                             {"title", saved.title()}});
+    }
+    return saved;
 }
 
 bool ChatService::delete_group(const std::string& group_id) {
@@ -1748,9 +1799,19 @@ groups::GroupState ChatService::join_group_invite(std::string_view token) {
             "Group invite signing key does not match the inviter's pinned identity key");
     }
     groups::GroupState state(invite.group_id, invite.epoch, invite.members, invite.title);
-    return groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
-                                ByteView(identity_.signing_seed), std::nullopt)
-        .state;
+    const groups::GroupState saved =
+        groups::upsert_state(paths_, state, ByteView(identity_.identity_key),
+                             ByteView(identity_.signing_seed), std::nullopt)
+            .state;
+    // Introduce this device to everyone already on the invite. A peer who
+    // joined earlier would otherwise reject our messages as an unknown member.
+    const std::string local = groups::normalize_member_id(identity_.local_addr);
+    spawn_group_control(saved.group_id(),
+                        {{"op", "join"},
+                         {"joined_member_id", local},
+                         {"epoch", saved.epoch()},
+                         {"title", saved.title()}});
+    return saved;
 }
 
 void ChatService::append_group_text(const std::string& group_id, std::string text) {
@@ -1850,14 +1911,43 @@ bool ChatService::ingest_group_transport(const std::string& peer_addr, const std
             }
         }
     }
+    std::vector<std::string> added_ids;
+    if (op == "add" && decoded->envelope.payload.is_object()) {
+        const auto field = decoded->envelope.payload.find("added_member_ids");
+        if (field != decoded->envelope.payload.end() && field->is_array()) {
+            for (const nlohmann::json& item : *field) {
+                if (!item.is_string()) {
+                    continue;
+                }
+                const std::string id = groups::normalize_member_id(item.get<std::string>());
+                if (!id.empty()) {
+                    added_ids.push_back(id);
+                }
+            }
+        }
+    }
     if (!stored->state.has_member(sender) && op != "join") {
         emit_error("Group transport sender is not a member of the known group roster");
         return true;
     }
 
     std::vector<std::string> members = stored->state.members();
-    if (op == "join" && !stored->state.has_member(sender)) {
+    const auto already_member = [&members](const std::string& id) {
+        return std::any_of(members.begin(), members.end(), [&id](const std::string& member) {
+            return storage::same_i2p_destination(member, id);
+        });
+    };
+    if (op == "join" && !already_member(sender)) {
         members.push_back(sender);
+    }
+    // A member we already trust may introduce another address. The embedded
+    // roster snapshot is not consulted, and nobody is removed.
+    if (op == "add" && stored->state.has_member(sender)) {
+        for (const std::string& id : added_ids) {
+            if (!already_member(id)) {
+                members.push_back(id);
+            }
+        }
     }
     std::string title = stored->state.title();
     if (op != "join" && decoded->envelope.content_type == groups::ContentType::GroupControl &&
@@ -2010,6 +2100,44 @@ asio::awaitable<void> ChatService::send_group_text(std::string group_id, std::st
             std::string(groups::delivery_status_name(delivery.status));
         entry.delivery_reasons[delivery.recipient_id] = delivery.reason;
     }
+    (void)groups::append_history(paths_, existing->state, entry, ByteView(identity_.identity_key),
+                                 ByteView(identity_.signing_seed), result.envelope.group_seq + 1);
+    emit_group_message(existing->state.group_id());
+}
+
+void ChatService::spawn_group_control(std::string group_id, nlohmann::json payload) {
+    asio::co_spawn(
+        executor_,
+        [this, group_id = std::move(group_id),
+         payload = std::move(payload)]() mutable -> asio::awaitable<void> {
+            try {
+                co_await deliver_group_control(std::move(group_id), std::move(payload));
+            } catch (const std::exception& error) {
+                emit_error(std::string("Group membership announce failed: ") + error.what());
+            }
+        },
+        asio::detached);
+}
+
+asio::awaitable<void> ChatService::deliver_group_control(std::string group_id,
+                                                        nlohmann::json payload) {
+    const std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing) {
+        co_return;
+    }
+    ensure_group_coordinator();
+    group_coordinator_->prime_sequence(existing->state.group_id(), existing->next_group_seq);
+    const groups::SendResult result = co_await group_coordinator_->send_control(
+        existing->state, identity_.local_addr, std::move(payload));
+    groups::HistoryEntry entry;
+    entry.kind = "me";
+    entry.sender_id = identity_.local_addr;
+    entry.content_type = result.envelope.content_type;
+    entry.payload = result.envelope.payload;
+    entry.msg_id = result.envelope.msg_id;
+    entry.group_seq = result.envelope.group_seq;
+    entry.epoch = result.envelope.epoch;
+    entry.created_at = result.envelope.created_at;
     (void)groups::append_history(paths_, existing->state, entry, ByteView(identity_.identity_key),
                                  ByteView(identity_.signing_seed), result.envelope.group_seq + 1);
     emit_group_message(existing->state.group_id());

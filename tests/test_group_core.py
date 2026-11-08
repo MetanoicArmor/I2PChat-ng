@@ -1651,6 +1651,134 @@ class GroupCoreTests(unittest.IsolatedAsyncioTestCase):
             assert alice_state is not None
             self.assertIn(CAROL_BARE, alice_state.members)
 
+    def test_known_member_add_extends_roster_without_trusting_snapshot(self) -> None:
+        phone = "dddddddddddddddddddddddddddddddddddddddd"
+        injected = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core = I2PChatCore(profile="alice")
+            core.get_profile_data_dir = lambda create=True: tmpdir  # type: ignore[method-assign]
+            core.my_dest = _DummyDest(ALICE_BARE)
+            created = core.create_group(
+                title="Old group",
+                members=[BOB_BARE],
+                group_id="core-group-add",
+                epoch=1,
+            )
+            state = GroupState(
+                group_id=created.group_id,
+                epoch=2,
+                members=(ALICE_BARE, BOB_BARE, phone, injected),
+                title="Hijack",
+            )
+            envelope = GroupEnvelope(
+                group_id=created.group_id,
+                epoch=2,
+                msg_id="add-phone",
+                sender_id=BOB_BARE,
+                group_seq=1,
+                content_type=GroupContentType.GROUP_CONTROL,
+                payload={
+                    "op": "add",
+                    "added_member_ids": [phone],
+                    "epoch": 2,
+                },
+            )
+            wire = encode_group_transport_text(
+                state,
+                envelope,
+                GroupRecipientDeliveryMetadata(
+                    recipient_id=ALICE_BARE,
+                    delivery_id="add-phone:alice",
+                ),
+            )
+            imported = core.import_group_transport(wire, source_peer=BOB_BARE)
+            saved = core.load_group_state(created.group_id)
+            assert imported is not None
+            assert saved is not None
+            self.assertEqual(imported.status, GroupImportStatus.IMPORTED)
+            self.assertIn(phone, saved.members)
+            self.assertNotIn(injected, saved.members)
+            self.assertEqual(saved.title, "Old group")
+
+            stranger = GroupEnvelope(
+                group_id=created.group_id,
+                epoch=2,
+                msg_id="add-stranger",
+                sender_id=injected,
+                group_seq=2,
+                content_type=GroupContentType.GROUP_CONTROL,
+                payload={
+                    "op": "add",
+                    "added_member_ids": [injected],
+                    "epoch": 2,
+                },
+            )
+            rejected = core.import_group_transport(
+                encode_group_transport_text(
+                    state,
+                    stranger,
+                    GroupRecipientDeliveryMetadata(
+                        recipient_id=ALICE_BARE,
+                        delivery_id="add-stranger:alice",
+                    ),
+                ),
+                source_peer=injected,
+            )
+            assert rejected is not None
+            self.assertEqual(rejected.status, GroupImportStatus.INVALID)
+            self.assertNotIn(injected, core.load_group_state(created.group_id).members)
+
+    async def test_repeat_invite_adds_a_device_that_joined_later(self) -> None:
+        phone = "dddddddddddddddddddddddddddddddddddddddd"
+        with tempfile.TemporaryDirectory() as alice_dir, tempfile.TemporaryDirectory() as carol_dir:
+            alice = I2PChatCore(profile="alice")
+            alice.get_profile_data_dir = lambda create=True: alice_dir  # type: ignore[method-assign]
+            alice.my_dest = _DummyDest(ALICE_BARE)
+            alice.my_signing_seed, alice.my_signing_public = crypto.generate_signing_keypair()
+            group_state = alice.create_group(
+                title="Old group",
+                members=[BOB_BARE],
+                group_id="core-group-reinvite",
+                epoch=1,
+            )
+            invite_text = alice.create_group_invite(group_state.group_id)
+
+            carol = I2PChatCore(profile="carol")
+            carol.get_profile_data_dir = lambda create=True: carol_dir  # type: ignore[method-assign]
+            carol.my_dest = _DummyDest(CAROL_BARE)
+            carol._send_group_envelope_live = AsyncMock(  # type: ignore[method-assign]
+                return_value=GroupTransportOutcome(
+                    accepted=True,
+                    reason="live-session",
+                    transport_message_id="live-join",
+                )
+            )
+            carol._send_group_envelope_via_group_blindbox = AsyncMock(  # type: ignore[method-assign]
+                return_value=GroupTransportOutcome(
+                    accepted=True,
+                    reason="blindbox-ready",
+                    transport_message_id="queue-join",
+                )
+            )
+            joined = await carol.join_group_from_invite(invite_text)
+            self.assertNotIn(phone, joined.members)
+            first_calls = carol._send_group_envelope_live.await_count  # type: ignore[attr-defined]
+
+            alice.update_group(
+                group_state.group_id,
+                title="Old group",
+                members=[BOB_BARE, phone],
+            )
+            fresh_invite = alice.create_group_invite(group_state.group_id)
+            again = await carol.join_group_from_invite(fresh_invite)
+            self.assertIn(phone, again.members)
+            self.assertIn(CAROL_BARE, again.members)
+            self.assertIn(ALICE_BARE, again.members)
+            self.assertEqual(
+                carol._send_group_envelope_live.await_count,  # type: ignore[attr-defined]
+                first_calls,
+            )
+
     async def test_direct_chat_behavior_still_works(self) -> None:
         core = I2PChatCore(profile="alice")
         attach_mock_live_session(core, BOB_BARE, (object(), _DummyWriter()))

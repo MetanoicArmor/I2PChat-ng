@@ -278,6 +278,10 @@ private:
     bool ingest_group_transport(const std::string& peer_addr, const std::string& text);
     void ensure_group_coordinator();
     void emit_group_message(const std::string& group_id) const;
+    /// Fan a membership control out to the current roster. Used when someone
+    /// joins or the local roster gains an address the others may not know yet.
+    void spawn_group_control(std::string group_id, nlohmann::json payload);
+    asio::awaitable<void> deliver_group_control(std::string group_id, nlohmann::json payload);
     void on_established(PeerLink& link);
     /// Redial a peer that already had a secure channel, 10s then 20… up to 60s.
     void schedule_auto_reconnect(Peer& peer);

@@ -3585,6 +3585,44 @@ class I2PChatCore:
                 )
             )
 
+    def _schedule_group_roster_announce(self, group_id: str) -> None:
+        """Tell current members which addresses this profile's roster includes."""
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._announce_group_roster(group_id))
+
+    async def _announce_group_roster(self, group_id: str) -> None:
+        state = self.load_group_state(group_id)
+        if state is None:
+            return
+        try:
+            local_member = self._local_group_member_id()
+        except Exception:
+            return
+        added = [
+            member
+            for member in state.members
+            if member and not same_i2p_destination(member, local_member)
+        ]
+        if not added:
+            return
+        try:
+            await self.send_group_control(
+                group_id,
+                {
+                    "op": "add",
+                    "added_member_ids": added,
+                    "epoch": int(state.epoch),
+                    "title": state.title,
+                },
+            )
+        except Exception:
+            logger.debug("Group roster announce failed", exc_info=True)
+
     def _schedule_group_peer_intros(self, peer_addrs: list[str]) -> None:
         if not peer_addrs or not self._group_auto_intro_enabled():
             return
@@ -3715,6 +3753,9 @@ class I2PChatCore:
             saved.state,
             group_label=saved.state.title or saved.state.group_id,
         )
+        # People who joined earlier keep their own roster. Tell them about the
+        # addresses this save includes, so a second device is not rejected.
+        self._schedule_group_roster_announce(saved.state.group_id)
         return saved.state
 
     def create_group_invite(self, group_id: str) -> str:
@@ -3762,6 +3803,45 @@ class I2PChatCore:
         local_member_id = self._local_group_member_id()
         existing = self.load_group_state(invite.group_id)
         if existing is not None and local_member_id in existing.members:
+            # A newer invite from someone already in the group can add a device
+            # that joined after we did. It never removes anyone.
+            inviter = normalize_member_id(invite.inviter_id)
+            inviter_known = bool(inviter) and any(
+                same_i2p_destination(inviter, member) for member in existing.members
+            )
+            if inviter_known:
+                merged = list(existing.members)
+                seen = {normalize_member_id(member) for member in merged if member}
+                added_member = False
+                for raw in invite.members:
+                    member_id = normalize_member_id(raw)
+                    if not member_id or member_id in seen:
+                        continue
+                    merged.append(member_id)
+                    seen.add(member_id)
+                    added_member = True
+                if added_member:
+                    merged_state = GroupState(
+                        group_id=existing.group_id,
+                        epoch=max(int(existing.epoch), int(invite.epoch)),
+                        members=tuple(merged),
+                        title=existing.title or invite.title,
+                        created_at=existing.created_at,
+                        updated_at=utc_now(),
+                    )
+                    prev_members = frozenset(existing.members)
+                    saved = self.save_group(merged_state, next_group_seq=None)
+                    self._emit_system(
+                        f"Group members updated: {saved.state.title or saved.state.group_id} "
+                        f"({max(0, len(saved.state.members) - 1)} peers)."
+                    )
+                    self._on_group_membership_changed(
+                        prev_members,
+                        int(existing.epoch),
+                        saved.state,
+                        group_label=saved.state.title or saved.state.group_id,
+                    )
+                    return saved.state
             self._emit_system(
                 f"Already in group: {existing.title or existing.group_id}."
             )
@@ -7509,6 +7589,15 @@ class I2PChatCore:
             joined = normalize_member_id(str(payload.get("joined_member_id") or ""))
             if joined:
                 members.append(joined)
+        elif op == "add":
+            # Only ids named in the control. The state snapshot that rode along
+            # is ignored, so a member cannot replace the roster.
+            raw_ids = payload.get("added_member_ids")
+            if isinstance(raw_ids, list):
+                for raw in raw_ids:
+                    member_id = normalize_member_id(str(raw or ""))
+                    if member_id:
+                        members.append(member_id)
         control_epoch = int(payload.get("epoch", epoch))
         return GroupState(
             group_id=state.group_id,
