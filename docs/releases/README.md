@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.5.7** | [RELEASE_1.5.7.md](RELEASE_1.5.7.md) — TUI `/img` crash fix; profile-switch during SAM start; Contacts Use dials; `/savefile`; Android sent-image thumbs |
 | **1.5.6** | [RELEASE_1.5.6.md](RELEASE_1.5.6.md) — Android dial-on-open; group roster announce for multi-device; strip image metadata; Twemoji; TUI/Android polish |
 | **1.5.5** | [RELEASE_1.5.5.md](RELEASE_1.5.5.md) — Android chat shell, terminal palettes, profile tools; notification tap keeps the session; image transfer read-timeout fix; static macOS bundled i2pd |
 | **1.5.4** | [RELEASE_1.5.4.md](RELEASE_1.5.4.md) — Android bundled i2pd via I2pdNative (JNI_OnLoad fix); shorter compact group invites |
