@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -58,22 +60,34 @@ data class MessageUi(
             imagePath.isNotBlank() -> File(imagePath).name
             filePath.isNotBlank() -> File(filePath).name
             text.startsWith("[file] ") -> File(text.removePrefix("[file] ").trim()).name
+            // A picture whose file is no longer there still has a name to show.
+            text.startsWith("[image] ") -> File(text.removePrefix("[image] ").trim()).name
             else -> ""
         }
 }
 
-private fun resolveMediaPath(text: String, prefix: String, appRoot: File, subdirs: List<String>): String {
+private fun resolveMediaPath(
+    text: String,
+    prefix: String,
+    appRoot: File,
+    subdirs: List<String>,
+    extraDirs: List<File>,
+): String {
     if (!text.startsWith(prefix)) return ""
     val raw = text.removePrefix(prefix).trim()
     if (raw.isBlank()) return ""
     val direct = File(raw)
     val profilesDir = File(appRoot, "profiles").canonicalFile
-    // A peer can type "[image] /some/path" as plain text; only a path the core
-    // itself wrote under a profile's media directory counts as media.
+    // A peer can type "[image] /some/path" as plain text; only a path inside a
+    // directory the app itself writes media to counts as media. `extraDirs`
+    // are the directories in use when they are not the per-profile defaults:
+    // a folder from Settings, or the cache of "Do not keep files".
     if (direct.isAbsolute) {
         val real = runCatching { direct.canonicalFile }.getOrNull() ?: return ""
         if (!real.isFile) return ""
-        val allowed = profilesDir.listFiles()?.any { profile ->
+        val allowed = extraDirs.any { dir ->
+            runCatching { dir.canonicalFile }.getOrNull() == real.parentFile
+        } || profilesDir.listFiles()?.any { profile ->
             subdirs.any { sub -> File(profile, sub).canonicalFile == real.parentFile }
         } ?: false
         return if (allowed) real.absolutePath else ""
@@ -90,12 +104,43 @@ private fun resolveMediaPath(text: String, prefix: String, appRoot: File, subdir
 }
 
 /** Resolve `[image] path` to an existing local file when possible. */
-fun resolveChatImagePath(text: String, appRoot: File): String =
-    resolveMediaPath(text, "[image] ", appRoot, listOf("images", "data/images"))
+fun resolveChatImagePath(text: String, appRoot: File, extraDirs: List<File> = emptyList()): String =
+    resolveMediaPath(text, "[image] ", appRoot, listOf("images", "data/images"), extraDirs)
 
 /** Resolve `[file] path` under downloads. */
-fun resolveChatFilePath(text: String, appRoot: File): String =
-    resolveMediaPath(text, "[file] ", appRoot, listOf("downloads", "data/downloads", "files"))
+fun resolveChatFilePath(text: String, appRoot: File, extraDirs: List<File> = emptyList()): String =
+    resolveMediaPath(
+        text,
+        "[file] ",
+        appRoot,
+        listOf("downloads", "data/downloads", "files"),
+        extraDirs,
+    )
+
+/** A name from another app reduced to one plain file name; never a path. */
+internal fun safeLocalFileName(raw: String?): String {
+    val base = raw.orEmpty().substringAfterLast('/').substringAfterLast('\\').trim()
+    val cleaned = base.replace(Regex("[^A-Za-z0-9._ ()\\-\\p{L}\\p{N}]"), "_").trim('.', ' ')
+    if (cleaned.isBlank() || cleaned.length > 200) {
+        val ext = base.substringAfterLast('.', "").take(10).filter { it.isLetterOrDigit() }
+        return "file-${System.currentTimeMillis()}" + if (ext.isNotEmpty()) ".$ext" else ""
+    }
+    return cleaned
+}
+
+/** `name` inside `dir`, or `name (N).ext` when that file already exists. */
+internal fun uniqueFileIn(dir: File, name: String): File {
+    val first = File(dir, name)
+    if (!first.exists()) return first
+    val dot = name.lastIndexOf('.')
+    val stem = if (dot > 0) name.substring(0, dot) else name
+    val ext = if (dot > 0) name.substring(dot) else ""
+    for (n in 1..9999) {
+        val candidate = File(dir, "$stem ($n)$ext")
+        if (!candidate.exists()) return candidate
+    }
+    return File(dir, "$stem (${System.nanoTime()})$ext")
+}
 
 
 /**
@@ -226,7 +271,14 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     /** Peers with a dial already in flight, so opening the chat twice does not start two handshakes. */
     private val dialingPeers = mutableSetOf<String>()
 
+    /** Where the running engine writes pictures and files; null until it has started. */
+    @Volatile private var activeImagesDir: File? = null
+    @Volatile private var activeFilesDir: File? = null
+
     init {
+        // A crash or a kill in the middle of a send or a backup leaves its
+        // staged copy behind; nothing is in flight when the app starts.
+        runCatching { stagingDir().deleteRecursively() }
         if (!NativeEngine.available) {
             _state.update {
                 it.copy(
@@ -475,6 +527,19 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         return files.absolutePath to images.absolutePath
     }
 
+    /**
+     * Media directories in use besides the per-profile defaults: the one the
+     * running engine was started with and the folder saved in Settings.
+     */
+    private fun mediaRoots(image: Boolean): List<File> {
+        val ui = _state.value.uiPrefs
+        val saved = (if (image) ui.imagesDir else ui.filesDir).trim()
+        return listOfNotNull(
+            if (image) activeImagesDir else activeFilesDir,
+            saved.takeIf { it.isNotEmpty() }?.let(::File),
+        ).distinct()
+    }
+
     fun start(profile: String, profilePassword: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
             if (_state.value.running || _state.value.starting) {
@@ -557,6 +622,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             _state.update { it.copy(samReady = true, routerIssue = null) }
             clearIncomingCache()
             val (filesDir, imagesDir) = mediaDirs(ui)
+            // Empty means the engine default under the profile directory.
+            val profileDir = File(appRoot, "profiles/$profile")
+            activeFilesDir = if (filesDir.isBlank()) File(profileDir, "downloads") else File(filesDir)
+            activeImagesDir = if (imagesDir.isBlank()) File(profileDir, "images") else File(imagesDir)
             val result = runCatching {
                 JSONObject(
                     NativeEngine.nativeStart(
@@ -883,13 +952,21 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         val id = _state.value.selectedId
         if (id.isBlank() || _state.value.selectedIsGroup) return
         viewModelScope.launch(Dispatchers.IO) {
-            val copied = copyUri(uri) ?: return@launch
+            val copied = stageOutgoing(uri, image) ?: return@launch
             try {
-                // The engine streams every chunk before returning, so the
-                // staged copy is no longer needed afterwards.
+                // The engine streams every chunk before returning.
                 NativeEngine.nativeSendFile(id, copied.absolutePath, image)
             } finally {
-                copied.delete()
+                if (image) {
+                    // The chat shows a sent picture from this file. It is only
+                    // removed when the engine refused the send outright and
+                    // nothing in the chat refers to it.
+                    if (!historyShowsImage(id, copied)) copied.delete()
+                } else {
+                    // A staged copy of an ordinary file is no longer needed.
+                    copied.delete()
+                    copied.parentFile?.delete()
+                }
             }
             loadHistory()
             refreshSnapshot()
@@ -1064,6 +1141,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             val raw = if (group) NativeEngine.nativeGroupHistory(id) else NativeEngine.nativeHistory(id)
             val rows = JSONArray(raw)
+            val imageDirs = mediaRoots(image = true)
+            val fileDirs = mediaRoots(image = false)
             val messages = buildList {
                 for (i in 0 until rows.length()) {
                     val o = rows.getJSONObject(i)
@@ -1079,8 +1158,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                             deliveryReason = o.optString("deliveryReason"),
                             retryable = o.optBoolean("retryable"),
                             messageId = o.optString("messageId").ifBlank { o.optString("msgId") },
-                            imagePath = resolveChatImagePath(text, appRoot),
-                            filePath = resolveChatFilePath(text, appRoot),
+                            imagePath = resolveChatImagePath(text, appRoot, imageDirs),
+                            filePath = resolveChatFilePath(text, appRoot, fileDirs),
                         ),
                     )
                 }
@@ -1202,10 +1281,12 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         return false
     }
 
+    private fun stagingDir(): File = File(getApplication<Application>().cacheDir, "staging")
+
     private fun copyUri(uri: Uri, outgoing: Boolean = false): File? {
         val resolver = getApplication<Application>().contentResolver
         val name = safeLocalFileName(uri.lastPathSegment)
-        val stagingDir = File(getApplication<Application>().cacheDir, "staging").apply { mkdirs() }
+        val stagingDir = stagingDir().apply { mkdirs() }
         val dest = File(stagingDir, name)
         // The name came from another app's content provider; it must stay a
         // plain file directly inside the staging directory.
@@ -1224,15 +1305,66 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
-    private fun safeLocalFileName(raw: String?): String {
-        val base = raw.orEmpty().substringAfterLast('/').substringAfterLast('\\').trim()
-        val cleaned = base.replace(Regex("[^A-Za-z0-9._ ()\\-\\p{L}\\p{N}]"), "_").trim('.', ' ')
-        if (cleaned.isBlank() || cleaned.length > 200) {
-            val ext = base.substringAfterLast('.', "").take(10).filter { it.isLetterOrDigit() }
-            return "file-${System.currentTimeMillis()}" + if (ext.isNotEmpty()) ".$ext" else ""
-        }
-        return cleaned
+    /**
+     * The file name the providing app reports for a picked document. The last
+     * URI segment is only a fallback: for most pickers it is a document id
+     * such as "397324", and that is what the peer would see as the file name.
+     */
+    private fun displayNameOf(uri: Uri): String {
+        val resolver = getApplication<Application>().contentResolver
+        val reported = runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+            }
+        }.getOrNull()
+        val name = safeLocalFileName(reported?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment)
+        if (name.contains('.')) return name
+        val ext = runCatching {
+            resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+        }.getOrNull()
+        return if (ext.isNullOrBlank()) name else "$name.$ext"
     }
+
+    /**
+     * Copy a picked document to where the engine can read it. A picture goes
+     * into the images directory and stays there, because the chat shows it
+     * from that file. Any other file is staged in the cache for the send only.
+     */
+    private fun stageOutgoing(uri: Uri, image: Boolean): File? {
+        val name = displayNameOf(uri)
+        // Pictures must land in a media directory the chat can resolve; without
+        // that directory there is nothing useful to stage.
+        val keepDir = if (image) activeImagesDir ?: return null else null
+        val staging = if (keepDir == null) File(stagingDir(), System.nanoTime().toString()) else null
+        val dir = keepDir ?: staging!!
+        return try {
+            dir.mkdirs()
+            val dest = if (keepDir != null) uniqueFileIn(dir, name) else File(dir, name)
+            // The name came from another app's content provider; it must stay a
+            // plain file directly inside the target directory.
+            if (dest.canonicalFile.parentFile != dir.canonicalFile) return null
+            val input = getApplication<Application>().contentResolver.openInputStream(uri) ?: return null
+            try {
+                input.use { src -> dest.outputStream().use { src.copyTo(it) } }
+            } catch (error: Exception) {
+                dest.delete()
+                throw error
+            }
+            dest
+        } catch (_: Exception) {
+            // A failed staging attempt leaves an empty per-send directory behind.
+            staging?.deleteRecursively()
+            null
+        }
+    }
+
+    /** True when the engine recorded this picture in the chat, so its file must stay. */
+    private fun historyShowsImage(peer: String, file: File): Boolean = runCatching {
+        val rows = JSONArray(NativeEngine.nativeHistory(peer))
+        val wanted = "[image] ${file.absolutePath}"
+        (0 until rows.length()).any { rows.getJSONObject(it).optString("text") == wanted }
+    }.getOrDefault(true)
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)

@@ -406,6 +406,188 @@ def test_tui_start_core_session_init_background_avoids_duplicate_tasks(
     asyncio.run(_run())
 
 
+def test_tui_switch_profile_during_startup_restarts_session_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections import deque
+    from types import SimpleNamespace
+    from unittest.mock import PropertyMock, patch
+
+    from i2pchat.gui.chat_python import I2PChat
+
+    monkeypatch.setattr("i2pchat.storage.media_prefs.clear_ephemeral_media", lambda: None)
+    monkeypatch.setattr("i2pchat.gui.chat_python.peek_persisted_stored_peer", lambda _profile: None)
+    # Plain attributes instead of Textual reactives: the app is not mounted here.
+    monkeypatch.setattr(I2PChat, "network_status", "initializing")
+    monkeypatch.setattr(I2PChat, "peer_b32", "")
+
+    events: list[tuple[str, str]] = []
+
+    class _Core:
+        def __init__(self, profile: str) -> None:
+            self.profile = profile
+
+        async def shutdown(self) -> None:
+            events.append(("shutdown", self.profile))
+
+    async def _run() -> None:
+        app = object.__new__(I2PChat)
+        app.profile = "default"
+        app.core = _Core("default")
+        app.selected_peer = None
+        app._core_init_task = None
+        app._active_sam_address = ("127.0.0.1", 7656)
+        app._router_settings = SimpleNamespace(system_sam_host="127.0.0.1", system_sam_port=7656)
+        app._recent_messages = deque()
+        app._message_ref_by_id = {}
+        app._transfer_progress_buckets = {}
+        app.post = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        app._save_history_if_needed = lambda: None  # type: ignore[method-assign]
+        app._flush_compose_drafts_to_disk = lambda: None  # type: ignore[method-assign]
+        app._save_contacts_book = lambda: None  # type: ignore[method-assign]
+        app._load_contacts_book = lambda: None  # type: ignore[method-assign]
+        app._load_compose_drafts_from_disk = lambda: None  # type: ignore[method-assign]
+        app._sync_compose_draft_to_peer_key = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        app._create_core = lambda profile, _sam: _Core(profile)  # type: ignore[method-assign]
+
+        async def _init() -> bool:
+            profile = app.core.profile
+            events.append(("init-start", profile))
+            try:
+                if profile == "default":
+                    # SAM startup of the first profile is still in flight.
+                    await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append(("init-cancelled", profile))
+                raise
+            events.append(("init-done", profile))
+            return True
+
+        app._initialize_core_session = _init  # type: ignore[method-assign]
+
+        I2PChat._start_core_session_init_background(app)
+        first_task = app._core_init_task
+        await asyncio.sleep(0)
+
+        log = SimpleNamespace(clear=lambda: None)
+        with patch.object(I2PChat, "chat_log", new_callable=PropertyMock, return_value=log):
+            await I2PChat._switch_profile(app, "second")
+
+        second_task = app._core_init_task
+        assert second_task is not None and second_task is not first_task
+        assert await second_task is True
+        assert first_task.cancelled()
+        assert app.profile == "second"
+        assert app._core_init_task is None
+        assert events == [
+            ("init-start", "default"),
+            ("init-cancelled", "default"),
+            ("shutdown", "default"),
+            ("init-start", "second"),
+            ("init-done", "second"),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_tui_finished_init_does_not_drop_a_newer_init_task() -> None:
+    from i2pchat.gui.chat_python import I2PChat
+
+    async def _run() -> None:
+        app = object.__new__(I2PChat)
+        app._core_init_task = None
+        gate: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+
+        async def _init() -> bool:
+            return await gate
+
+        app._initialize_core_session = _init  # type: ignore[method-assign]
+        I2PChat._start_core_session_init_background(app)
+        old_task = app._core_init_task
+        newer = asyncio.get_running_loop().create_future()
+        app._core_init_task = newer  # type: ignore[assignment]
+
+        gate.set_result(True)
+        await old_task
+        assert app._core_init_task is newer
+        newer.cancel()
+
+    asyncio.run(_run())
+
+
+_USE_PEER = "a" * 52 + ".b32.i2p"
+
+
+def _use_dial_app(*, session_up: bool, live: bool):
+    from types import SimpleNamespace
+
+    from i2pchat.gui.chat_python import I2PChat
+
+    dialed: list[str] = []
+    posted: list[tuple[str, str]] = []
+    selected: list[tuple[str, dict]] = []
+    app = object.__new__(I2PChat)
+    app.core = SimpleNamespace(
+        session_manager=SimpleNamespace(session_socket=object() if session_up else None),
+        _has_live_session_slot_for_peer=lambda _peer: live,
+        connect_to_peer=lambda peer: ("connect", peer),
+    )
+    app.run_worker = lambda work, **_kw: dialed.append(work[1])  # type: ignore[method-assign]
+    app.post = lambda kind, text, **_kw: posted.append((kind, text))  # type: ignore[method-assign]
+    app._clear_active_group = lambda **_kw: None  # type: ignore[method-assign]
+    app._set_selected_peer = lambda peer, **kw: selected.append((peer, kw)) or True  # type: ignore[method-assign]
+    return app, dialed, posted, selected
+
+
+def test_tui_contacts_use_dials_the_chosen_contact() -> None:
+    from unittest.mock import PropertyMock, patch
+
+    from i2pchat.gui.chat_python import TuiContactsScreen
+
+    app, dialed, posted, selected = _use_dial_app(session_up=True, live=False)
+    screen = object.__new__(TuiContactsScreen)
+    screen._is_group_row = lambda: False  # type: ignore[method-assign]
+    screen._selected_peer = lambda: _USE_PEER  # type: ignore[method-assign]
+    screen.dismiss = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+    with patch.object(TuiContactsScreen, "host", new_callable=PropertyMock, return_value=app):
+        TuiContactsScreen.action_use_selected(screen)
+
+    assert selected == [(_USE_PEER, {"remember": True, "banner": True})]
+    assert dialed == [_USE_PEER]
+    assert posted == []
+
+
+def test_tui_contacts_use_command_dials_the_chosen_contact() -> None:
+    from i2pchat.gui.chat_python import I2PChat
+
+    app, dialed, _posted, selected = _use_dial_app(session_up=True, live=False)
+    app._resolve_selector_to_peer = lambda _selector: _USE_PEER  # type: ignore[method-assign]
+
+    assert asyncio.run(I2PChat._execute_contacts_subcommand(app, ["use", "1"])) is True
+    assert [peer for peer, _kw in selected] == [_USE_PEER]
+    assert dialed == [_USE_PEER]
+
+
+def test_tui_use_does_not_dial_a_contact_that_already_has_a_stream() -> None:
+    from i2pchat.gui.chat_python import I2PChat
+
+    app, dialed, posted, _selected = _use_dial_app(session_up=True, live=True)
+    I2PChat._dial_peer_if_idle(app, _USE_PEER)
+    assert dialed == []
+    assert posted == []
+
+
+def test_tui_use_before_the_session_is_up_explains_instead_of_dialing() -> None:
+    from i2pchat.gui.chat_python import I2PChat
+
+    app, dialed, posted, _selected = _use_dial_app(session_up=False, live=False)
+    I2PChat._dial_peer_if_idle(app, _USE_PEER)
+    assert dialed == []
+    assert [kind for kind, _ in posted] == ["system"]
+    assert "/connect" in posted[0][1]
+
+
 def test_tui_show_contact_editor_pushes_editor_screen() -> None:
     from i2pchat.gui.chat_python import I2PChat, TuiContactEditorScreen
 

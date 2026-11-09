@@ -453,6 +453,41 @@ class SamBackendTests(unittest.IsolatedAsyncioTestCase):
             server.close()
             await server.wait_closed()
 
+    async def test_create_session_closes_socket_when_cancelled(self) -> None:
+        got_create = asyncio.Event()
+        peer_closed = asyncio.Event()
+
+        async def _handle(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                await reader.readline()
+                writer.write(b"HELLO REPLY RESULT=OK VERSION=3.1\n")
+                await writer.drain()
+                await reader.readline()
+                got_create.set()
+                # The router is still building tunnels: no SESSION STATUS yet.
+                if await reader.read(1) == b"":
+                    peer_closed.set()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            task = asyncio.create_task(
+                create_session("sess", sam_address=("127.0.0.1", int(port)))
+            )
+            await asyncio.wait_for(got_create.wait(), timeout=5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(peer_closed.wait(), timeout=5)
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_sam_client_open_closes_socket_on_hello_timeout(self) -> None:
         async def _slow_hello(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter

@@ -12008,7 +12008,7 @@ def _load_image(path: str, max_width: int = 80) -> Image.Image:
     w, h = img.size
     if w > max_width:
         ratio = max_width / float(w)
-        img = img.resize((max_width, max(int(h * ratio))), Image.LANCZOS)
+        img = img.resize((max_width, max(1, int(h * ratio))), Image.LANCZOS)
     return img
 
 

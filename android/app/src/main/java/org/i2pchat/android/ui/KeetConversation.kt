@@ -107,6 +107,10 @@ fun KeetMessageBubble(
                         color = foreground.copy(alpha = 0.7f),
                     )
                 }
+            } else if (msg.text.startsWith("[image] ")) {
+                // The picture file is gone, for example after "Do not keep
+                // files" cleared its cache: show the name, not the local path.
+                Text("📷 ${msg.fileCaption.ifBlank { msg.text }}", color = foreground)
             } else {
                 Text(msg.text, style = textStyle, color = foreground)
             }

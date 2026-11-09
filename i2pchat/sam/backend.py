@@ -112,10 +112,16 @@ async def create_session(
             destination_text = destination_obj.private_key.base64
             sig_type = None
 
-    handle = await client.create_stream_session(
-        session_id,
-        destination_text,
-        sig_type=sig_type,
-        options=options or {},
-    )
+    try:
+        handle = await client.create_stream_session(
+            session_id,
+            destination_text,
+            sig_type=sig_type,
+            options=options or {},
+        )
+    except BaseException:
+        # Includes cancellation: an abandoned control socket would leave the
+        # router building a session nobody owns.
+        await client.close()
+        raise
     return handle.reader, handle.writer

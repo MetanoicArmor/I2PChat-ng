@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 from collections import deque
 from dataclasses import dataclass, replace
@@ -180,6 +181,8 @@ class TransferEventRef:
     filename: str
     detail: str
     timestamp: str
+    # Full path of a received file or picture; empty for everything else.
+    path: str = ""
 
 
 # Core service kinds that go through notice filtering instead of straight into the chat log.
@@ -306,6 +309,7 @@ class I2PChat(App):
         self._active_sam_address: Optional[tuple[str, int]] = None
         self._active_http_proxy_address: Optional[tuple[str, int]] = None
         self._core_init_task: Optional[asyncio.Task[bool]] = None
+        self._bundled_start_task: Optional[asyncio.Task[tuple[str, int]]] = None
         self._notice_log = NoticeLog()
         self._readiness = ReadinessTracker()
         self._verbose_log_enabled = self._load_ui_prefs().get("verbose_log") is True
@@ -603,11 +607,24 @@ class I2PChat(App):
             return (settings.system_sam_host, int(settings.system_sam_port))
         if self._bundled_router_manager is None:
             self._bundled_router_manager = BundledI2pdManager(settings)
-        sam_address = await self._bundled_router_manager.start()
-        self._active_http_proxy_address = self._bundled_router_manager.http_proxy_address()
+        manager = self._bundled_router_manager
+        # The router start runs as its own task: a profile switch cancels the
+        # session init, and the next init must wait for the same router start
+        # instead of getting an address before SAM accepts connections.
+        start_task = self._bundled_start_task
+        if start_task is None or start_task.done():
+            start_task = asyncio.create_task(manager.start())
+            self._bundled_start_task = start_task
+        try:
+            sam_address = await asyncio.shield(start_task)
+        finally:
+            if start_task.done() and self._bundled_start_task is start_task:
+                self._bundled_start_task = None
+        self._active_http_proxy_address = manager.http_proxy_address()
         return sam_address
 
     async def _shutdown_router_backend(self) -> None:
+        self._bundled_start_task = None
         if self._bundled_router_manager is None:
             return
         try:
@@ -1054,7 +1071,13 @@ class I2PChat(App):
             expand=False,
         )
         self.chat_log.write(Align(panel, align=align), expand=True)
-        self.post("system", f"Image saved at {path}")
+        note = f"Image saved at {path}"
+        if not is_from_me:
+            from i2pchat.storage.media_prefs import load_media_prefs
+
+            if load_media_prefs()[2]:
+                note += " (temporary: deleted on exit; /savefile <path> keeps a copy)"
+        self.post("system", note)
 
     def _set_compose_text(self, text: str) -> None:
         box = self._safe_compose_box()
@@ -1230,6 +1253,26 @@ class I2PChat(App):
             self.post("system", f"{announce}: {normalized}")
         self._refresh_status_bar()
         return True
+
+    def _dial_peer_if_idle(self, peer: str) -> None:
+        """Connect to a contact the user just chose, as /connect would.
+
+        Nothing is started while the SAM session is not up, or when a stream to
+        this contact already exists or is being opened.
+        """
+        core = self.core
+        if core.session_manager.session_socket is None:
+            self.post(
+                "system",
+                "Not connected to the router yet. Run /connect once your address is shown.",
+            )
+            return
+        try:
+            if core._has_live_session_slot_for_peer(peer):
+                return
+        except ValueError:
+            return
+        self.run_worker(core.connect_to_peer(peer))
 
     def _append_history_entry(self, msg: ChatMessage) -> None:
         if not self._history_enabled or msg.kind not in {"me", "peer"}:
@@ -1556,10 +1599,20 @@ class I2PChat(App):
                 f"{label} {direction}: {os.path.basename(info.filename)} ({info.received}/{info.size} bytes, {percent}%)",
             )
             self._transfer_progress_buckets[key] = bucket
+            # A finished incoming file reports the full path it was written to.
+            saved_path = (
+                info.filename
+                if not info.is_sending
+                and not info.is_inline_image
+                and info.received >= info.size
+                and os.path.isabs(info.filename)
+                else ""
+            )
             self._record_transfer_event(
                 label.lower(),
                 info.filename,
                 f"{direction} {percent}%",
+                path=saved_path,
             )
         if info.received >= info.size:
             self._transfer_progress_buckets.pop(key, None)
@@ -1586,6 +1639,7 @@ class I2PChat(App):
             "image",
             sent_filename or path,
             "sent inline preview" if is_from_me else "received inline preview",
+            path="" if is_from_me else path,
         )
         label = "Me" if is_from_me else self._peer_display_name(self._current_target_peer())
         if sent_filename:
@@ -1842,6 +1896,9 @@ class I2PChat(App):
         from i2pchat.storage.media_prefs import clear_ephemeral_media
 
         clear_ephemeral_media()
+        # A session init still running for the old profile would keep bringing
+        # that profile up and block the init of the new one.
+        await self._cancel_core_session_init()
         await self.core.shutdown()
 
         self.profile = target
@@ -1880,9 +1937,20 @@ class I2PChat(App):
             try:
                 return await self._initialize_core_session()
             finally:
-                self._core_init_task = None
+                if self._core_init_task is asyncio.current_task():
+                    self._core_init_task = None
 
         self._core_init_task = asyncio.create_task(_runner())
+
+    async def _cancel_core_session_init(self) -> None:
+        """Stop a session init that is still running and wait until it has unwound."""
+        task = self._core_init_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if self._core_init_task is task:
+            self._core_init_task = None
 
     async def _initialize_core_session(self) -> bool:
         self._readiness.session_starting()
@@ -1907,6 +1975,10 @@ class I2PChat(App):
                 if chosen:
                     self.core.profile_password = chosen
             await self.core.init_session()
+        except asyncio.CancelledError:
+            # A profile switch cancels this init on purpose; do not mark the
+            # session as failed or leave a "run /init" notice for the old profile.
+            raise
         except Exception as exc:
             self._readiness.session_failed(str(exc).strip() or type(exc).__name__, self._router_settings)
             self.post("error", str(exc))
@@ -2078,6 +2150,7 @@ class I2PChat(App):
             "saved-peers": "contacts",
             "send-picture": "sendpic",
             "send-file": "sendfile",
+            "save-file": "savefile",
             "media": "transfers",
             "transfer": "transfers",
             "clear-history": "history-clear",
@@ -2097,15 +2170,56 @@ class I2PChat(App):
         }
         return aliases.get(cmd, cmd)
 
-    def _record_transfer_event(self, kind: str, filename: str, detail: str) -> None:
+    def _record_transfer_event(
+        self, kind: str, filename: str, detail: str, *, path: str = ""
+    ) -> None:
         self._recent_transfers.appendleft(
             TransferEventRef(
                 kind=kind,
                 filename=os.path.basename(filename),
                 detail=detail,
                 timestamp=datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                path=path,
             )
         )
+
+    def _last_received_path(self) -> Optional[str]:
+        """Newest received file or picture that is still on disk."""
+        for item in self._recent_transfers:
+            if item.path and os.path.isfile(item.path):
+                return item.path
+        return None
+
+    async def _save_received_copy(self, source: str, destination: str) -> bool:
+        """Copy a received file or picture to a file path or folder the user chose."""
+        from i2pchat.core.i2p_chat_core import allocate_unique_filename
+        from i2pchat.storage.media_prefs import resolve_save_as
+
+        if not os.path.isfile(source):
+            self.post("error", f"The received file is no longer available: {source}")
+            return False
+        text = os.path.expanduser((destination or "").strip())
+        if text and (os.path.isdir(text) or text.endswith(os.sep)):
+            text = os.path.join(text, os.path.basename(source))
+        target = resolve_save_as(text)
+        if target is None:
+            self.post("error", f"Cannot save to {destination or '(empty path)'}")
+            return False
+        try:
+            if os.path.exists(target):
+                if os.path.samefile(source, target):
+                    self.post("system", f"The file is already at {target}")
+                    return False
+                # Never overwrite: "name (1).ext", as for incoming transfers.
+                target = allocate_unique_filename(
+                    os.path.dirname(target) or ".", os.path.basename(target)
+                )
+            await asyncio.to_thread(shutil.copyfile, source, target)
+        except OSError as exc:
+            self.post("error", f"Could not save {os.path.basename(source)}: {exc}")
+            return False
+        self.post("success", f"Saved a copy to {target}")
+        return True
 
     def _router_status_line(self) -> str:
         configured = self._router_settings.backend
@@ -2244,6 +2358,7 @@ class I2PChat(App):
                 self.post("error", "Unknown contact selector.")
                 return True
             self._set_selected_peer(peer, remember=True, announce="Selected peer")
+            self._dial_peer_if_idle(peer)
             return True
         if sub == "add":
             if not rest:
@@ -2415,6 +2530,7 @@ class I2PChat(App):
                 self.post("error", "Unknown contact selector.")
                 return
             self._set_selected_peer(peer, remember=True, announce="Selected peer")
+            self._dial_peer_if_idle(peer)
 
         elif cmd == "contact-edit":
             if len(args) < 1:
@@ -2485,6 +2601,16 @@ class I2PChat(App):
                 return
             self.run_worker(self.core.send_file(path))
 
+        elif cmd == "savefile":
+            if not args:
+                self.post("error", "Usage: /savefile <file path or folder>")
+                return
+            source = self._last_received_path()
+            if not source:
+                self.post("error", "No received file or picture to save yet.")
+                return
+            await self._save_received_copy(source, args[0])
+
         elif cmd == "sendpic":
             if not args:
                 self.post("error", "Usage: /sendpic <path>")
@@ -2503,7 +2629,9 @@ class I2PChat(App):
             if not os.path.exists(path):
                 self.post("error", f"File not found: {path}")
                 return
-            lines = render_braille(path)
+            lines = self._render_image_lines(path, bw=False)
+            if lines is None:
+                return
             await self._send_image_me(lines)
             self.run_worker(self.core.send_image_lines(lines))
 
@@ -2515,7 +2643,9 @@ class I2PChat(App):
             if not os.path.exists(path):
                 self.post("error", f"File not found: {path}")
                 return
-            lines = render_bw(path)
+            lines = self._render_image_lines(path, bw=True)
+            if lines is None:
+                return
             await self._send_image_me(lines)
             self.run_worker(self.core.send_image_lines(lines))
 
@@ -3074,6 +3204,19 @@ class I2PChat(App):
                 return state.group_id
         return None
 
+    def _render_image_lines(self, path: str, *, bw: bool) -> Optional[list[str]]:
+        """Text art for ``path``, or ``None`` after reporting why it cannot be drawn."""
+        try:
+            lines = render_bw(path) if bw else render_braille(path)
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            self.post("error", f"Cannot render {path} as an image: {reason}")
+            return None
+        if not lines:
+            self.post("error", f"Image is too small to render: {path}")
+            return None
+        return lines
+
     async def _send_image_me(self, lines: list[str]) -> None:
         now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
         img_text = "\n".join(lines)
@@ -3093,7 +3236,11 @@ class I2PChat(App):
         self.post("help", "Groups: F8 or /group list|create|open|close|info|members|topology|invite|join|send. Compose box sends to active group when open.")
         self.post("help", "Connection: /connect <addr>, /disconnect, /save, /unlock, /status")
         self.post("help", "Status: F9 opens readiness and service notices; /verbose on|off shows technical messages in the chat.")
-        self.post("help", "Messaging/media: /sendfile <path> (/send-file), /sendpic <path> (/send-picture), /img <path>, /img-bw <path>, /recent [count], /reply <ref>")
+        self.post("help", "Files: /sendfile <path> (/send-file) sends any file; the peer is asked to accept it.")
+        self.post("help", "Pictures: /sendpic <path> (/send-picture) sends an image file that the peer sees as a picture in the chat.")
+        self.post("help", "Text art: /img <path> converts a picture to Braille characters and sends it as text; /img-bw <path> does the same with solid blocks.")
+        self.post("help", "Saving: /savefile <path> copies the last received file or picture to <path>; F3 lists received items with Save as.")
+        self.post("help", "Replies: /recent [count] lists the latest messages with numbers; /reply <number> puts a quote of that message into the compose box.")
         self.post("help", "Launcher: optional via /launcher (/menu) if you want the quick launcher overlay.")
         self.post("help", "Contacts: F2 / Ctrl+B or /contacts to view the book. Also: /contacts use|add|edit|remove|info … (legacy /contact-* commands still work).")
         self.post("help", "Media/transfers: F3 / Ctrl+P or /transfers (/media) for send file/picture and recent transfer events.")
@@ -3486,6 +3633,7 @@ class TuiContactsScreen(ModalScreen[None]):
         self.host._clear_active_group(reload_peer=False)
         self.host._set_selected_peer(peer, remember=True, banner=True)
         self.dismiss(None)
+        self.host._dial_peer_if_idle(peer)
 
     def action_show_info(self) -> None:
         peer = self._selected_peer()
@@ -4267,6 +4415,7 @@ class TuiMediaScreen(ModalScreen[None]):
         ("ctrl+p", "send_picture", "Send picture"),
         ("b", "send_bw", "BW"),
         ("a", "send_ascii", "ASCII"),
+        ("s", "save_selected", "Save as"),
         ("r", "refresh", "Refresh"),
     ]
 
@@ -4291,6 +4440,9 @@ class TuiMediaScreen(ModalScreen[None]):
         height: 10;
         margin: 1 0;
     }
+    #media_save_row {
+        height: auto;
+    }
     #media_help {
         color: $text-muted;
         margin: 1 0;
@@ -4308,8 +4460,11 @@ class TuiMediaScreen(ModalScreen[None]):
             yield Static("File or image path", classes="media_label")
             yield Input("", placeholder="/path/to/file.png", id="media_path")
             yield DataTable(id="media_table")
+            with Horizontal(id="media_save_row"):
+                yield Button("Save received item as…", id="media_save_as")
             yield Static(
-                "Ctrl+S send file · Ctrl+P send picture · A ASCII/Braille · B BW · Esc close",
+                "Ctrl+S send file · Ctrl+P send picture · A ASCII/Braille · B BW · "
+                "S save the selected received item · Esc close",
                 id="media_help",
             )
             with Horizontal(id="media_buttons"):
@@ -4330,6 +4485,7 @@ class TuiMediaScreen(ModalScreen[None]):
         return self.query_one("#media_table", DataTable)
 
     def on_mount(self) -> None:
+        self._rows: list[TransferEventRef] = []
         self._refresh()
         self.set_interval(0.75, self._refresh)
         self.query_one("#media_path", Input).focus()
@@ -4337,20 +4493,44 @@ class TuiMediaScreen(ModalScreen[None]):
     def _path(self) -> str:
         return os.path.expanduser(self.query_one("#media_path", Input).value.strip())
 
+    def _selected_item(self) -> Optional[TransferEventRef]:
+        row = self.table.cursor_row
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
+
+    def _save_source(self) -> Optional[str]:
+        """Path to save: the selected row if it is a received item, else the newest one."""
+        item = self._selected_item()
+        if item is not None and item.path and os.path.isfile(item.path):
+            return item.path
+        return self.host._last_received_path()
+
     def _refresh(self) -> None:
         self.query_one("#media_summary", Static).update(self.host._media_summary_text())
         table = self.table
+        # The table is rebuilt on a timer; keep the cursor on the same event.
+        selected = self._selected_item()
         table.clear(columns=True)
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns("When", "Kind", "File", "Detail")
-        if not self.host._recent_transfers:
+        self._rows = list(self.host._recent_transfers)[:20]
+        if not self._rows:
             table.add_row("—", "", "No recent transfers", "", key="empty")
             table.disabled = True
+            self.query_one("#media_save_as", Button).disabled = True
             return
         table.disabled = False
-        for item in list(self.host._recent_transfers)[:20]:
-            table.add_row(item.timestamp, item.kind, item.filename, item.detail, key=f"{item.timestamp}:{item.filename}")
+        for idx, item in enumerate(self._rows):
+            detail = f"{item.detail} · can be saved" if item.path else item.detail
+            table.add_row(item.timestamp, item.kind, item.filename, detail, key=str(idx))
+        if selected is not None:
+            for idx, item in enumerate(self._rows):
+                if item is selected:
+                    table.move_cursor(row=idx, animate=False)
+                    break
+        self.query_one("#media_save_as", Button).disabled = self._save_source() is None
         has_peer = self.host._current_target_peer() is not None
         for button_id in (
             "#media_send_file",
@@ -4398,7 +4578,9 @@ class TuiMediaScreen(ModalScreen[None]):
             return
 
         async def _runner() -> None:
-            lines = render_braille(path)
+            lines = self.host._render_image_lines(path, bw=False)
+            if lines is None:
+                return
             await self.host._send_image_me(lines)
             self.host._record_transfer_event("ascii", path, "queued for sending")
             self.host.run_worker(self.host.core.send_image_lines(lines))
@@ -4412,7 +4594,9 @@ class TuiMediaScreen(ModalScreen[None]):
             return
 
         async def _runner() -> None:
-            lines = render_bw(path)
+            lines = self.host._render_image_lines(path, bw=True)
+            if lines is None:
+                return
             await self.host._send_image_me(lines)
             self.host._record_transfer_event("bw", path, "queued for sending")
             self.host.run_worker(self.host.core.send_image_lines(lines))
@@ -4420,12 +4604,36 @@ class TuiMediaScreen(ModalScreen[None]):
         self.dismiss(None)
         asyncio.create_task(_runner())
 
+    def action_save_selected(self) -> None:
+        source = self._save_source()
+        if not source:
+            self.host.post("error", "No received file or picture to save yet.")
+            return
+        host = self.host
+
+        # This screen stays open until the path dialog closes: Textual delivers
+        # the dialog result through the screen that opened it.
+        def _chosen(destination: str | None) -> None:
+            if not destination:
+                return
+            self.dismiss(None)
+            host.run_worker(host._save_received_copy(source, destination))
+
+        host.push_screen(
+            TuiSavePathScreen(
+                filename=os.path.basename(source),
+                prompt=f"Save {os.path.basename(source)} to (file path or folder)",
+            ),
+            callback=_chosen,
+        )
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping = {
             "media_send_file": self.action_send_file,
             "media_send_picture": self.action_send_picture,
             "media_send_ascii": self.action_send_ascii,
             "media_send_bw": self.action_send_bw,
+            "media_save_as": self.action_save_selected,
             "media_close": self.action_close,
         }
         handler = mapping.get(event.button.id or "")
