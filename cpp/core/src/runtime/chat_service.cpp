@@ -68,6 +68,20 @@ std::int64_t unix_now() {
         .count();
 }
 
+/// 20s, 40s, 80s, 160s, then 180s, plus up to a quarter so both sides of a
+/// drop do not dial on the same tick. Matches auto_reconnect_delay in Python.
+int auto_reconnect_seconds(unsigned attempt) {
+    const unsigned step = std::max(1u, attempt);
+    const unsigned shift = std::min(step - 1u, 4u);
+    const int base = std::min(180, 20 * (1 << shift));
+    const Bytes noise = crypto::random_bytes(1);
+    const int span = base / 4;
+    const int jitter = noise.empty() || span <= 0
+                           ? 0
+                           : static_cast<int>(noise[0] % static_cast<unsigned>(span + 1));
+    return base + jitter;
+}
+
 std::string preview_of(const std::string& text) {
     // Measured in code points, like the contact book's own limit.
     std::string out;
@@ -829,7 +843,7 @@ void ChatService::schedule_auto_reconnect(Peer& peer) {
     }
     const unsigned next = peer.auto_attempt + 1;
     peer.auto_attempt = next;
-    const int seconds = std::min(60, 10 * static_cast<int>(next));
+    const int seconds = auto_reconnect_seconds(next);
     peer.auto_reconnect = std::make_shared<asio::steady_timer>(executor_);
     peer.auto_reconnect->expires_after(std::chrono::seconds(seconds));
     sessions_.on_connecting(peer.addr);

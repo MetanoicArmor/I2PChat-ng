@@ -27,10 +27,13 @@ namespace i2pchat::runtime {
 
 namespace asio = boost::asio;
 
-/// Keepalive cadence and liveness deadline, both matching the reference client.
-inline constexpr std::chrono::seconds kKeepaliveInterval{15};
-inline constexpr std::chrono::seconds kPeerTimeout{90};
-inline constexpr std::chrono::seconds kHandshakeTimeout{45};
+/// Ping often enough to notice a dead tunnel, rarely enough to spare SAM.
+/// A tunnel rebuild can sit silent for a minute or two, so the liveness
+/// deadline is several keepalive rounds, not one. Handshake matches the
+/// desktop client: I2P plus a TOFU prompt often takes longer than 45s.
+inline constexpr std::chrono::seconds kKeepaliveInterval{20};
+inline constexpr std::chrono::seconds kPeerTimeout{180};
+inline constexpr std::chrono::seconds kHandshakeTimeout{90};
 
 struct PeerLinkConfig {
     session::PeerSessionConfig session;

@@ -77,8 +77,10 @@ struct SessionManagerConfig {
     /// the channel usually still works, and refusing it would push traffic to
     /// BlindBox unnecessarily.
     bool treat_stale_as_offline = false;
-    double reconnect_base_delay = 1.0;
-    double reconnect_max_delay = 30.0;
+    /// Failed dials wait 8, 16, 32, 64, then 120 seconds. One second is
+    /// shorter than an I2P tunnel build, so it only hammers SAM.
+    double reconnect_base_delay = 8.0;
+    double reconnect_max_delay = 120.0;
 };
 
 class SessionManager {

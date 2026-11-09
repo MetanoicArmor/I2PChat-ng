@@ -5831,9 +5831,11 @@ class I2PChatCore:
 
     # Таймаут на установку соединения (I2P может долго строить туннели)
     CONNECT_TIMEOUT = 120
-    # Таймаут на операции чтения в receive_loop (защита от зависания)
-    # Увеличен для устойчивости при простое: keepalive 15s + запас на латентность I2P
-    READ_TIMEOUT = 50.0
+    # Silence this long, with no frame at all, drops the session. Keepalive is
+    # 20s, so a live peer answers well inside it. A tunnel rebuild can sit
+    # quiet for a minute or two; 50s used to kill those sessions.
+    READ_TIMEOUT = 180.0
+    KEEPALIVE_INTERVAL = 20.0
     # Таймаут на установление защищённого канала после TCP/I2P connect.
     # Учитывает задержки I2P и возможное TOFU-подтверждение пользователем.
     HANDSHAKE_TIMEOUT = 90.0
@@ -9572,9 +9574,9 @@ class I2PChatCore:
         transport.peer_state = PeerState.CONNECTING
 
     async def _keepalive_loop(self) -> None:
-        """Отправляет Ping каждые 15 секунд для всех live-потоков."""
+        """Ping every live stream so a quiet tunnel is not mistaken for a dead one."""
         while self._any_live_stream():
-            await asyncio.sleep(15)
+            await asyncio.sleep(self.KEEPALIVE_INTERVAL)
             for pid, ls in list(self._live_sessions.items()):
                 if not ls.conn or ls._file_transfer_active:
                     continue

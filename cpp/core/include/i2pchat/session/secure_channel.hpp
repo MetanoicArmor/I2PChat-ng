@@ -13,8 +13,8 @@
 namespace i2pchat::session {
 
 /// Keepalive cadence and liveness timeout on an established channel.
-inline constexpr std::chrono::seconds kKeepaliveInterval{15};
-inline constexpr std::chrono::seconds kLivenessTimeout{90};
+inline constexpr std::chrono::seconds kKeepaliveInterval{20};
+inline constexpr std::chrono::seconds kLivenessTimeout{180};
 inline constexpr std::chrono::seconds kHandshakeTimeout{90};
 
 /// The encrypted channel on top of an established handshake.

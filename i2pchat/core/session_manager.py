@@ -76,8 +76,13 @@ class PeerTransportState:
 
 
 def auto_reconnect_delay(attempt: int) -> float:
-    """10s, then 20, 30, 40, 50, and 60s from then on."""
-    return float(min(60, 10 * max(1, int(attempt))))
+    """20s, then 40, 80, 160, and 180s from then on.
+
+    The first wait is long enough for a dying I2P tunnel to finish, and the
+    cap is about one tunnel rebuild. Callers add a little jitter on top.
+    """
+    step = max(1, int(attempt))
+    return float(min(180, 20 * (2 ** min(step - 1, 4))))
 
 
 class AutoReconnectBook:
@@ -115,8 +120,24 @@ class AutoReconnectBook:
             and float(meta["due"]) > 0.0
         )
 
-    def tick(self, now: float, *, secure: set[str]) -> list[str]:
-        """Arm the next wait, and return peers whose dial is due."""
+    def tick(
+        self,
+        now: float,
+        *,
+        secure: set[str],
+        jitter: Optional[Callable[[float], float]] = None,
+    ) -> list[str]:
+        """Arm the next wait, and return peers whose dial is due.
+
+        ``jitter`` adds seconds on top of the base delay. The default spreads
+        two peers that dropped at the same moment so they do not dial together.
+        """
+
+        def extra(delay: float) -> float:
+            if jitter is None:
+                return random.uniform(0.0, delay * 0.25)
+            return max(0.0, float(jitter(delay)))
+
         due: list[str] = []
         for peer_id, meta in self._peers.items():
             if not meta["eligible"] or meta["cancelled"] or meta["inflight"]:
@@ -127,13 +148,14 @@ class AutoReconnectBook:
                 continue
             if float(meta["due"]) <= 0.0:
                 meta["attempt"] = 1
-                meta["due"] = now + auto_reconnect_delay(1)
+                meta["due"] = now + auto_reconnect_delay(1) + extra(auto_reconnect_delay(1))
                 continue
             if now < float(meta["due"]):
                 continue
             attempt = int(meta["attempt"]) + 1
             meta["attempt"] = attempt
-            meta["due"] = now + auto_reconnect_delay(attempt)
+            wait = auto_reconnect_delay(attempt)
+            meta["due"] = now + wait + extra(wait)
             meta["inflight"] = True
             due.append(peer_id)
         return due
@@ -621,8 +643,8 @@ class SessionManager:
         self,
         *,
         reason: str,
-        base_delay_sec: float = 1.0,
-        max_delay_sec: float = 30.0,
+        base_delay_sec: float = 8.0,
+        max_delay_sec: float = 120.0,
         peer_id: Optional[str] = None,
     ) -> float:
         key = self._normalize_peer_id(peer_id or "")
