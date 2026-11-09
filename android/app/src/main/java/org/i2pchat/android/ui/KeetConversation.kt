@@ -46,6 +46,7 @@ fun KeetMessageBubble(
     showSender: Boolean,
     textStyle: TextStyle,
     onOpenFile: (String) -> Unit,
+    onOpenSealed: (String) -> Unit = {},
     onLongClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(
@@ -77,6 +78,7 @@ fun KeetMessageBubble(
                     onClick = {
                         val path = msg.imagePath.ifBlank { msg.filePath }
                         if (path.isNotBlank()) onOpenFile(path)
+                        else if (msg.sealedFile.isNotBlank()) onOpenSealed(msg.sealedFile)
                     },
                     onLongClick = onLongClick,
                 )
@@ -98,13 +100,13 @@ fun KeetMessageBubble(
                 if (msg.fileCaption.isNotBlank()) {
                     Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall, color = foreground)
                 }
-            } else if (msg.filePath.isNotBlank() || msg.text.startsWith("[file] ")) {
+            } else if (msg.filePath.isNotBlank() || msg.sealedFile.isNotBlank() || msg.text.startsWith("[file] ")) {
                 val path = msg.filePath
                 Text(
                     "📎 ${msg.fileCaption.ifBlank { msg.text }}",
                     color = foreground,
                 )
-                if (path.isNotBlank()) {
+                if (path.isNotBlank() || msg.sealedFile.isNotBlank()) {
                     Text(
                         stringResource(R.string.tap_to_open),
                         style = MaterialTheme.typography.labelSmall,

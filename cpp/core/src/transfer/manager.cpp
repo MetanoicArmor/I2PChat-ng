@@ -217,6 +217,7 @@ void IncomingTransfers::on_signal(const protocol::Signal& signal) {
 void IncomingTransfers::reset() {
     if (file_) {
         file_->stream.close();
+        file_->sink.reset();
         std::error_code ignored;
         std::filesystem::remove(file_->write_path, ignored);
         file_.reset();
@@ -246,23 +247,35 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
     }
 
     const std::string safe_name = sanitize_filename(raw_name, now());
+    const bool seal = static_cast<bool>(config_.seal);
+    if (seal && !config_.seal->live()) {
+        emit_error("Cannot store the incoming file");
+        return;
+    }
     std::filesystem::path target;
+    std::string storage_id;
     try {
         std::error_code ignored;
         std::filesystem::create_directories(config_.downloads_dir, ignored);
-        target = allocate_unique_filename(config_.downloads_dir, safe_name);
+        if (seal) {
+            storage_id = new_seal_id();
+            target = config_.downloads_dir / (storage_id + ".bin");
+        } else {
+            target = allocate_unique_filename(config_.downloads_dir, safe_name);
+        }
     } catch (const std::exception& exc) {
         emit_error(std::string("Cannot save the incoming file: ") + exc.what());
         return;
     }
-    const std::string final_name = target.filename().string();
+    // The offer dialog shows the name the peer sent, never the random cache name.
+    const std::string shown_name = seal ? safe_name : target.filename().string();
 
     const OfferDecision decision =
-        callbacks_.accept_file ? callbacks_.accept_file(final_name, size)
+        callbacks_.accept_file ? callbacks_.accept_file(shown_name, size)
                                : OfferDecision::Accept;
     if (decision == OfferDecision::Reject) {
-        send(Frame{'S', protocol::signal_body(protocol::build_reject_file(final_name))});
-        emit_system("Incoming file rejected by user: " + final_name);
+        send(Frame{'S', protocol::signal_body(protocol::build_reject_file(shown_name))});
+        emit_system("Incoming file rejected by user: " + shown_name);
         return;
     }
 
@@ -271,31 +284,40 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
     incoming.pending = decision == OfferDecision::Deferred;
     incoming.write_path =
         incoming.pending ? std::filesystem::path(target.string() + ".pending") : target;
-    incoming.name = final_name;
+    incoming.seal_id = storage_id;
+    incoming.name = shown_name;
     incoming.size = size;
     incoming.message_id = message_id;
     // Exclusive creation: between allocating the name and opening it, something
     // else may have taken it.
-    incoming.stream.open(incoming.write_path,
-                         std::ios::binary | std::ios::out | std::ios::trunc);
-    if (!incoming.stream.is_open()) {
-        emit_error("Cannot open the incoming file for writing: " + final_name);
-        return;
+    if (seal) {
+        incoming.sink = open_sealed_writer(incoming.write_path, config_.seal->key());
+        if (!incoming.sink) {
+            emit_error("Cannot open the incoming file for writing: " + shown_name);
+            return;
+        }
+    } else {
+        incoming.stream.open(incoming.write_path,
+                             std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!incoming.stream.is_open()) {
+            emit_error("Cannot open the incoming file for writing: " + shown_name);
+            return;
+        }
     }
 
-    if (final_name != safe_name) {
-        emit_system("Filename collision detected: saved as " + final_name);
+    if (!seal && shown_name != safe_name) {
+        emit_system("Filename collision detected: saved as " + shown_name);
     }
     if (incoming.pending) {
-        emit_system("Incoming file offer awaiting your decision: " + final_name + " (" +
+        emit_system("Incoming file offer awaiting your decision: " + shown_name + " (" +
                     std::to_string(size) + " bytes)");
     } else {
-        emit_system("Receiving file: " + final_name + " (" + std::to_string(size) +
+        emit_system("Receiving file: " + shown_name + " (" + std::to_string(size) +
                     " bytes)");
     }
 
     file_ = std::move(incoming);
-    report(Progress{final_name, target, size, 0, Direction::Incoming, false,
+    report(Progress{shown_name, target, size, 0, Direction::Incoming, false,
                     Outcome::Active});
 }
 
@@ -306,6 +328,7 @@ bool IncomingTransfers::resolve_pending_offer(bool accept) {
     if (!accept) {
         const std::string name = file_->name;
         file_->stream.close();
+        file_->sink.reset();
         std::error_code ignored;
         std::filesystem::remove(file_->write_path, ignored);
         const Progress failed{name, file_->path, file_->size, file_->received,
@@ -361,9 +384,12 @@ void IncomingTransfers::append_file_chunk(std::string_view body) {
         return;
     }
 
-    file_->stream.write(reinterpret_cast<const char*>(chunk->data()),
-                        static_cast<std::streamsize>(chunk->size()));
-    if (!file_->stream) {
+    const bool wrote = file_->sink
+                           ? file_->sink->write(ByteView(*chunk))
+                           : (file_->stream.write(reinterpret_cast<const char*>(chunk->data()),
+                                                  static_cast<std::streamsize>(chunk->size())),
+                              static_cast<bool>(file_->stream));
+    if (!wrote) {
         fail_file("Cannot write the incoming file", /*remove_partial=*/true);
         return;
     }
@@ -379,8 +405,15 @@ void IncomingTransfers::finish_file() {
     if (!file_) {
         return;
     }
-    file_->stream.flush();
-    file_->stream.close();
+    if (file_->sink) {
+        if (!file_->sink->finish()) {
+            fail_file("Cannot write the incoming file", /*remove_partial=*/true);
+            return;
+        }
+    } else {
+        file_->stream.flush();
+        file_->stream.close();
+    }
 
     if (file_->received != file_->size) {
         fail_file("File transfer incomplete: expected " + std::to_string(file_->size) +
@@ -416,6 +449,7 @@ void IncomingTransfers::complete_file() {
     const std::string name = file_->name;
     const std::uint64_t size = file_->size;
     const std::uint64_t message_id = file_->message_id;
+    const std::string seal_id = file_->seal_id;
     file_.reset();
 
     // ACK first so history/UI callbacks cannot delay it past the next keepalive
@@ -423,7 +457,11 @@ void IncomingTransfers::complete_file() {
     send(Frame{'S', protocol::signal_body(protocol::build_file_ack(name, message_id))});
     report(Progress{name, path, size, size, Direction::Incoming, false,
                     Outcome::Completed});
-    if (callbacks_.on_file_received) {
+    if (!seal_id.empty()) {
+        if (callbacks_.on_sealed_file) {
+            callbacks_.on_sealed_file(seal_id, name, path);
+        }
+    } else if (callbacks_.on_file_received) {
         callbacks_.on_file_received(path);
     }
 }
@@ -433,6 +471,7 @@ void IncomingTransfers::fail_file(const std::string& message, bool remove_partia
         return;
     }
     file_->stream.close();
+    file_->sink.reset();
     const Progress failed{file_->name,           file_->path, file_->size,
                           file_->received,       Direction::Incoming,
                           false,                 Outcome::Failed};

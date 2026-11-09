@@ -339,12 +339,19 @@ fun isReceivedMediaFile(context: android.content.Context, file: File): Boolean {
     return profileDir.parentFile == profiles
 }
 
+/** A decrypted copy of a sealed download, created only to hand to a viewer. */
+fun isEphemeralViewFile(context: android.content.Context, file: File): Boolean {
+    val view = File(context.cacheDir, "incoming/view").canonicalFile
+    val real = runCatching { file.canonicalFile }.getOrNull() ?: return false
+    return real.isFile && real.parentFile == view
+}
+
 fun openReceivedFile(context: android.content.Context, path: String) {
     val file = File(path)
     if (!file.isFile) return
     // Only files the core wrote for us are shared out, and only through the
     // provider: a file:// URI would hand the viewer a path into our sandbox.
-    if (!isReceivedMediaFile(context, file)) return
+    if (!isReceivedMediaFile(context, file) && !isEphemeralViewFile(context, file)) return
     val uri = runCatching {
         FileProvider.getUriForFile(context, "${context.packageName}.files", file.canonicalFile)
     }.getOrNull() ?: return
@@ -418,6 +425,7 @@ fun MessageActionsDialog(
     onOpen: (String) -> Unit,
     onOpenFolder: (String) -> Unit,
     onSaveMemoryImage: ((String) -> Unit)? = null,
+    onSaveSealed: ((String) -> Unit)? = null,
 ) {
     val path = msg.imagePath.ifBlank { msg.filePath }
     val folder = path.takeIf { it.isNotBlank() }?.let { File(it).parentFile }?.takeIf {
@@ -439,6 +447,11 @@ fun MessageActionsDialog(
                 }
                 if (msg.memoryImage.isNotBlank() && onSaveMemoryImage != null) {
                     TextButton(onClick = { onSaveMemoryImage(msg.memoryImage) }) {
+                        Text(stringResource(R.string.action_save_as))
+                    }
+                }
+                if (msg.sealedFile.isNotBlank() && onSaveSealed != null) {
+                    TextButton(onClick = { onSaveSealed(msg.sealedFile) }) {
                         Text(stringResource(R.string.action_save_as))
                     }
                 }
@@ -1081,6 +1094,9 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var messageMenu by remember { mutableStateOf<MessageUi?>(null) }
     var pendingOpenPath by remember { mutableStateOf<String?>(null) }
     var pendingSaveMemoryKey by remember { mutableStateOf<String?>(null) }
+    var pendingOpenSealed by remember { mutableStateOf<String?>(null) }
+    var pendingSaveSealed by remember { mutableStateOf<String?>(null) }
+    var pendingSaveSealedPeer by remember { mutableStateOf("") }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, false)
@@ -1094,6 +1110,14 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         val key = pendingSaveMemoryKey
         pendingSaveMemoryKey = null
         if (uri != null && key != null) bridge.saveMemoryImage(key, uri)
+    }
+    val saveSealedFile = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val id = pendingSaveSealed
+        val peer = pendingSaveSealedPeer
+        pendingSaveSealed = null
+        if (uri != null && id != null && peer.isNotBlank()) bridge.saveSealedFile(peer, id, uri)
     }
     LaunchedEffect(id, group) { bridge.selectConversation(id, group) }
     LaunchedEffect(state.messages.size) {
@@ -1129,6 +1153,16 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 openReceivedFile(context, path)
             },
             onDismiss = { pendingOpenPath = null },
+        )
+    }
+    pendingOpenSealed?.let { id ->
+        OpenFileWarningDialog(
+            path = SealedFiles.get(state.selectedId, id)?.displayName ?: id,
+            onConfirm = {
+                pendingOpenSealed = null
+                bridge.openSealedFile(state.selectedId, id)
+            },
+            onDismiss = { pendingOpenSealed = null },
         )
     }
     Scaffold(
@@ -1256,6 +1290,12 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                         messageMenu = null
                         saveMemoryImage.launch(msg.fileCaption.ifBlank { "image.jpg" })
                     },
+                    onSaveSealed = { id ->
+                        pendingSaveSealed = id
+                        pendingSaveSealedPeer = state.selectedId
+                        messageMenu = null
+                        saveSealedFile.launch(msg.fileCaption.ifBlank { "file" })
+                    },
                 )
             }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
@@ -1269,6 +1309,7 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                             showSender = group,
                             textStyle = emojiSafeTextStyle(),
                             onOpenFile = { pendingOpenPath = it },
+                            onOpenSealed = { pendingOpenSealed = it },
                             onLongClick = { messageMenu = msg },
                         )
                     }

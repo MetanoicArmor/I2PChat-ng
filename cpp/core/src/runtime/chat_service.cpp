@@ -161,6 +161,9 @@ ChatService::ChatService(asio::any_io_executor executor, ChatServiceConfig confi
             "images_in_memory needs an on_image_data handler to receive the images.");
     }
     crypto::init();
+    if (config_.seal_downloads) {
+        seal_ = std::make_shared<transfer::SessionSeal>();
+    }
     if (config_.downloads_dir.empty()) {
         config_.downloads_dir = paths_.data_dir() / "downloads";
     }
@@ -184,7 +187,11 @@ ChatService::ChatService(asio::any_io_executor executor, ChatServiceConfig confi
     sessions_ = session::SessionManager(config_.sessions, std::move(callbacks));
 }
 
-ChatService::~ChatService() = default;
+ChatService::~ChatService() {
+    if (seal_) {
+        seal_->wipe();
+    }
+}
 
 asio::awaitable<void> ChatService::start() {
     if (running_) {
@@ -376,6 +383,11 @@ asio::awaitable<void> ChatService::stop() {
         }
     }
     peers_.clear();
+    // Peers are gone, so no transfer still holds a secretstream state. The
+    // master key goes next: ciphertext already on disk cannot be opened again.
+    if (seal_) {
+        seal_->wipe();
+    }
 
     for (const auto& [addr, snapshot] : blindbox_snapshots_) {
         save_blindbox_snapshot(addr);
@@ -435,6 +447,7 @@ void ChatService::wire_transfers(Peer& peer) {
     config.downloads_dir = config_.downloads_dir;
     config.images_dir = config_.images_dir;
     config.images_in_memory = config_.images_in_memory;
+    config.seal = seal_;
 
     const std::string addr = peer.addr;
     transfer::IncomingTransfers::Callbacks callbacks;
@@ -469,6 +482,19 @@ void ChatService::wire_transfers(Peer& peer) {
         if (events_.on_file_received) {
             events_.on_file_received(addr, path);
         }
+    };
+    callbacks.on_sealed_file = [this, addr](const std::string& id, const std::string& display_name,
+                                            const std::filesystem::path& path) {
+        if (events_.on_sealed_file) {
+            events_.on_sealed_file(addr, id, display_name, path);
+        }
+        storage::HistoryEntry entry;
+        entry.kind = "in";
+        // The id is not a path. The display name is what the chat shows after
+        // the key is gone and the ciphertext can no longer be opened.
+        entry.text = "[file] " + id + " " + display_name;
+        entry.ts = storage::now_iso8601_utc();
+        append_history(addr, entry);
     };
     callbacks.on_image_received = [this, addr](const std::filesystem::path& path) {
         storage::HistoryEntry entry;
@@ -1301,6 +1327,40 @@ bool ChatService::respond_file_offer(std::string_view peer, bool accept) {
         return false;
     }
     return entry->incoming->resolve_pending_offer(accept);
+}
+
+bool ChatService::unseal_download(const std::filesystem::path& src,
+                                  const std::filesystem::path& dest) const {
+    if (!seal_ || !seal_->live() || src.empty() || dest.empty() || src == dest) {
+        return false;
+    }
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(config_.downloads_dir, error);
+    if (error || root.empty()) {
+        return false;
+    }
+    const std::filesystem::path file = std::filesystem::weakly_canonical(src, error);
+    if (error || !std::filesystem::is_regular_file(file, error)) {
+        return false;
+    }
+    const std::string root_text = root.string();
+    const std::string file_text = file.string();
+    const std::string prefix = root_text + std::string(1, std::filesystem::path::preferred_separator);
+    const bool inside = file_text.rfind(prefix, 0) == 0 || file_text.rfind(root_text + "/", 0) == 0;
+    if (!inside) {
+        return false;
+    }
+    // Do not decrypt back into the sealed cache: that would leave plaintext
+    // next to the ciphertext under the same ephemeral directory.
+    const std::filesystem::path out = std::filesystem::absolute(dest, error);
+    if (error) {
+        return false;
+    }
+    const std::string out_text = out.lexically_normal().string();
+    if (out_text.rfind(prefix, 0) == 0 || out_text.rfind(root_text + "/", 0) == 0) {
+        return false;
+    }
+    return transfer::unseal_file(seal_->key(), file, dest);
 }
 
 asio::awaitable<void> ChatService::blindbox_loop() {

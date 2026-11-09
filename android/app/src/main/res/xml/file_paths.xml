@@ -4,4 +4,6 @@
      the provider. -->
 <paths>
     <files-path name="profiles" path="i2pchat/profiles/" />
+    <!-- Plaintext of a sealed download, only while the user is opening it. -->
+    <cache-path name="incoming_view" path="incoming/view/" />
 </paths>

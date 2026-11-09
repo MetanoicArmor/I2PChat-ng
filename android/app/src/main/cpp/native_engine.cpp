@@ -224,6 +224,24 @@ struct Engine {
         local->DeleteLocalRef(jc);
     }
 
+    void emit_4string(const char* name, const std::string& a, const std::string& b,
+                      const std::string& c, const std::string& d) {
+        JNIEnv* local = env();
+        if (local == nullptr) {
+            return;
+        }
+        jstring ja = utf8_to_jstring(local, a);
+        jstring jb = utf8_to_jstring(local, b);
+        jstring jc = utf8_to_jstring(local, c);
+        jstring jd = utf8_to_jstring(local, d);
+        call_void(name, "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                  ja, jb, jc, jd);
+        local->DeleteLocalRef(ja);
+        local->DeleteLocalRef(jb);
+        local->DeleteLocalRef(jc);
+        local->DeleteLocalRef(jd);
+    }
+
     /// Two strings and a byte array, for a payload that is not text.
     void emit_2string_bytes(const char* name, const std::string& a, const std::string& b,
                             const i2pchat::Bytes& data) {
@@ -671,9 +689,10 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         if (!images_dir.empty()) {
             config.images_dir = images_dir;
         }
-        // "Do not keep files": received pictures go to the UI as bytes and
-        // are never written, not even to the cache directory.
+        // "Do not keep files": pictures stay in memory. Other received files
+        // are encrypted with a process-only key and cannot be opened after stop.
         config.images_in_memory = images_in_memory == JNI_TRUE;
+        config.seal_downloads = images_in_memory == JNI_TRUE;
         config.profile_password = jstring_to_utf8(env, j_password);
         // An unknown peer stays out until the Trust dialog accepts the key.
         config.trust_auto_accept_first_sighting = false;
@@ -725,6 +744,10 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         };
         events.on_file_received = [](const std::string& peer, const fs::path& path) {
             g_engine.emit_2string("onFileReceived", peer, path.string());
+        };
+        events.on_sealed_file = [](const std::string& peer, const std::string& id,
+                                   const std::string& display_name, const fs::path& path) {
+            g_engine.emit_4string("onSealedFile", peer, id, display_name, path.string());
         };
         events.on_image_received = [](const std::string& peer, const fs::path& path) {
             g_engine.emit_2string("onImageReceived", peer, path.string());
@@ -835,6 +858,24 @@ Java_org_i2pchat_android_NativeEngine_nativeStop(JNIEnv*, jclass) {
     g_engine.join_io();
     g_engine.trust_answers.clear();
     g_engine.trust_asked.clear();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeDecryptSealed(JNIEnv* env, jclass, jstring j_src,
+                                                          jstring j_dest) {
+    if (!g_engine.service) {
+        return JNI_FALSE;
+    }
+    const std::string src = jstring_to_utf8(env, j_src);
+    const std::string dest = jstring_to_utf8(env, j_dest);
+    try {
+        const bool ok = g_engine.on_core<bool>([&] {
+            return g_engine.service && g_engine.service->unseal_download(src, dest);
+        });
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

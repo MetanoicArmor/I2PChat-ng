@@ -19,6 +19,12 @@ object NativeEngine {
         fun onTransportState(state: String, reason: String)
         fun onTransfer(peer: String, json: String)
         fun onFileReceived(peer: String, path: String)
+        /**
+         * A received file written as ciphertext. Arrives before the
+         * `[file] <id> <name>` history line. `path` is unreadable without the
+         * session key, which `nativeStop` destroys.
+         */
+        fun onSealedFile(peer: String, id: String, displayName: String, path: String)
         fun onImageReceived(peer: String, path: String)
         /**
          * A received picture when the engine was started with `imagesInMemory`:
@@ -75,6 +81,8 @@ object NativeEngine {
         imagesInMemory: Boolean,
     ): String
     @JvmStatic external fun nativeStop()
+    /** Writes the plaintext of a sealed download to `dest`. False after the chat has stopped. */
+    @JvmStatic external fun nativeDecryptSealed(src: String, dest: String): Boolean
     @JvmStatic external fun nativeTrustRespond(peer: String, keyHex: String, accept: Boolean)
     /** Returns false when the offer is no longer pending (peer dropped, newer offer). */
     @JvmStatic external fun nativeFileRespond(peer: String, accept: Boolean): Boolean

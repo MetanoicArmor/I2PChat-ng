@@ -60,11 +60,17 @@ data class MessageUi(
      * written to storage ("Do not keep files"); `text` is `[image] <name>`.
      */
     val memoryImage: String = "",
+    /**
+     * Id of a sealed download still held for this chat session. Empty once the
+     * session key is gone: the history line keeps the display name only.
+     */
+    val sealedFile: String = "",
 ) {
     val fileCaption: String
         get() = when {
             imagePath.isNotBlank() -> File(imagePath).name
             filePath.isNotBlank() -> File(filePath).name
+            parseSealedFileHistory(text) != null -> parseSealedFileHistory(text)!!.displayName
             text.startsWith("[file] ") -> File(text.removePrefix("[file] ").trim()).name
             // A picture whose file is no longer there still has a name to show.
             text.startsWith("[image] ") -> File(text.removePrefix("[image] ").trim()).name
@@ -628,6 +634,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             _state.update { it.copy(samReady = true, routerIssue = null) }
             clearIncomingCache()
             MemoryImages.clear()
+            SealedFiles.clear()
             val (filesDir, imagesDir) = mediaDirs(ui)
             // Empty means the engine default under the profile directory.
             val profileDir = File(appRoot, "profiles/$profile")
@@ -741,6 +748,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { NativeEngine.nativeStop() }
             MemoryImages.clear()
+            SealedFiles.clear()
+            clearIncomingCache()
             I2pdForegroundService.stop(getApplication())
             _state.update {
                 it.copy(
@@ -1022,6 +1031,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeRemovePeer(addr)
             MemoryImages.removePeer(addr)
+            SealedFiles.removePeer(addr)
             if (_state.value.selectedId == addr) {
                 _state.update { it.copy(selectedId = "", messages = emptyList()) }
             }
@@ -1037,6 +1047,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeClearHistory(addr)
             MemoryImages.removePeer(addr)
+            SealedFiles.removePeer(addr)
             loadHistory()
         }
     }
@@ -1175,6 +1186,11 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                             imagePath = resolveChatImagePath(text, appRoot, imageDirs),
                             filePath = resolveChatFilePath(text, appRoot, fileDirs),
                             memoryImage = if (!group && kind == "in") resolveMemoryImage(text, id) else "",
+                            sealedFile = if (!group && kind == "in") {
+                                parseSealedFileHistory(text)?.id?.takeIf { SealedFiles.contains(id, it) }.orEmpty()
+                            } else {
+                                ""
+                            },
                         ),
                     )
                 }
@@ -1521,6 +1537,77 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (peer == _state.value.selectedId) loadHistory()
     }
 
+    override fun onSealedFile(peer: String, id: String, displayName: String, path: String) {
+        SealedFiles.put(peer, id, displayName, path)
+        val dest = saveAsUri
+        saveAsUri = null
+        if (dest != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                exportSealed(peer, id, dest)
+            }
+        }
+        onMain {
+            NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, displayName))
+            if (peer == _state.value.selectedId) loadHistory()
+        }
+    }
+
+    /** Decrypts a sealed download into a short-lived cache file and opens it. */
+    fun openSealedFile(peer: String, id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val plain = decryptSealedToView(peer, id)
+            onMain {
+                if (plain == null) {
+                    Toast.makeText(getApplication(), str(R.string.file_gone), Toast.LENGTH_SHORT).show()
+                } else {
+                    openReceivedFile(getApplication(), plain.absolutePath)
+                }
+            }
+        }
+    }
+
+    /** Decrypts a sealed download into a document the user picked. */
+    fun saveSealedFile(peer: String, id: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = exportSealed(peer, id, uri)
+            onMain {
+                Toast.makeText(
+                    getApplication(),
+                    str(if (saved) R.string.file_saved else R.string.file_gone),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
+    private fun decryptSealedToView(peer: String, id: String): File? {
+        val entry = SealedFiles.get(peer, id) ?: return null
+        val viewDir = File(incomingCache(), "view")
+        viewDir.mkdirs()
+        viewDir.listFiles()?.forEach { it.delete() }
+        val dest = File(viewDir, safeLocalFileName(entry.displayName))
+        val ok = runCatching { NativeEngine.nativeDecryptSealed(entry.path, dest.absolutePath) }
+            .getOrDefault(false)
+        if (!ok) {
+            dest.delete()
+            return null
+        }
+        return dest
+    }
+
+    private fun exportSealed(peer: String, id: String, uri: Uri): Boolean {
+        val plain = decryptSealedToView(peer, id) ?: return false
+        return try {
+            val out = getApplication<Application>().contentResolver.openOutputStream(uri) ?: return false
+            out.use { dest -> plain.inputStream().use { it.copyTo(dest) } }
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            plain.delete()
+        }
+    }
+
     override fun onImageData(peer: String, name: String, data: ByteArray) {
         // Stored on the engine thread, before anything is posted: the history
         // entry that follows is resolved against the store.
@@ -1637,6 +1724,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     override fun onCleared() {
         clearIncomingCache()
         MemoryImages.clear()
+        SealedFiles.clear()
         NativeEngine.nativeSetListener(null)
         runCatching { NativeEngine.nativeStop() }
         super.onCleared()

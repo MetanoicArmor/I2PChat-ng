@@ -9,6 +9,7 @@ add_library(i2pchat_core
   src/protocol/signals.cpp
   src/transfer/policy.cpp
   src/transfer/files.cpp
+  src/transfer/cache_seal.cpp
   src/transfer/manager.cpp
   src/session/handshake.cpp
   src/session/peer_session.cpp

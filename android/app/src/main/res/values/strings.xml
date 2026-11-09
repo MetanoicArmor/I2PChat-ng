@@ -38,7 +38,9 @@
     <string name="files_folder">Files folder</string>
     <string name="images_folder">Images folder</string>
     <string name="ephemeral_media">Do not keep files</string>
-    <string name="ephemeral_media_hint">Received pictures stay in memory and are never written to storage. Other received files go into a cache deleted when I2PChat closes or you switch profile. Save as… can still keep one file.</string>
+    <string name="ephemeral_media_hint">Received pictures stay in memory. Other received files are encrypted in the app cache with a key that exists only while the chat is open. Closing the chat destroys that key, and those files cannot be opened again. Save as… can still keep one file.</string>
+    <string name="file_gone">This file is no longer available</string>
+    <string name="file_saved">File saved</string>
     <string name="image_saved">Image saved</string>
     <string name="image_save_failed">Could not save the image</string>
 

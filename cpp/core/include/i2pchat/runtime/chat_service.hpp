@@ -22,6 +22,7 @@
 #include "i2pchat/session/manager.hpp"
 #include "i2pchat/session/trust_store.hpp"
 #include "i2pchat/storage/chat_history.hpp"
+#include "i2pchat/transfer/cache_seal.hpp"
 #include "i2pchat/storage/contacts.hpp"
 #include "i2pchat/storage/profile_paths.hpp"
 #include "i2pchat/storage/replica_settings.hpp"
@@ -64,6 +65,11 @@ struct ChatServiceConfig {
     /// history entry then carries the image name only. Requires that handler;
     /// the constructor throws without it rather than drop every picture.
     bool images_in_memory = false;
+    /// Encrypt received files into `downloads_dir` with a key created for this
+    /// process. `stop` wipes the key, so ciphertext left behind cannot be
+    /// opened again. History stores the random id and the display name, not a
+    /// plaintext copy.
+    bool seal_downloads = false;
     storage::RetentionPolicy retention;
     session::SessionManagerConfig sessions;
     protocol::PaddingProfile padding = protocol::PaddingProfile::Balanced;
@@ -148,6 +154,12 @@ struct ChatEvents {
         on_transfer;
     std::function<void(const std::string& peer, const std::filesystem::path& path)>
         on_file_received;
+    /// A received file when `seal_downloads` is set, instead of
+    /// `on_file_received`. Fires before the history line, so a UI can index
+    /// the ciphertext path before it sees `[file] <id> <name>`.
+    std::function<void(const std::string& peer, const std::string& id,
+                       const std::string& display_name, const std::filesystem::path& path)>
+        on_sealed_file;
     std::function<void(const std::string& peer, const std::filesystem::path& path)>
         on_image_received;
     /// A received image when `ChatServiceConfig::images_in_memory` is set,
@@ -224,6 +236,11 @@ public:
     /// Answer a file offer that `offer_file` deferred. Returns false when the
     /// peer has no offer waiting any more.
     bool respond_file_offer(std::string_view peer, bool accept);
+
+    /// Decrypt one file written under `seal_downloads` into `dest`. False when
+    /// the session key is already gone or the ciphertext does not authenticate.
+    bool unseal_download(const std::filesystem::path& src,
+                         const std::filesystem::path& dest) const;
 
     /// Collect whatever the replicas are holding for every known peer. Called
     /// on a timer while the service is running; exposed for the UI's manual
@@ -330,6 +347,8 @@ private:
 
     asio::any_io_executor executor_;
     ChatServiceConfig config_;
+    /// Present only when `seal_downloads` is set. Wiped in `stop` and in the destructor.
+    std::shared_ptr<transfer::SessionSeal> seal_;
     ChatEvents events_;
     storage::ProfilePaths paths_;
     ProfileIdentity identity_;

@@ -12,6 +12,7 @@
 
 #include "i2pchat/bytes.hpp"
 #include "i2pchat/protocol/signals.hpp"
+#include "i2pchat/transfer/cache_seal.hpp"
 #include "i2pchat/transfer/files.hpp"
 #include "i2pchat/transfer/policy.hpp"
 
@@ -134,6 +135,10 @@ public:
         /// Hand a received image to `on_image_data` instead of writing it to
         /// `images_dir`. Nothing touches storage for that image.
         bool images_in_memory = false;
+        /// Encrypt received files with this key instead of writing plaintext.
+        /// The on-disk name is random. `on_sealed_file` reports the real name.
+        /// A wiped key refuses the transfer rather than falling back to plaintext.
+        std::shared_ptr<SessionSeal> seal;
         /// Injectable so generated image names are reproducible in tests.
         std::function<std::int64_t()> now_seconds;
     };
@@ -149,6 +154,13 @@ public:
         std::function<void(const std::string& message)> on_system;
         std::function<void(const std::string& message)> on_error;
         std::function<void(const std::filesystem::path& path)> on_file_received;
+        /// A received file stored as ciphertext. `id` is the random storage
+        /// name without `.bin`, `display_name` is the sanitized offer name,
+        /// `path` is the ciphertext. Replaces `on_file_received` when `seal`
+        /// is set.
+        std::function<void(const std::string& id, const std::string& display_name,
+                           const std::filesystem::path& path)>
+            on_sealed_file;
         std::function<void(const std::filesystem::path& path)> on_image_received;
         /// Replaces `on_image_received` when `Config::images_in_memory` is
         /// set: the name the image would have been saved under and its
@@ -195,7 +207,10 @@ private:
         /// Where bytes are written: `path` once accepted, `path` + ".pending"
         /// while the user has not answered yet.
         std::filesystem::path write_path;
+        /// Set when the bytes on disk are ciphertext. Empty otherwise.
+        std::string seal_id;
         std::string name;
+        std::unique_ptr<CacheSink> sink;
         std::uint64_t size = 0;
         std::uint64_t received = 0;
         std::uint64_t message_id = 0;
