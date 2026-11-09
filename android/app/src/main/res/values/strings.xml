@@ -38,7 +38,9 @@
     <string name="files_folder">Files folder</string>
     <string name="images_folder">Images folder</string>
     <string name="ephemeral_media">Do not keep files</string>
-    <string name="ephemeral_media_hint">Received files go into a cache and are deleted when I2PChat closes or you switch profile. Save as… can still keep one file.</string>
+    <string name="ephemeral_media_hint">Received pictures stay in memory and are never written to storage. Other received files go into a cache deleted when I2PChat closes or you switch profile. Save as… can still keep one file.</string>
+    <string name="image_saved">Image saved</string>
+    <string name="image_save_failed">Could not save the image</string>
 
     <!-- Trust -->
     <string name="tofu_key_changed">Signing key changed</string>

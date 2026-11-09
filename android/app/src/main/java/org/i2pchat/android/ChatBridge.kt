@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,11 @@ data class MessageUi(
     val imagePath: String = "",
     /** Absolute local path when `text` is `[file] …`. */
     val filePath: String = "",
+    /**
+     * Key into [MemoryImages] when the picture was received without being
+     * written to storage ("Do not keep files"); `text` is `[image] <name>`.
+     */
+    val memoryImage: String = "",
 ) {
     val fileCaption: String
         get() = when {
@@ -621,6 +627,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             appendNotice("router.sam_ready", NoticeUi.LEVEL_VERBOSE, sam)
             _state.update { it.copy(samReady = true, routerIssue = null) }
             clearIncomingCache()
+            MemoryImages.clear()
             val (filesDir, imagesDir) = mediaDirs(ui)
             // Empty means the engine default under the profile directory.
             val profileDir = File(appRoot, "profiles/$profile")
@@ -639,6 +646,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                         filesDir,
                         imagesDir,
                         profilePassword,
+                        // Received pictures then never reach the cache
+                        // directory, which is on flash storage like any other.
+                        ui.ephemeralMedia,
                     ),
                 )
             }.getOrElse { ex ->
@@ -730,6 +740,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         tunnelWatchJob?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { NativeEngine.nativeStop() }
+            MemoryImages.clear()
             I2pdForegroundService.stop(getApplication())
             _state.update {
                 it.copy(
@@ -1010,6 +1021,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun removePeer(addr: String) {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeRemovePeer(addr)
+            MemoryImages.removePeer(addr)
             if (_state.value.selectedId == addr) {
                 _state.update { it.copy(selectedId = "", messages = emptyList()) }
             }
@@ -1024,6 +1036,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun clearHistory(addr: String) {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeClearHistory(addr)
+            MemoryImages.removePeer(addr)
             loadHistory()
         }
     }
@@ -1147,9 +1160,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 for (i in 0 until rows.length()) {
                     val o = rows.getJSONObject(i)
                     val text = o.optString("text")
+                    val kind = o.optString("kind")
                     add(
                         MessageUi(
-                            kind = o.optString("kind"),
+                            kind = kind,
                             text = text,
                             ts = o.optString("ts").ifBlank { o.optString("createdAt") },
                             sender = o.optString("senderId"),
@@ -1160,6 +1174,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                             messageId = o.optString("messageId").ifBlank { o.optString("msgId") },
                             imagePath = resolveChatImagePath(text, appRoot, imageDirs),
                             filePath = resolveChatFilePath(text, appRoot, fileDirs),
+                            memoryImage = if (!group && kind == "in") resolveMemoryImage(text, id) else "",
                         ),
                     )
                 }
@@ -1506,6 +1521,33 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         if (peer == _state.value.selectedId) loadHistory()
     }
 
+    override fun onImageData(peer: String, name: String, data: ByteArray) {
+        // Stored on the engine thread, before anything is posted: the history
+        // entry that follows is resolved against the store.
+        MemoryImages.put(peer, name, data)
+        onImageReceived(peer, name)
+    }
+
+    /** Writes an in-memory picture to a document the user picked. */
+    fun saveMemoryImage(key: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = runCatching {
+                val data = MemoryImages.get(key) ?: return@runCatching false
+                val out = getApplication<Application>().contentResolver.openOutputStream(uri)
+                    ?: return@runCatching false
+                out.use { it.write(data) }
+                true
+            }.getOrDefault(false)
+            onMain {
+                Toast.makeText(
+                    getApplication(),
+                    str(if (saved) R.string.image_saved else R.string.image_save_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
     override fun onImageReceived(peer: String, path: String) = onMain {
         NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_image))
         if (peer == _state.value.selectedId) loadHistory()
@@ -1594,6 +1636,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onCleared() {
         clearIncomingCache()
+        MemoryImages.clear()
         NativeEngine.nativeSetListener(null)
         runCatching { NativeEngine.nativeStop() }
         super.onCleared()

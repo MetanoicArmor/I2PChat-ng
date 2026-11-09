@@ -530,25 +530,29 @@ void IncomingTransfers::finish_image() {
             .substr(0, 8);
     const std::string filename =
         "img_" + std::to_string(now()) + "_" + digest + "." + *extension;
-    const std::filesystem::path target = config_.images_dir / filename;
 
-    std::error_code ignored;
-    std::filesystem::create_directories(config_.images_dir, ignored);
-    std::ofstream out(target, std::ios::binary | std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        fail_image("Cannot save the received image");
-        return;
-    }
-    out.write(reinterpret_cast<const char*>(stored.data()),
-              static_cast<std::streamsize>(stored.size()));
-    out.flush();
-    if (!out) {
+    // Empty when the image stays in memory: there is no file to point at.
+    std::filesystem::path target;
+    if (!config_.images_in_memory) {
+        target = config_.images_dir / filename;
+        std::error_code ignored;
+        std::filesystem::create_directories(config_.images_dir, ignored);
+        std::ofstream out(target, std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!out.is_open()) {
+            fail_image("Cannot save the received image");
+            return;
+        }
+        out.write(reinterpret_cast<const char*>(stored.data()),
+                  static_cast<std::streamsize>(stored.size()));
+        out.flush();
+        if (!out) {
+            out.close();
+            std::filesystem::remove(target, ignored);
+            fail_image("Cannot save the received image");
+            return;
+        }
         out.close();
-        std::filesystem::remove(target, ignored);
-        fail_image("Cannot save the received image");
-        return;
     }
-    out.close();
 
     const std::string name = image_->name;
     const std::uint64_t size = stored.size();
@@ -558,7 +562,11 @@ void IncomingTransfers::finish_image() {
     send(Frame{'S', protocol::signal_body(protocol::build_image_ack(name, message_id))});
     report(Progress{name, target, size, size, Direction::Incoming, true,
                     Outcome::Completed});
-    if (callbacks_.on_image_received) {
+    if (config_.images_in_memory) {
+        if (callbacks_.on_image_data) {
+            callbacks_.on_image_data(filename, stored);
+        }
+    } else if (callbacks_.on_image_received) {
         callbacks_.on_image_received(target);
     }
 }

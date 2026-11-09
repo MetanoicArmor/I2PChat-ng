@@ -20,6 +20,12 @@ object NativeEngine {
         fun onTransfer(peer: String, json: String)
         fun onFileReceived(peer: String, path: String)
         fun onImageReceived(peer: String, path: String)
+        /**
+         * A received picture when the engine was started with `imagesInMemory`:
+         * the bytes instead of a file. Arrives before the `[image] <name>`
+         * history entry, and nothing was written to storage for it.
+         */
+        fun onImageData(peer: String, name: String, data: ByteArray)
         fun onImageText(peer: String, text: String)
         fun onContactsChanged()
         fun onGroupMessage(groupId: String)
@@ -66,6 +72,7 @@ object NativeEngine {
         filesDir: String,
         imagesDir: String,
         profilePassword: String,
+        imagesInMemory: Boolean,
     ): String
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeTrustRespond(peer: String, keyHex: String, accept: Boolean)

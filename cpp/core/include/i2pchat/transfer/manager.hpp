@@ -131,6 +131,9 @@ public:
         std::uint64_t max_file_size = kMaxFileSize;
         std::uint64_t max_image_size = kMaxImageSize;
         std::size_t max_image_lines = kMaxImageLines;
+        /// Hand a received image to `on_image_data` instead of writing it to
+        /// `images_dir`. Nothing touches storage for that image.
+        bool images_in_memory = false;
         /// Injectable so generated image names are reproducible in tests.
         std::function<std::int64_t()> now_seconds;
     };
@@ -147,6 +150,10 @@ public:
         std::function<void(const std::string& message)> on_error;
         std::function<void(const std::filesystem::path& path)> on_file_received;
         std::function<void(const std::filesystem::path& path)> on_image_received;
+        /// Replaces `on_image_received` when `Config::images_in_memory` is
+        /// set: the name the image would have been saved under and its
+        /// validated bytes, already without metadata.
+        std::function<void(const std::string& name, const Bytes& data)> on_image_data;
         /// A text-rendered image, lines already joined by newlines.
         std::function<void(const std::string& text)> on_image_lines_received;
     };

@@ -89,8 +89,12 @@ fun KeetMessageBubble(
                     color = foreground.copy(alpha = 0.75f),
                 )
             }
-            if (msg.imagePath.isNotBlank()) {
-                ChatImageThumb(msg.imagePath)
+            if (msg.imagePath.isNotBlank() || msg.memoryImage.isNotBlank()) {
+                ChatImageThumb(
+                    path = msg.imagePath,
+                    memoryKey = msg.memoryImage,
+                    onOpenPath = { onOpenFile(it) },
+                )
                 if (msg.fileCaption.isNotBlank()) {
                     Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall, color = foreground)
                 }
@@ -108,8 +112,8 @@ fun KeetMessageBubble(
                     )
                 }
             } else if (msg.text.startsWith("[image] ")) {
-                // The picture file is gone, for example after "Do not keep
-                // files" cleared its cache: show the name, not the local path.
+                // The picture is gone: the cache was cleared, or the
+                // in-memory copy was dropped after "Do not keep files".
                 Text("📷 ${msg.fileCaption.ifBlank { msg.text }}", color = foreground)
             } else {
                 Text(msg.text, style = textStyle, color = foreground)

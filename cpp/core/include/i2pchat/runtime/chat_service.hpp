@@ -59,6 +59,11 @@ struct ChatServiceConfig {
     /// profile directory when left empty.
     std::filesystem::path downloads_dir;
     std::filesystem::path images_dir;
+    /// Keep received images out of storage: they are handed to
+    /// `ChatEvents::on_image_data` and never written to `images_dir`. The
+    /// history entry then carries the image name only. Requires that handler;
+    /// the constructor throws without it rather than drop every picture.
+    bool images_in_memory = false;
     storage::RetentionPolicy retention;
     session::SessionManagerConfig sessions;
     protocol::PaddingProfile padding = protocol::PaddingProfile::Balanced;
@@ -145,6 +150,12 @@ struct ChatEvents {
         on_file_received;
     std::function<void(const std::string& peer, const std::filesystem::path& path)>
         on_image_received;
+    /// A received image when `ChatServiceConfig::images_in_memory` is set,
+    /// instead of `on_image_received`. Fires before the `[image] <name>`
+    /// history entry is appended, so a UI that looks the bytes up by name on
+    /// `on_history` already has them.
+    std::function<void(const std::string& peer, const std::string& name, const Bytes& data)>
+        on_image_data;
     /// A peer sent a text-rendered image, lines joined by newlines.
     std::function<void(const std::string& peer, const std::string& text)> on_image_text;
     /// Whether to accept an offered file. Unset means accept.

@@ -85,6 +85,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -255,41 +256,75 @@ fun PeerLinkDot(link: String) {
 }
 
 @Composable
-fun ChatImageThumb(path: String) {
+fun ChatImageThumb(
+    path: String = "",
+    memoryKey: String = "",
+    onOpenPath: ((String) -> Unit)? = null,
+) {
     val context = LocalContext.current
-    val bitmap = remember(path) {
+    val caption = when {
+        path.isNotBlank() -> File(path).name
+        memoryKey.isNotBlank() -> memoryKey.substringAfter('\n', memoryKey)
+        else -> ""
+    }
+    val bitmap = remember(path, memoryKey) {
         runCatching {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, bounds)
-            var sample = 1
-            val maxSide = 1280
-            while (
-                (bounds.outWidth / sample) > maxSide ||
-                (bounds.outHeight / sample) > maxSide
-            ) {
-                sample *= 2
-            }
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
+            decodeChatImageThumb(path, memoryKey)
         }.getOrNull()
+    }
+    val openPath: (() -> Unit)? = when {
+        path.isNotBlank() -> ({
+            if (onOpenPath != null) onOpenPath(path) else openReceivedFile(context, path)
+        })
+        else -> null
     }
     if (bitmap != null) {
         Image(
             bitmap = bitmap,
-            contentDescription = File(path).name,
+            contentDescription = caption,
             modifier = Modifier
                 .widthIn(max = 260.dp)
                 .heightIn(max = 320.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .clickable { openReceivedFile(context, path) },
+                .then(if (openPath != null) Modifier.clickable(onClick = openPath) else Modifier),
             contentScale = ContentScale.Fit,
         )
     } else {
         Text(
-            "📷 ${File(path).name.ifBlank { path }}",
-            modifier = Modifier.clickable { openReceivedFile(context, path) },
+            "📷 ${caption.ifBlank { path.ifBlank { memoryKey } }}",
+            modifier = if (openPath != null) Modifier.clickable(onClick = openPath) else Modifier,
         )
     }
+}
+
+/** Thumbnail decode shared by on-disk and in-memory received pictures. */
+fun decodeChatImageThumb(path: String, memoryKey: String = ""): ImageBitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    when {
+        path.isNotBlank() -> BitmapFactory.decodeFile(path, bounds)
+        memoryKey.isNotBlank() -> {
+            val bytes = MemoryImages.get(memoryKey) ?: return null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        }
+        else -> return null
+    }
+    var sample = 1
+    val maxSide = 1280
+    while (
+        (bounds.outWidth / sample) > maxSide ||
+        (bounds.outHeight / sample) > maxSide
+    ) {
+        sample *= 2
+    }
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    val bitmap = when {
+        path.isNotBlank() -> BitmapFactory.decodeFile(path, opts)
+        else -> {
+            val bytes = MemoryImages.get(memoryKey) ?: return null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        }
+    }
+    return bitmap?.asImageBitmap()
 }
 
 /** True when `file` sits in a received-media directory of some profile (downloads/ or images/). */
@@ -382,12 +417,16 @@ fun MessageActionsDialog(
     onRetry: () -> Unit,
     onOpen: (String) -> Unit,
     onOpenFolder: (String) -> Unit,
+    onSaveMemoryImage: ((String) -> Unit)? = null,
 ) {
     val path = msg.imagePath.ifBlank { msg.filePath }
     val folder = path.takeIf { it.isNotBlank() }?.let { File(it).parentFile }?.takeIf {
         it.isDirectory && (it.name == "downloads" || it.name == "images")
     }
-    val plain = msg.text.isNotBlank() && msg.imagePath.isBlank() && !msg.text.startsWith("[file] ")
+    val plain = msg.text.isNotBlank() &&
+        msg.imagePath.isBlank() &&
+        msg.memoryImage.isBlank() &&
+        !msg.text.startsWith("[file] ")
     val detail = msg.deliveryHint.ifBlank { msg.deliveryReason }.trim()
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -397,6 +436,11 @@ fun MessageActionsDialog(
                 if (path.isNotBlank()) {
                     TextButton(onClick = { onOpen(path) }) { Text(stringResource(R.string.action_open)) }
                     TextButton(onClick = { onCopy(path) }) { Text(stringResource(R.string.menu_copy_path)) }
+                }
+                if (msg.memoryImage.isNotBlank() && onSaveMemoryImage != null) {
+                    TextButton(onClick = { onSaveMemoryImage(msg.memoryImage) }) {
+                        Text(stringResource(R.string.action_save_as))
+                    }
                 }
                 if (folder != null) {
                     TextButton(onClick = { onOpenFolder(folder.absolutePath) }) { Text(stringResource(R.string.menu_open_folder)) }
@@ -1036,12 +1080,20 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var newNote by remember { mutableStateOf("") }
     var messageMenu by remember { mutableStateOf<MessageUi?>(null) }
     var pendingOpenPath by remember { mutableStateOf<String?>(null) }
+    var pendingSaveMemoryKey by remember { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, false)
     }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, true)
+    }
+    val saveMemoryImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/*"),
+    ) { uri ->
+        val key = pendingSaveMemoryKey
+        pendingSaveMemoryKey = null
+        if (uri != null && key != null) bridge.saveMemoryImage(key, uri)
     }
     LaunchedEffect(id, group) { bridge.selectConversation(id, group) }
     LaunchedEffect(state.messages.size) {
@@ -1198,6 +1250,11 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     onOpenFolder = { path ->
                         openReceivedFolder(context, path)
                         messageMenu = null
+                    },
+                    onSaveMemoryImage = { key ->
+                        pendingSaveMemoryKey = key
+                        messageMenu = null
+                        saveMemoryImage.launch(msg.fileCaption.ifBlank { "image.jpg" })
                     },
                 )
             }

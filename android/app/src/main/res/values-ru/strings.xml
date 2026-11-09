@@ -34,7 +34,9 @@
     <string name="files_folder">Папка для файлов</string>
     <string name="images_folder">Папка для изображений</string>
     <string name="ephemeral_media">Не хранить файлы</string>
-    <string name="ephemeral_media_hint">Принятое попадает в кэш и удаляется при закрытии I2PChat или смене профиля. «Сохранить как…» может оставить один файл.</string>
+    <string name="ephemeral_media_hint">Принятые картинки остаются в памяти и не пишутся на диск. Остальные файлы попадают в кэш и удаляются при закрытии I2PChat или смене профиля. «Сохранить как…» может оставить один файл.</string>
+    <string name="image_saved">Изображение сохранено</string>
+    <string name="image_save_failed">Не удалось сохранить изображение</string>
 
     <string name="tofu_key_changed">Ключ подписи изменился</string>
     <string name="tofu_new_key">Новый ключ контакта</string>

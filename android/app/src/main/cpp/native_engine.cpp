@@ -224,6 +224,32 @@ struct Engine {
         local->DeleteLocalRef(jc);
     }
 
+    /// Two strings and a byte array, for a payload that is not text.
+    void emit_2string_bytes(const char* name, const std::string& a, const std::string& b,
+                            const i2pchat::Bytes& data) {
+        JNIEnv* local = env();
+        if (local == nullptr) {
+            return;
+        }
+        jbyteArray jdata = local->NewByteArray(static_cast<jsize>(data.size()));
+        if (jdata == nullptr) {
+            // Out of Java heap: the pending OutOfMemoryError must not leak
+            // into the next JNI call made on this thread.
+            if (local->ExceptionCheck()) {
+                local->ExceptionClear();
+            }
+            return;
+        }
+        local->SetByteArrayRegion(jdata, 0, static_cast<jsize>(data.size()),
+                                  reinterpret_cast<const jbyte*>(data.data()));
+        jstring ja = utf8_to_jstring(local, a);
+        jstring jb = utf8_to_jstring(local, b);
+        call_void(name, "(Ljava/lang/String;Ljava/lang/String;[B)V", ja, jb, jdata);
+        local->DeleteLocalRef(ja);
+        local->DeleteLocalRef(jb);
+        local->DeleteLocalRef(jdata);
+    }
+
     void start_io() {
         io.restart();
         work = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
@@ -614,7 +640,8 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
                                                   jstring j_profile, jstring j_host, jint port,
                                                   jint max_messages, jint max_age_days,
                                                   jint tunnel_length, jstring j_files,
-                                                  jstring j_images, jstring j_password) {
+                                                  jstring j_images, jstring j_password,
+                                                  jboolean images_in_memory) {
     try {
         if (g_engine.thread.joinable()) {
             g_engine.join_io();
@@ -644,6 +671,9 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         if (!images_dir.empty()) {
             config.images_dir = images_dir;
         }
+        // "Do not keep files": received pictures go to the UI as bytes and
+        // are never written, not even to the cache directory.
+        config.images_in_memory = images_in_memory == JNI_TRUE;
         config.profile_password = jstring_to_utf8(env, j_password);
         // An unknown peer stays out until the Trust dialog accepts the key.
         config.trust_auto_accept_first_sighting = false;
@@ -698,6 +728,10 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         };
         events.on_image_received = [](const std::string& peer, const fs::path& path) {
             g_engine.emit_2string("onImageReceived", peer, path.string());
+        };
+        events.on_image_data = [](const std::string& peer, const std::string& name,
+                                  const i2pchat::Bytes& data) {
+            g_engine.emit_2string_bytes("onImageData", peer, name, data);
         };
         events.on_image_text = [](const std::string& peer, const std::string& text) {
             g_engine.emit_2string("onImageText", peer, text);

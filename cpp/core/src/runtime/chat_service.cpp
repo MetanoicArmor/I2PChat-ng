@@ -156,6 +156,10 @@ ChatService::ChatService(asio::any_io_executor executor, ChatServiceConfig confi
         throw std::invalid_argument(
             "Invalid profile name. Allowed characters: a-z A-Z 0-9 . _ - (1..64 chars).");
     }
+    if (config_.images_in_memory && !events_.on_image_data) {
+        throw std::invalid_argument(
+            "images_in_memory needs an on_image_data handler to receive the images.");
+    }
     crypto::init();
     if (config_.downloads_dir.empty()) {
         config_.downloads_dir = paths_.data_dir() / "downloads";
@@ -430,6 +434,7 @@ void ChatService::wire_transfers(Peer& peer) {
     transfer::IncomingTransfers::Config config;
     config.downloads_dir = config_.downloads_dir;
     config.images_dir = config_.images_dir;
+    config.images_in_memory = config_.images_in_memory;
 
     const std::string addr = peer.addr;
     transfer::IncomingTransfers::Callbacks callbacks;
@@ -474,6 +479,18 @@ void ChatService::wire_transfers(Peer& peer) {
         if (events_.on_image_received) {
             events_.on_image_received(addr, path);
         }
+    };
+    callbacks.on_image_data = [this, addr](const std::string& name, const Bytes& data) {
+        // Bytes first: the history event is what makes a UI look them up.
+        if (events_.on_image_data) {
+            events_.on_image_data(addr, name, data);
+        }
+        storage::HistoryEntry entry;
+        entry.kind = "in";
+        // No directory: the image was never a file on this device.
+        entry.text = "[image] " + name;
+        entry.ts = storage::now_iso8601_utc();
+        append_history(addr, entry);
     };
     callbacks.on_image_lines_received = [this, addr](const std::string& text) {
         if (events_.on_image_text) {
