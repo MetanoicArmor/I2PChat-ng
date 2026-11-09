@@ -36,7 +36,7 @@ data class RouterPrefs(
         .put("allow_remote_sam", allowRemoteSam)
 
     companion object {
-        const val DEFAULT_TUNNEL_LENGTH = 3
+        const val DEFAULT_TUNNEL_LENGTH = 4
         const val MIN_TUNNEL_LENGTH = 1
         const val MAX_TUNNEL_LENGTH = 7
 

@@ -24,7 +24,7 @@ _DISABLE_BUNDLED_MARKERS = (
     "/usr/local/share/i2pchat/system-router-only",
 )
 
-DEFAULT_TUNNEL_LENGTH = 3
+DEFAULT_TUNNEL_LENGTH = 4
 # Zero hops would expose the client's own router as the tunnel endpoint.
 MIN_TUNNEL_LENGTH = 1
 MAX_TUNNEL_LENGTH = 7

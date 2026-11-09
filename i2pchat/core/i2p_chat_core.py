@@ -1460,7 +1460,7 @@ class I2PChatCore:
         on_trust_decision: Optional[TrustDecisionCallback] = None,
         on_trust_mismatch_decision: Optional[TrustMismatchDecisionCallback] = None,
         on_saved_contacts_changed: Optional[Callable[[], None]] = None,
-        tunnel_length: int = 3,
+        tunnel_length: int = 4,
     ) -> None:
         self.sam_address = sam_address
         self.tunnel_length = max(1, min(7, int(tunnel_length)))

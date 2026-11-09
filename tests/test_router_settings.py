@@ -37,19 +37,19 @@ class RouterSettingsTests(unittest.TestCase):
                 loaded = load_router_settings()
                 self.assertEqual(loaded.backend, "system")
                 self.assertFalse(loaded.bundled_auto_start)
-                self.assertEqual(loaded.tunnel_length, 3)
+                self.assertEqual(loaded.tunnel_length, 4)
 
     def test_tunnel_length_roundtrip_and_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with mock.patch("i2pchat.router.settings.get_profiles_dir", return_value=td):
                 save_router_settings(RouterSettings(tunnel_length=5))
                 self.assertEqual(load_router_settings().tunnel_length, 5)
-                for raw, expected in ((0, 3), (8, 3), ("2", 2), ("x", 3), (None, 3)):
+                for raw, expected in ((0, 4), (8, 4), ("2", 2), ("x", 4), (None, 4)):
                     with open(router_settings_path(), "w", encoding="utf-8") as f:
                         json.dump({"tunnel_length": raw}, f)
                     self.assertEqual(load_router_settings().tunnel_length, expected, raw)
         self.assertEqual(
-            normalize_router_settings(RouterSettings(tunnel_length=99)).tunnel_length, 3
+            normalize_router_settings(RouterSettings(tunnel_length=99)).tunnel_length, 4
         )
 
     def test_disable_bundled_env_forces_system_backend(self) -> None:
@@ -195,7 +195,7 @@ class CoreTunnelOptionsTests(unittest.TestCase):
                 "outbound.quantity": "3",
             },
         )
-        self.assertEqual(I2PChatCore(profile="default").tunnel_length, 3)
+        self.assertEqual(I2PChatCore(profile="default").tunnel_length, 4)
 
 
 if __name__ == "__main__":

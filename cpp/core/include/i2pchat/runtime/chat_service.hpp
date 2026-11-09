@@ -64,8 +64,8 @@ struct ChatServiceConfig {
     protocol::PaddingProfile padding = protocol::PaddingProfile::Balanced;
     /// I2CP tunnel options passed to SESSION CREATE.
     std::vector<std::pair<std::string, std::string>> sam_options{
-        {"inbound.length", "3"},
-        {"outbound.length", "3"},
+        {"inbound.length", "4"},
+        {"outbound.length", "4"},
         {"inbound.quantity", "3"},
         {"outbound.quantity", "3"},
     };
