@@ -7643,6 +7643,7 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _show_chat_page(self) -> None:
         self._center_stack.setCurrentWidget(self._chat_page)
         _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
+        self._refresh_connection_buttons()
 
     def _on_verbose_log_toggled(self, on: bool) -> None:
         self._verbose_log_enabled = bool(on)
@@ -7680,6 +7681,8 @@ class ChatWindow(QtWidgets.QMainWindow):
             verbose=verbose,
         )
         self._refresh_contact_link_states()
+        # Keep Connect/Disconnect in sync with Status (same timer / main thread).
+        self._refresh_connection_buttons()
 
     def _refresh_contact_link_states(self) -> None:
         lst = self.contacts_list
@@ -7722,6 +7725,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         """Core persisted ``contacts.json`` (e.g. group member sync); refresh MRU list."""
         self._load_contacts_book()
         self._refresh_contacts_sidebar_list()
+        self._refresh_connection_buttons()
 
     def _ensure_stored_peer_in_contact_book(self) -> None:
         """Ensure legacy second line from profile .dat is in Saved peers (pre-init peek)."""
@@ -8048,6 +8052,11 @@ class ChatWindow(QtWidgets.QMainWindow):
         ):
             self._flush_compose_drafts_to_disk()
         self._refresh_contacts_sidebar_list()
+        # First book load often ran before the identity key existed, so addr/last
+        # active were empty when tunnels became ready and Connect stayed grey.
+        if not (self.addr_edit.text() or "").strip():
+            self._apply_startup_peer_from_book()
+        self._refresh_connection_buttons()
 
     def _set_active_group(self, group_id: str) -> bool:
         if self.core is None:
@@ -9319,6 +9328,20 @@ class ChatWindow(QtWidgets.QMainWindow):
             return bool(self.addr_edit.text().strip())
         return bool(self._resolved_peer_addr_for_actions())
 
+    def _i2p_network_ready_for_connect(self) -> bool:
+        """Same readiness bar as Status tunnels: do not require only network_status."""
+        if self.core is None:
+            return False
+        if self.core.network_status in ("local_ok", "visible"):
+            return True
+        try:
+            transport = str(self.core.session_manager.transport_state.value)
+        except Exception:
+            return False
+        # ready/degraded = tunnels up. reconnecting = outbound dial in progress
+        # (tunnels are still up — Connect must stay available).
+        return transport in ("ready", "degraded", "reconnecting")
+
     def _send_action_allowed(self) -> bool:
         """Разрешить Send: live-сессия или готовый BlindBox (очередь офлайн)."""
         if self.core is None:
@@ -9376,35 +9399,44 @@ class ChatWindow(QtWidgets.QMainWindow):
             )
         except Exception:
             norm_target = ""
-        already_for_target = (
-            bool(norm_target and self.core.has_active_live_session(norm_target))
+        # Only a finished secure session blocks Connect. Auto-reconnect "busy"
+        # must not grey the button — a click preempts the silent dial.
+        already_secure = bool(
+            norm_target and self.core.is_secure_live_for_peer(norm_target)
         )
-        at_cap = self.core._live_stream_count() >= max_concurrent_live_sessions()
-        # Исходящий I2P-connect имеет смысл только после local_ok (в UI — pending) или visible.
-        network_ready = self.core.network_status in ("local_ok", "visible")
+        live_with_target = bool(
+            norm_target and self.core.has_active_live_session(norm_target)
+        )
+        at_cap = (
+            (not already_secure)
+            and (not live_with_target)
+            and self.core._live_stream_count() >= max_concurrent_live_sessions()
+        )
+        network_ready = self._i2p_network_ready_for_connect()
         can_connect = (
-            (not busy)
-            and has_target
+            has_target
             and network_ready
-            and (not already_for_target)
+            and (not already_secure)
             and (not at_cap)
+            and (self._active_group_id is None)
         )
-        if self.connect_button.isEnabled() != can_connect:
-            self.connect_button.setEnabled(can_connect)
-        if connected:
-            n = self.core._live_stream_count()
-            cap = max_concurrent_live_sessions()
-            c_tip = (
-                f"Live sessions: {n}/{cap}. Connect another Saved peer if below the limit "
-                "and this address is not already connected."
-            )
-        elif busy:
-            c_tip = "Connecting… please wait."
+        self.connect_button.setEnabled(can_connect)
+        if already_secure:
+            c_tip = "Already connected to this peer. Use Disconnect to hang up."
+        elif self._active_group_id is not None:
+            c_tip = "Open a direct contact to start a live session."
         elif not has_target:
             c_tip = "Enter a peer base32 address or pick a saved contact."
         elif not network_ready:
             c_tip = (
-                "Wait until status shows Pending or Visible — I2P session is still starting."
+                "Wait until Status shows tunnels ready — I2P session is still starting."
+            )
+        elif at_cap:
+            c_tip = "Live session limit reached. Disconnect a peer first."
+        elif busy:
+            c_tip = (
+                "A dial is already in progress (often auto-reconnect after a drop). "
+                "Click Connect to take over and dial this peer."
             )
         else:
             delivery_state = str(self.core.get_delivery_telemetry().get("state", "unknown"))
@@ -9425,8 +9457,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             _tooltip_with_portable_shortcut(connect_base, _CONNECT_SHORTCUT_PORTABLE),
         )
         can_disconnect = connected
-        if self.disconnect_button.isEnabled() != can_disconnect:
-            self.disconnect_button.setEnabled(can_disconnect)
+        self.disconnect_button.setEnabled(can_disconnect)
         disconnect_base = (
             "End the current live session."
             if can_disconnect
@@ -13787,8 +13818,11 @@ class ChatWindow(QtWidgets.QMainWindow):
             )
             return
         self._refresh_sidebar_once_identity_ready()
+        self._refresh_connection_buttons()
         QtCore.QTimer.singleShot(0, self._update_peer_lock_indicator)
         QtCore.QTimer.singleShot(0, self._refresh_offline_history_display)
+        # Identity/sidebar refresh can land after the tunnels-ready status tick.
+        QtCore.QTimer.singleShot(0, self._refresh_connection_buttons)
 
     def _on_app_state_changed_clear_unread(
         self, state: QtCore.Qt.ApplicationState

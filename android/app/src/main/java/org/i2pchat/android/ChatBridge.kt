@@ -284,6 +284,8 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     private var draftJob: Job? = null
     /** Peers with a dial already in flight, so opening the chat twice does not start two handshakes. */
     private val dialingPeers = mutableSetOf<String>()
+    /** Peers the user hung up on; ignore late auto-reconnect "connecting" events. */
+    private val hungUpPeers = mutableSetOf<String>()
 
     /** Where the running engine writes pictures and files; null until it has started. */
     @Volatile private var activeImagesDir: File? = null
@@ -968,6 +970,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     /** Same dial `/connect` starts on desktop: the badge leaves offline before the first message. */
     private suspend fun dialPeer(addr: String) {
         if (!synchronized(dialingPeers) { dialingPeers.add(addr) }) return
+        synchronized(hungUpPeers) { hungUpPeers.remove(addr) }
         try {
             if (peerLiveInSnapshot(addr)) {
                 onMain { setPeerState(addr, "secure") }
@@ -992,6 +995,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun connectSelected() {
         val id = _state.value.selectedId
         if (id.isBlank() || _state.value.selectedIsGroup) return
+        synchronized(hungUpPeers) { hungUpPeers.remove(id) }
         viewModelScope.launch(Dispatchers.IO) {
             onMain { setPeerState(id, "connecting") }
             val ok = runCatching { NativeEngine.nativeConnectPeer(id) }.getOrDefault(false)
@@ -1008,6 +1012,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun disconnectSelected() {
         val id = _state.value.selectedId
         if (id.isBlank() || _state.value.selectedIsGroup) return
+        // Reflect hang-up immediately; native also cancels auto-reconnect dials.
+        synchronized(hungUpPeers) { hungUpPeers.add(id) }
+        setPeerState(id, "disconnected")
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeDisconnectPeer(id)
             refreshSnapshot()
@@ -1518,6 +1525,16 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     private fun setPeerState(addr: String, state: String) {
         if (addr.isBlank()) return
+        val hungUp = synchronized(hungUpPeers) { addr in hungUpPeers }
+        if (hungUp && (state == "connecting" || state == "handshaking")) {
+            // Auto-reconnect notices that raced past Disconnect.
+            return
+        }
+        if (state == "secure" || state == "disconnected" || state == "failed") {
+            if (state == "secure") {
+                synchronized(hungUpPeers) { hungUpPeers.remove(addr) }
+            }
+        }
         _state.update { it.copy(peerStates = it.peerStates + (addr to state)) }
     }
 

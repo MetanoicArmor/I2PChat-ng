@@ -668,7 +668,7 @@ asio::awaitable<std::string> ChatService::resolve_destination(const std::string&
     co_return co_await sam_->naming_lookup(trimmed + ".b32.i2p");
 }
 
-asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
+asio::awaitable<bool> ChatService::connect_peer(std::string peer, bool user_initiated) {
     if (!running_) {
         emit_error("Not connected to a router yet.");
         co_return false;
@@ -689,6 +689,12 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     }
 
     Peer& peer_entry = ensure_peer(peer_addr);
+    if (user_initiated) {
+        peer_entry.user_disconnected = false;
+    } else if (peer_entry.user_disconnected) {
+        // Disconnect while auto-reconnect / send-path dial was already running.
+        co_return false;
+    }
     if (live_link(peer_entry.link.get(), sessions_, peer_addr)) {
         co_return true;
     }
@@ -706,7 +712,7 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
             boost::system::error_code ignored;
             co_await gate->async_wait(asio::redirect_error(asio::use_awaitable, ignored));
             Peer* pending = find_peer(peer_addr);
-            if (pending == nullptr) {
+            if (pending == nullptr || pending->user_disconnected) {
                 co_return false;
             }
             if (!pending->connect_inflight) {
@@ -729,10 +735,13 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
         co_await peer_entry.connect_waiter->async_wait(
             asio::redirect_error(asio::use_awaitable, ignored));
         Peer* pending = find_peer(peer_addr);
-        if (pending != nullptr && live_link(pending->link.get(), sessions_, peer_addr)) {
+        if (pending == nullptr || pending->user_disconnected) {
+            co_return false;
+        }
+        if (live_link(pending->link.get(), sessions_, peer_addr)) {
             co_return true;
         }
-        if (pending != nullptr && pending->connect_succeeded) {
+        if (pending->connect_succeeded) {
             co_return true;
         }
         co_return false;
@@ -755,6 +764,10 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     try {
         stream = co_await sam_->connect_stream(destination);
     } catch (const std::exception& error) {
+        if (Peer* aborted = find_peer(peer_addr);
+            aborted != nullptr && aborted->user_disconnected) {
+            co_return false;
+        }
         const std::string what = error.what();
         const bool router_lost = sam_transport_lost(what);
         const session::TransportState before = sessions_.transport_state();
@@ -768,6 +781,11 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
             emit_error(std::string("connecting to ") + peer_addr.substr(0, 16) + "… failed: " +
                        what + " (retry in " + std::to_string(static_cast<int>(delay)) + "s)");
         }
+        co_return false;
+    }
+
+    if (peer_entry.user_disconnected) {
+        // Hang-up arrived while SAM was still building the outbound stream.
         co_return false;
     }
 
@@ -792,15 +810,24 @@ asio::awaitable<bool> ChatService::connect_peer(std::string peer) {
     sessions_.on_handshaking(peer_addr);
     link->start();
 
+    if (peer_entry.user_disconnected) {
+        link->close("user disconnect");
+        co_return false;
+    }
+
     boost::system::error_code ignored;
     co_await peer_entry.connect_waiter->async_wait(
         asio::redirect_error(asio::use_awaitable, ignored));
 
     Peer* settled = find_peer(peer_addr);
-    if (settled == nullptr || !settled->connect_succeeded) {
-        sessions_.mark_live_failure(peer_addr, "handshake did not complete");
-        if (settled != nullptr && settled->link != nullptr && !settled->link->secure()) {
-            settled->link->close("handshake failed");
+    if (settled == nullptr || settled->user_disconnected || !settled->connect_succeeded) {
+        sessions_.mark_live_failure(peer_addr, settled != nullptr && settled->user_disconnected
+                                                   ? "user disconnect"
+                                                   : "handshake did not complete");
+        if (settled != nullptr && settled->link != nullptr &&
+            (settled->user_disconnected || !settled->link->secure())) {
+            settled->link->close(settled->user_disconnected ? "user disconnect"
+                                                            : "handshake failed");
         }
         co_return false;
     }
@@ -819,19 +846,32 @@ void ChatService::set_profile_password(std::string password) {
 }
 
 void ChatService::disconnect_peer(std::string_view peer) {
-    Peer* entry = find_peer(peer);
-    if (entry == nullptr) {
+    const std::string addr = std::string(sam::normalize_peer_address(peer));
+    if (addr.empty()) {
         return;
+    }
+    Peer* entry = find_peer(addr);
+    if (entry == nullptr) {
+        // Dial may still be resolving; stash the hang-up on a placeholder peer
+        // so connect_peer / on_established see it when the address lands.
+        entry = &ensure_peer(addr);
     }
     entry->user_disconnected = true;
     entry->had_secure = false;
+    entry->auto_attempt = 0;
+    entry->auto_reconnect_inflight = false;
     if (entry->auto_reconnect) {
         entry->auto_reconnect->cancel();
         entry->auto_reconnect.reset();
     }
+    // Wake a connect_peer that is blocked on the handshake timer.
+    if (entry->connect_waiter) {
+        entry->connect_waiter->cancel();
+    }
     if (entry->link) {
         entry->link->close_gracefully();
     }
+    sessions_.on_disconnected(addr, "user-disconnect");
 }
 
 void ChatService::schedule_auto_reconnect(Peer& peer) {
@@ -890,10 +930,27 @@ void ChatService::on_established(PeerLink& link) {
     if (addr.empty()) {
         return;
     }
+
+    Peer& peer = ensure_peer(addr);
+    if (peer.user_disconnected) {
+        if (link.direction() == session::ConnectionDirection::Outbound) {
+            // Disconnect won the race against a finishing auto-reconnect dial.
+            // Outbound only — a later inbound from the peer must still be accepted.
+            link.close("user disconnect");
+            if (peer.connect_waiter) {
+                peer.connect_waiter->cancel();
+            }
+            peer.connect_succeeded = false;
+            sessions_.on_disconnected(addr, "user-disconnect");
+            return;
+        }
+        // Peer dialed us after we hung up: treat it as a fresh session.
+        peer.user_disconnected = false;
+    }
+
     sessions_.on_secure(addr);
     sessions_.mark_live_ok(addr);
 
-    Peer& peer = ensure_peer(addr);
     const std::shared_ptr<PeerLink> established = link.shared_from_this();
     if (peer.link == established) {
         // Outbound dial already registered this stream in connect_peer().
@@ -1375,6 +1432,23 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
         events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
     }
     co_return true;
+}
+
+bool ChatService::complete_deferred_trust(std::string_view peer, bool accept) {
+    const std::string addr = std::string(sam::normalize_peer_address(peer));
+    if (addr.empty()) {
+        return false;
+    }
+    for (PeerLink* link : pending_inbound_) {
+        if (link != nullptr && link->peer_addr() == addr && link->awaiting_trust()) {
+            return link->complete_deferred_trust(accept);
+        }
+    }
+    Peer* entry = find_peer(addr);
+    if (entry != nullptr && entry->link != nullptr && entry->link->awaiting_trust()) {
+        return entry->link->complete_deferred_trust(accept);
+    }
+    return false;
 }
 
 bool ChatService::respond_file_offer(std::string_view peer, bool accept) {

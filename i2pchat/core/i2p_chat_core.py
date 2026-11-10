@@ -2399,8 +2399,10 @@ class I2PChatCore:
                 pass
 
     def _has_live_session_slot_for_peer(self, peer_id: str) -> bool:
+        """True only when there is a live stream, not a leftover empty map entry."""
         k = self._normalize_peer_addr(peer_id)
-        return k in self._live_sessions
+        s = self._live_sessions.get(k)
+        return bool(s and s.conn)
 
     def _has_active_session_for_peer(self, peer_id: str) -> bool:
         k = self._normalize_peer_addr(peer_id)
@@ -8325,9 +8327,20 @@ class I2PChatCore:
             return
         target_preview = normalized_target[:24]
         self.ensure_peer_in_saved_contacts(normalized_target)
+        # Drop map leftovers that survived a peer hang-up without a stream.
+        orphan = self._live_sessions.get(normalized_target)
+        if orphan is not None and not orphan.conn:
+            self._live_sessions.pop(normalized_target, None)
         if self._has_live_session_slot_for_peer(normalized_target):
-            _emit_connect_system("Already connected to this peer.")
-            return
+            if self._live_session_secure_ready(normalized_target):
+                _emit_connect_system("Already connected to this peer.")
+                return
+            # Half-open / auto-reconnect dial: replace it on a deliberate Connect.
+            if activate_as_current and announce_to_ui:
+                await self._disconnect_extra_session(normalized_target)
+            else:
+                _emit_connect_system("Connection attempt already in progress.")
+                return
         max_live = max_concurrent_live_sessions()
         if self._live_stream_count() >= max_live:
             _emit_connect_system(
@@ -8335,9 +8348,18 @@ class I2PChatCore:
                 "Disconnect a peer first."
             )
             return
+        user_dial = bool(activate_as_current and announce_to_ui)
         if self.session_manager.outbound_connect_busy:
-            _emit_connect_system("Connection attempt already in progress.")
-            return
+            if not user_dial:
+                return
+            # User Connect preempts a stuck/auto-reconnect outbound dial.
+            for pid, ls in list(self._live_sessions.items()):
+                if ls.conn and not (ls.handshake_complete and ls.use_encryption):
+                    try:
+                        await self._disconnect_extra_session(pid)
+                    except Exception:
+                        self._live_sessions.pop(pid, None)
+            self.session_manager.set_outbound_connect_busy(False)
         extra_ls = LivePeerSession(
             peer_id=normalized_target,
             announce_lifecycle=bool(activate_as_current and announce_to_ui),
@@ -8505,9 +8527,24 @@ class I2PChatCore:
                 )
                 deferred_system = "Waiting for incoming connections..."
         finally:
-            self.session_manager.set_outbound_connect_busy(
-                False, peer_id=normalized_target
-            )
+            # If a newer dial replaced our map slot (user Connect preempting
+            # auto-reconnect), leave busy/transport alone for the new owner.
+            current = self._live_sessions.get(normalized_target)
+            superseded = current is not None and current is not extra_ls
+            if not superseded:
+                self.session_manager.set_outbound_connect_busy(
+                    False, peer_id=normalized_target
+                )
+                # Outbound dial must not leave the whole app stuck in RECONNECTING —
+                # Status/Connect treat that as "network not ready".
+                if self.network_status == "visible":
+                    self.session_manager.transition_transport(
+                        TransportState.READY, reason="outbound-connect-finished"
+                    )
+                elif self.network_status == "local_ok":
+                    self.session_manager.transition_transport(
+                        TransportState.DEGRADED, reason="outbound-connect-finished"
+                    )
 
         # После сброса busy — иначе UI обновится с is_outbound_connect_busy()==True и Connect останется серым.
         if activate_as_current and announce_to_ui:

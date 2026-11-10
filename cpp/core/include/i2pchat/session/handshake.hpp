@@ -35,6 +35,9 @@ enum class HandshakeState {
     InitSent,
     /// Directional keys derived; waiting for the peer's FINISHED.
     AwaitingFinished,
+    /// Both FINISHED exchanged; TOFU dialog still open. Wire crypto is ready
+    /// but the channel is not yet reported as secure.
+    AwaitingTrust,
     /// Both FINISHED exchanged. The channel is secure.
     Established,
     Failed,
@@ -58,9 +61,8 @@ enum class TrustDecision {
     Accept,
     /// Key contradicts an existing pin, or the user refused. Abort.
     Reject,
-    /// The user has been asked but has not answered. The handshake is
-    /// aborted like a rejection, without blocking the transport on the
-    /// dialog; the peer reconnects once the answer has been recorded.
+    /// The user has been asked but has not answered. Wire handshake
+    /// continues through FINISHED; Established waits until resolve_trust().
     Deferred,
 };
 
@@ -106,6 +108,12 @@ public:
     [[nodiscard]] const Bytes& peer_signing_key() const noexcept {
         return peer_signing_public_;
     }
+    [[nodiscard]] bool awaiting_trust() const noexcept {
+        return state_ == HandshakeState::AwaitingTrust;
+    }
+
+    /// Finish a Deferred TOFU after FINISHED. Accept → Established; Reject fails.
+    HandshakeOutput resolve_trust(bool accept);
 
     /// Ephemeral keys may be injected before starting, for deterministic tests.
     void set_ephemeral_for_test(Bytes private_key, Bytes public_key);
@@ -118,7 +126,7 @@ private:
 
     void ensure_ephemeral();
     void install_keys(bool is_initiator);
-    /// Run the trust verifier; fails the handshake on anything but Accept.
+    /// Run the trust verifier. Reject fails; Deferred marks trust_deferred_.
     void check_trust(const Bytes& peer_signing_public);
     [[noreturn]] void fail(const std::string& reason);
 
@@ -137,6 +145,7 @@ private:
     Bytes transcript_hash_;
     bool finished_sent_ = false;
     bool peer_finished_ = false;
+    bool trust_deferred_ = false;
 };
 
 /// Build the byte string signed by the initiator.

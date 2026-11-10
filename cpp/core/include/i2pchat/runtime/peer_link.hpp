@@ -97,8 +97,12 @@ public:
     /// Tears the link down now. `reason` is reported to `on_closed`.
     void close(std::string reason = "local close");
 
+    /// Finish a Deferred TOFU after FINISHED. Returns false if nothing was waiting.
+    bool complete_deferred_trust(bool accept);
+
     [[nodiscard]] bool secure() const noexcept { return peer_.secure(); }
     [[nodiscard]] bool closed() const noexcept { return closed_; }
+    [[nodiscard]] bool awaiting_trust() const noexcept { return peer_.awaiting_trust(); }
     [[nodiscard]] session::PeerState state() const noexcept { return peer_.state(); }
     [[nodiscard]] const std::string& peer_addr() const noexcept {
         return peer_.peer_addr();

@@ -894,11 +894,13 @@ Java_org_i2pchat_android_NativeEngine_nativeTrustRespond(JNIEnv* env, jclass, js
                 TrustAnswer{key_hex, yes ? i2pchat::session::TrustDecision::Accept
                                          : i2pchat::session::TrustDecision::Reject};
             if (!yes) {
+                // Close a live inbound that was waiting on this dialog.
+                (void)g_engine.service->complete_deferred_trust(peer, false);
                 // Remembered so the peer's retries stay silent until the
                 // user dials them deliberately (nativeConnectPeer clears it).
                 return;
             }
-            // Pin now, so the reconnect below sees a known key and no second
+            // Pin now, so a later dial / resume sees a known key and no second
             // prompt. verify_or_pin routes a key change through the prompt
             // handler, which finds the recorded answer.
             const std::optional<i2pchat::Bytes> key = i2pchat::encoding::hex_decode(key_hex);
@@ -907,11 +909,16 @@ Java_org_i2pchat_android_NativeEngine_nativeTrustRespond(JNIEnv* env, jclass, js
                                                               /*auto_accept_first_sighting=*/true);
             }
             g_engine.trust_answers.erase(peer);
+            // Prefer completing the live inbound that already finished FINISHED
+            // (desktop dialed us). Only redial outbound when nothing is waiting.
+            if (g_engine.service->complete_deferred_trust(peer, true)) {
+                return;
+            }
             asio::co_spawn(
                 g_engine.io,
                 [peer]() -> asio::awaitable<void> {
                     if (g_engine.service) {
-                        (void)co_await g_engine.service->connect_peer(peer);
+                        (void)co_await g_engine.service->connect_peer(peer, true);
                     }
                 },
                 asio::detached);
@@ -982,7 +989,8 @@ Java_org_i2pchat_android_NativeEngine_nativeConnectPeer(JNIEnv* env, jclass, jst
                 answer->second.decision == i2pchat::session::TrustDecision::Reject) {
                 g_engine.trust_answers.erase(answer);
             }
-            co_return co_await g_engine.service->connect_peer(peer);
+            // Deliberate Connect clears a prior Disconnect hang-up.
+            co_return co_await g_engine.service->connect_peer(peer, true);
         })
                    ? JNI_TRUE
                    : JNI_FALSE;

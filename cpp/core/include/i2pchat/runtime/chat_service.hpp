@@ -214,7 +214,11 @@ public:
     ///
     /// Returns false when the peer could not be reached or the handshake was
     /// refused; the reason is reported through `on_error`.
-    asio::awaitable<bool> connect_peer(std::string peer);
+    ///
+    /// `user_initiated` clears a prior Disconnect hang-up so Connect can dial
+    /// again. Auto-reconnect leaves it false and aborts if the user hung up.
+    /// Inbound from the peer after hang-up is still accepted (clears the flag).
+    asio::awaitable<bool> connect_peer(std::string peer, bool user_initiated = false);
     void disconnect_peer(std::string_view peer);
     /// Seal the open identity with a new password. An empty password removes it.
     void set_profile_password(std::string password);
@@ -238,6 +242,11 @@ public:
     /// Answer a file offer that `offer_file` deferred. Returns false when the
     /// peer has no offer waiting any more.
     bool respond_file_offer(std::string_view peer, bool accept);
+
+    /// Finish a Deferred TOFU on a live link after FINISHED. Returns true when
+    /// a waiting inbound/outbound handshake consumed the answer (so Connect
+    /// from the peer can succeed without a reverse redial).
+    bool complete_deferred_trust(std::string_view peer, bool accept);
 
     /// Decrypt one file written under `seal_downloads` into `dest`. False when
     /// the session key is already gone or the ciphertext does not authenticate.
@@ -370,7 +379,7 @@ private:
     std::uint64_t next_msg_id_ = 1;
     /// Inbound links accepted but not yet through the handshake, by identity.
     /// Capped by `max_pending_inbound_handshakes`.
-    std::set<const PeerLink*> pending_inbound_;
+    std::set<PeerLink*> pending_inbound_;
     bool running_ = false;
     bool stopping_ = false;
     /// Cancelled by stop() so start()'s tunnel-warmup wait does not outlive us.

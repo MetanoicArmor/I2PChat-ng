@@ -323,7 +323,34 @@ void PeerSession::handle_handshake_frame(const std::string& body,
         SessionAction established;
         established.kind = SessionAction::Kind::Established;
         actions.push_back(std::move(established));
+    } else if (handshake_->awaiting_trust()) {
+        SessionAction waiting;
+        waiting.kind = SessionAction::Kind::AwaitingTrust;
+        actions.push_back(std::move(waiting));
     }
+}
+
+SessionActions PeerSession::resolve_deferred_trust(bool accept) {
+    SessionActions actions;
+    if (!handshake_.has_value() || !handshake_->awaiting_trust()) {
+        return actions;
+    }
+    HandshakeOutput output;
+    try {
+        output = handshake_->resolve_trust(accept);
+    } catch (const HandshakeError& error) {
+        actions.push_back(disconnect_action(error.what()));
+        state_ = PeerState::Failed;
+        return actions;
+    }
+    if (output.established) {
+        channel_.emplace(handshake_->keys(), config_.padding);
+        state_ = PeerState::Secure;
+        SessionAction established;
+        established.kind = SessionAction::Kind::Established;
+        actions.push_back(std::move(established));
+    }
+    return actions;
 }
 
 Bytes PeerSession::send_message(char msg_type, ByteView payload,

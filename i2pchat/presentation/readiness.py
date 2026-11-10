@@ -146,7 +146,9 @@ class ReadinessTracker:
             sam_state = STATE_PENDING
         else:
             sam_state = STATE_OK
-        if transport == "ready":
+        # ready = tunnels up. degraded = local SAM ok. reconnecting = outbound
+        # dial while tunnels are still up (must not look like a tunnel failure).
+        if transport in ("ready", "degraded", "reconnecting"):
             tunnels_state = STATE_OK
         elif transport == "failed" or not started:
             tunnels_state = STATE_FAILED

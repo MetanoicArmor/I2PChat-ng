@@ -43,6 +43,8 @@ struct SessionAction {
         Disconnect,
         /// The channel just became secure.
         Established,
+        /// FINISHED done; waiting for the Trust dialog (extend handshake timer).
+        AwaitingTrust,
     };
 
     Kind kind = Kind::Send;
@@ -112,11 +114,17 @@ public:
         return config_.handshake.peer_addr;
     }
     [[nodiscard]] bool secure() const noexcept { return state_ == PeerState::Secure; }
+    [[nodiscard]] bool awaiting_trust() const noexcept {
+        return handshake_.has_value() && handshake_->awaiting_trust();
+    }
     /// The handshake machine, absent on an inbound session until the peer's
     /// identity preface names who we are talking to.
     [[nodiscard]] const std::optional<HandshakeMachine>& handshake() const noexcept {
         return handshake_;
     }
+
+    /// Complete a Deferred TOFU after FINISHED. Accept → Established action.
+    SessionActions resolve_deferred_trust(bool accept);
 
     /// Frame types accepted before the secure channel exists.
     [[nodiscard]] static bool allowed_before_handshake(char msg_type) noexcept;

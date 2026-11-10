@@ -4347,18 +4347,15 @@ class TuiActionsScreen(ModalScreen[None]):
         disconnect_btn = self.query_one("#actions_disconnect", Button)
         save_btn = self.query_one("#actions_save", Button)
         peer = self._peer_value()
-        already = (
-            bool(peer and self.host.core.has_active_live_session(peer))
-        )
+        already = bool(peer and self.host.core.is_secure_live_for_peer(peer))
+        live_with = bool(peer and self.host.core.has_active_live_session(peer))
         at_cap = (
-            self.host.core._live_stream_count() >= max_concurrent_live_sessions()
+            (not already)
+            and (not live_with)
+            and self.host.core._live_stream_count() >= max_concurrent_live_sessions()
         )
-        connect_btn.disabled = (
-            peer is None
-            or already
-            or self.host.core.is_outbound_connect_busy()
-            or at_cap
-        )
+        # Busy/auto-reconnect must not grey Connect — a click preempts the dial.
+        connect_btn.disabled = peer is None or already or at_cap
         disconnect_btn.disabled = not self.host.core.any_live_stream()
         save_btn.disabled = not self.host.core.is_current_peer_verified_for_lock()
 

@@ -84,6 +84,13 @@ void PeerLink::close_gracefully() {
 
 void PeerLink::close(std::string reason) { finish(std::move(reason)); }
 
+bool PeerLink::complete_deferred_trust(bool accept) {
+    if (closed_ || !peer_.awaiting_trust()) {
+        return false;
+    }
+    return apply(peer_.resolve_deferred_trust(accept));
+}
+
 void PeerLink::enqueue(Bytes bytes) {
     if (closed_ || bytes.empty()) {
         return;
@@ -132,6 +139,10 @@ bool PeerLink::apply(const session::SessionActions& actions) {
                 if (callbacks_.on_established) {
                     callbacks_.on_established(*this);
                 }
+                break;
+            case session::SessionAction::Kind::AwaitingTrust:
+                // Wake handshake_guard so it switches to the longer TOFU window.
+                handshake_timer_.cancel();
                 break;
             case session::SessionAction::Kind::Deliver: {
                 // Keepalives are transport bookkeeping; the read loop has
@@ -223,14 +234,27 @@ asio::awaitable<void> PeerLink::keepalive_loop() {
 }
 
 asio::awaitable<void> PeerLink::handshake_guard() {
-    handshake_timer_.expires_after(config_.handshake_timeout);
-    boost::system::error_code error;
-    co_await handshake_timer_.async_wait(
-        asio::redirect_error(asio::use_awaitable, error));
-    if (error || closed_ || peer_.secure()) {
+    // Wire handshake uses handshake_timeout; TOFU dialog gets a longer window
+    // so Accept after FINISHED can still complete the inbound dial.
+    constexpr auto kTrustDialogTimeout = std::chrono::minutes(5);
+    while (!closed_ && !peer_.secure()) {
+        const auto timeout =
+            peer_.awaiting_trust() ? kTrustDialogTimeout : config_.handshake_timeout;
+        handshake_timer_.expires_after(timeout);
+        boost::system::error_code error;
+        co_await handshake_timer_.async_wait(
+            asio::redirect_error(asio::use_awaitable, error));
+        if (closed_ || peer_.secure()) {
+            co_return;
+        }
+        if (error) {
+            // Cancelled to switch phase (e.g. entered AwaitingTrust) — loop.
+            continue;
+        }
+        finish(peer_.awaiting_trust() ? "trust decision timed out"
+                                      : "handshake timed out");
         co_return;
     }
-    finish("handshake timed out");
 }
 
 void PeerLink::finish(std::string reason) {

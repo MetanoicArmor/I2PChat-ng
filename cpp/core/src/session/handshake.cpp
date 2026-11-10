@@ -179,7 +179,10 @@ void HandshakeMachine::check_trust(const Bytes& peer_signing_public) {
         case TrustDecision::Accept:
             return;
         case TrustDecision::Deferred:
-            fail("Peer signing key awaits the user's decision");
+            // Keep the wire handshake alive through FINISHED (matches desktop).
+            // Established is withheld until resolve_trust(true).
+            trust_deferred_ = true;
+            return;
         case TrustDecision::Reject:
             break;
     }
@@ -380,7 +383,26 @@ HandshakeOutput HandshakeMachine::handle_finished(std::string_view payload) {
                               ByteView(keys_.send_mac), ByteView(transcript_hash_)))));
         finished_sent_ = true;
     }
+    if (trust_deferred_) {
+        state_ = HandshakeState::AwaitingTrust;
+        output.established = false;
+        return output;
+    }
     state_ = HandshakeState::Established;
+    output.established = true;
+    return output;
+}
+
+HandshakeOutput HandshakeMachine::resolve_trust(bool accept) {
+    if (state_ != HandshakeState::AwaitingTrust) {
+        fail("No deferred trust decision pending");
+    }
+    if (!accept) {
+        fail("Peer signing key was not trusted");
+    }
+    trust_deferred_ = false;
+    state_ = HandshakeState::Established;
+    HandshakeOutput output;
     output.established = true;
     return output;
 }
