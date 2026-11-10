@@ -188,8 +188,8 @@ class BlindBoxClientTests(unittest.IsolatedAsyncioTestCase):
                 sam_host="127.0.0.1",
                 sam_port=int(sam_port),
                 sam_options={
-                    "inbound.length": "2",
-                    "outbound.length": "2",
+                    "inbound.length": "4",
+                    "outbound.length": "4",
                 },
             )
             with patch("i2pchat.blindbox.blindbox_client.secrets.token_hex", return_value="cafebabe"):
@@ -203,7 +203,7 @@ class BlindBoxClientTests(unittest.IsolatedAsyncioTestCase):
                 "STREAM",
                 "sess_cafebabe",
                 "TRANSIENT",
-                "SIGNATURE_TYPE=7 inbound.length=2 outbound.length=2",
+                "SIGNATURE_TYPE=7 inbound.length=4 outbound.length=4",
             ).decode("utf-8").strip()
             self.assertEqual(lines[1], expected)
         finally:
@@ -362,6 +362,15 @@ class BlindBoxClientTests(unittest.IsolatedAsyncioTestCase):
             b32,
         )
         self.assertEqual(BlindBoxClient._sam_destination_from_endpoint(b32), b32)
+
+    def test_default_sam_options_use_four_hop_tunnels(self) -> None:
+        c = BlindBoxClient(
+            session_id="s",
+            blind_boxes=["x.b32.i2p:1"],
+            use_sam=False,
+        )
+        self.assertEqual(c.sam_options.get("inbound.length"), "4")
+        self.assertEqual(c.sam_options.get("outbound.length"), "4")
 
     def test_sam_destination_keeps_host_port(self) -> None:
         self.assertEqual(

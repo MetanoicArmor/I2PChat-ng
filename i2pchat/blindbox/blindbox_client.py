@@ -123,9 +123,11 @@ class BlindBoxClient:
         self.blind_boxes = list(blind_boxes)
         self.sam_host = sam_host
         self.sam_port = sam_port
+        # Default hops match the live chat SAM session (4). Callers that pass
+        # sam_options (e.g. I2PChatCore._sam_tunnel_options) still win.
         self.sam_options = sam_options or {
-            "inbound.length": "2",
-            "outbound.length": "2",
+            "inbound.length": "4",
+            "outbound.length": "4",
             "inbound.quantity": "2",
             "outbound.quantity": "2",
         }
