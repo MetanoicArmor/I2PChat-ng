@@ -784,8 +784,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           I2PCHAT_GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          # Prefer dedicated release secret; fall back to the apt signing key
+          # (same fingerprint 2BA0C56D… — see packaging/apt KEY.gpg).
           RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
           RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+          APT_REPO_GPG_PRIVATE_KEY: ${{ secrets.APT_REPO_GPG_PRIVATE_KEY }}
+          APT_REPO_GPG_PASSPHRASE: ${{ secrets.APT_REPO_GPG_PASSPHRASE }}
+          I2PCHAT_REQUIRE_GPG: "1"
         run: |
           if ! echo "$TAG" | grep -qE '^v?\.?[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "ERROR: tag must be semver vX.Y.Z, got: $TAG" >&2
@@ -798,14 +803,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           I2PCHAT_GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-          HAVE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY != '' }}
         run: |
-          if [ "$HAVE_KEY" = "true" ]; then
-            bash scripts/verify_github_release_assets.sh --skip-deb "${TAG}"
-          else
-            echo "::warning::RELEASE_GPG_PRIVATE_KEY is not set; the release is published without SHA256SUMS.asc"
-            bash scripts/verify_github_release_assets.sh --skip-deb --skip-gpg "${TAG}"
-          fi
+          # sign_release_checksums.sh already fails when no key can sign
+          # (I2PCHAT_REQUIRE_GPG=1). Require SHA256SUMS.asc on the release.
+          bash scripts/verify_github_release_assets.sh --skip-deb "${TAG}"
 
   publish-release:
     needs: [sign-checksums]

@@ -64,6 +64,8 @@ Environment:
 
 **Official release builds** should use `I2PCHAT_REQUIRE_GPG=1` so unsigned archives are not produced silently.
 
+**Combined release checksums** (after all platform assets are on the GitHub Release): [`../scripts/sign_release_checksums.sh`](../scripts/sign_release_checksums.sh) merges `SHA256SUMS.<platform>`, signs with `RELEASE_GPG_*` / `APT_REPO_GPG_*` / the local release key, and uploads `SHA256SUMS` + `SHA256SUMS.asc`. CI `sign-checksums` runs this with `I2PCHAT_REQUIRE_GPG=1`.
+
 **Linux-only checksum refresh** (after replacing `I2PChat-linux-*-v*.zip` on a release): [`../packaging/refresh-linux-sha256sums.sh`](../packaging/refresh-linux-sha256sums.sh) writes `dist/SHA256SUMS` in the same format as `build-linux.sh`, then upload with `gh release upload`.
 
 Verification:

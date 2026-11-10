@@ -26,7 +26,7 @@ gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum -c SHA256SUMS   # or: shasum -a 256 -c SHA256SUMS
 ```
 
-CI uploads the draft without `SHA256SUMS.asc` (`I2PCHAT_SKIP_GPG_SIGN=1`). Sign that file before treating the release as final, or pass `--skip-gpg` to `scripts/verify_github_release_assets.sh`.
+Per-platform build jobs skip GPG (`I2PCHAT_SKIP_GPG_SIGN=1`); the `sign-checksums` job merges platform sums and must upload `SHA256SUMS.asc` (release or apt signing secret, fingerprint above). Re-sign locally if needed: `./scripts/sign_release_checksums.sh v1.6.1`.
 
 ## RU
 

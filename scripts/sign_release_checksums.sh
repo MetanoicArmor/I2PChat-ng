@@ -8,16 +8,24 @@
 # Environment:
 #   I2PCHAT_GH_REPO           owner/repo (default MetanoicArmor/I2PChat-ng)
 #   GH_TOKEN                  for gh
-#   RELEASE_GPG_PRIVATE_KEY   armored secret key; when empty, nothing is signed
+#   RELEASE_GPG_PRIVATE_KEY   armored secret key (preferred for CI)
 #   RELEASE_GPG_PASSPHRASE    optional passphrase for that key
+#   APT_REPO_GPG_PRIVATE_KEY  fallback armored key (same release fingerprint)
+#   APT_REPO_GPG_PASSPHRASE   optional passphrase for the apt key
+#   I2PCHAT_GPG_KEY_ID        local key id/fingerprint when no armored key is set
+#   I2PCHAT_REQUIRE_GPG=1     fail instead of uploading unsigned SHA256SUMS
 #
-# The key is imported into a throwaway GNUPGHOME that is removed on exit, so
-# nothing about it survives the job. Signing is all-or-nothing: with a key
-# present, a failed signature fails the script rather than quietly publishing
-# an unsigned set.
+# With an armored key the script imports into a throwaway GNUPGHOME (removed on
+# exit). Without one it signs from the caller’s normal keyring (maintainer
+# laptop). Signing is all-or-nothing when a key source is present or when
+# I2PCHAT_REQUIRE_GPG=1.
 set -euo pipefail
 
 REPO="${I2PCHAT_GH_REPO:-MetanoicArmor/I2PChat-ng}"
+# Published release-signing fingerprint (docs/BUILD.md, MANUAL_*, release notes).
+EXPECTED_FPR="${I2PCHAT_RELEASE_GPG_FPR:-2BA0C56D8240077F9773248A2C05CFB3F6DFDF99}"
+REQUIRE_GPG="${I2PCHAT_REQUIRE_GPG:-0}"
+
 TAG="${1:-}"
 if [[ -z "${TAG}" ]]; then
   echo "Usage: $0 vX.Y.Z" >&2
@@ -81,29 +89,71 @@ cat "${COMBINED}"
 
 UPLOAD=("${COMBINED}")
 
-if [[ -n "${RELEASE_GPG_PRIVATE_KEY:-}" ]]; then
+KEY_MATERIAL="${RELEASE_GPG_PRIVATE_KEY:-${APT_REPO_GPG_PRIVATE_KEY:-}}"
+KEY_PASSPHRASE="${RELEASE_GPG_PASSPHRASE:-${APT_REPO_GPG_PASSPHRASE:-}}"
+LOCAL_KEY_ID="${I2PCHAT_GPG_KEY_ID:-${EXPECTED_FPR}}"
+
+sign_with_imported_key() {
   command -v gpg >/dev/null 2>&1 || { echo "ERROR: gpg required for signing" >&2; exit 1; }
   export GNUPGHOME="${WORK}/gnupg"
   mkdir -p "${GNUPGHOME}"
   chmod 700 "${GNUPGHOME}"
-  printf '%s\n' "${RELEASE_GPG_PRIVATE_KEY}" | gpg --batch --quiet --import
+  printf '%s\n' "${KEY_MATERIAL}" | gpg --batch --quiet --import
   FPR="$(gpg --with-colons --list-secret-keys 2>/dev/null | awk -F: '$1 == "fpr" {print $10; exit}')"
   if [[ -z "${FPR}" ]]; then
-    echo "ERROR: RELEASE_GPG_PRIVATE_KEY did not import a secret key" >&2
+    echo "ERROR: armored private key did not import a secret key" >&2
+    exit 1
+  fi
+  if [[ "${FPR}" != "${EXPECTED_FPR}" ]]; then
+    echo "ERROR: imported key fingerprint ${FPR} != expected release key ${EXPECTED_FPR}" >&2
     exit 1
   fi
   GPG_ARGS=(--batch --yes --armor --detach-sign --local-user "${FPR}" --output "${COMBINED}.asc")
-  if [[ -n "${RELEASE_GPG_PASSPHRASE:-}" ]]; then
-    printf '%s\n' "${RELEASE_GPG_PASSPHRASE}" \
+  if [[ -n "${KEY_PASSPHRASE}" ]]; then
+    printf '%s\n' "${KEY_PASSPHRASE}" \
       | gpg "${GPG_ARGS[@]}" --pinentry-mode loopback --passphrase-fd 0 "${COMBINED}"
   else
     gpg "${GPG_ARGS[@]}" "${COMBINED}"
   fi
   gpg --verify "${COMBINED}.asc" "${COMBINED}"
-  echo "Signed SHA256SUMS with ${FPR}"
+  echo "Signed SHA256SUMS with imported key ${FPR}"
+}
+
+sign_with_local_keyring() {
+  command -v gpg >/dev/null 2>&1 || { echo "ERROR: gpg required for signing" >&2; exit 1; }
+  RESOLVED="$(gpg --with-colons --list-secret-keys "${LOCAL_KEY_ID}" 2>/dev/null \
+    | awk -F: '$1 == "fpr" {print $10; exit}')"
+  if [[ -z "${RESOLVED}" ]]; then
+    echo "ERROR: no local secret key for '${LOCAL_KEY_ID}'" >&2
+    exit 1
+  fi
+  if [[ "${RESOLVED}" != "${EXPECTED_FPR}" ]]; then
+    echo "ERROR: local key '${LOCAL_KEY_ID}' fingerprint ${RESOLVED} != expected ${EXPECTED_FPR}" >&2
+    exit 1
+  fi
+  # Prefer pinentry when a TTY is available (maintainer laptop).
+  GPG_ARGS=(--yes --armor --detach-sign --local-user "${LOCAL_KEY_ID}" --output "${COMBINED}.asc")
+  if [[ (! -t 0 && ! -t 1) || "${I2PCHAT_GPG_BATCH:-}" == "1" ]]; then
+    GPG_ARGS=(--batch "${GPG_ARGS[@]}")
+  fi
+  gpg "${GPG_ARGS[@]}" "${COMBINED}"
+  gpg --verify "${COMBINED}.asc" "${COMBINED}"
+  echo "Signed SHA256SUMS with local key ${RESOLVED}"
+}
+
+if [[ -n "${KEY_MATERIAL}" ]]; then
+  sign_with_imported_key
+  UPLOAD+=("${COMBINED}.asc")
+elif gpg --list-secret-keys --with-colons "${LOCAL_KEY_ID}" >/dev/null 2>&1; then
+  sign_with_local_keyring
   UPLOAD+=("${COMBINED}.asc")
 else
-  echo "WARNING: RELEASE_GPG_PRIVATE_KEY not set; uploading unsigned SHA256SUMS only" >&2
+  msg="no RELEASE_GPG_PRIVATE_KEY / APT_REPO_GPG_PRIVATE_KEY and no local secret key ${LOCAL_KEY_ID}"
+  if [[ "${REQUIRE_GPG}" == "1" ]]; then
+    echo "ERROR: ${msg}; refusing unsigned SHA256SUMS (I2PCHAT_REQUIRE_GPG=1)" >&2
+    exit 1
+  fi
+  echo "WARNING: ${msg}; uploading unsigned SHA256SUMS only" >&2
 fi
 
 gh release upload "${TAG}" "${UPLOAD[@]}" --repo "${REPO}" --clobber

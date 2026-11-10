@@ -395,12 +395,13 @@ Build-time controls:
 
 **Official release builds** should set `I2PCHAT_REQUIRE_GPG=1` so unsigned archives are not produced silently; publish `SHA256SUMS` and `SHA256SUMS.asc` next to each asset.
 
-**GitHub Actions releases** (`release-artifacts.yml`): the per-platform jobs upload `SHA256SUMS.<platform>`; the `sign-checksums` job then merges them into one `SHA256SUMS` covering every asset and signs it via `scripts/sign_release_checksums.sh` when these repository secrets exist:
+**GitHub Actions releases** (`release-artifacts.yml`): the per-platform jobs upload `SHA256SUMS.<platform>`; the `sign-checksums` job then merges them into one `SHA256SUMS` covering every asset and signs it via `scripts/sign_release_checksums.sh`. Key material (first match wins):
 
-- `RELEASE_GPG_PRIVATE_KEY` — armored secret key (`gpg --armor --export-secret-keys KEY_ID`), imported into a throwaway `GNUPGHOME` for the duration of the job;
-- `RELEASE_GPG_PASSPHRASE` — its passphrase, if any.
+- `RELEASE_GPG_PRIVATE_KEY` (+ optional `RELEASE_GPG_PASSPHRASE`) — preferred dedicated release secret;
+- else `APT_REPO_GPG_PRIVATE_KEY` (+ optional `APT_REPO_GPG_PASSPHRASE`) — same fingerprint as the published release key (`2BA0C56D…`);
+- else the maintainer’s local keyring (`I2PCHAT_GPG_KEY_ID`, default that fingerprint) when the script is run by hand.
 
-Without the secret the release is still published, but with a workflow warning and no `SHA256SUMS.asc`. Publish the key's fingerprint in the release notes so users can check it out of band.
+The job sets `I2PCHAT_REQUIRE_GPG=1`, so a missing key fails the release instead of publishing without `SHA256SUMS.asc`. Fingerprint for out-of-band checks: `2BA0C56D8240077F9773248A2C05CFB3F6DFDF99`.
 
 Android release APKs are signed with the upload keystore from these secrets: `ANDROID_UPLOAD_KEYSTORE_B64` (base64 of the `.jks`/`.keystore`), `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD`. When they are absent the workflow falls back to the public Android debug key (sideload-only APKs; see `docs/AUDIT_1.5.2_EN.md`).
 
