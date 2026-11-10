@@ -510,11 +510,12 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
             errors,
         )
 
-    async def test_connect_rejects_duplicate_pending_session_slot(self) -> None:
+    async def test_connect_rejects_duplicate_secure_session(self) -> None:
         systems: list[str] = []
         core = I2PChatCore(profile="alice", on_system=systems.append)
-        normalized_peer = core._normalize_peer_addr(PEER_BARE)
-        core._live_sessions[normalized_peer] = LivePeerSession(peer_id=normalized_peer)
+        attach_mock_live_session(
+            core, PEER_BARE, (_FakeReader(b""), _FakeWriter()), handshake_complete=True
+        )
 
         import i2pchat.core.i2p_chat_core as core_module
 
@@ -525,7 +526,7 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
         async def _unexpected_stream_connect(*_args, **_kwargs):
             nonlocal called
             called = True
-            raise AssertionError("stream_connect should not run for duplicate pending session")
+            raise AssertionError("stream_connect should not run for a secure live session")
 
         core_module.crypto.NACL_AVAILABLE = True
         core_module.i2plib.stream_connect = _unexpected_stream_connect  # type: ignore[assignment]
@@ -537,6 +538,69 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(called)
         self.assertIn("Already connected to this peer.", systems)
+
+    async def test_connect_clears_orphan_session_slot_without_conn(self) -> None:
+        """A map leftover with no stream must not block Connect forever."""
+        systems: list[str] = []
+        core = I2PChatCore(profile="alice", on_system=systems.append)
+        normalized_peer = core._normalize_peer_addr(PEER_BARE)
+        core._live_sessions[normalized_peer] = LivePeerSession(peer_id=normalized_peer)
+
+        import i2pchat.core.i2p_chat_core as core_module
+
+        original_nacl_available = core_module.crypto.NACL_AVAILABLE
+        original_stream_connect = core_module.i2plib.stream_connect
+        called = False
+
+        async def _fail_fast_stream_connect(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise RuntimeError("dial started")
+
+        core_module.crypto.NACL_AVAILABLE = True
+        core_module.i2plib.stream_connect = _fail_fast_stream_connect  # type: ignore[assignment]
+        try:
+            await core.connect_to_peer(PEER_BARE)
+        finally:
+            core_module.crypto.NACL_AVAILABLE = original_nacl_available
+            core_module.i2plib.stream_connect = original_stream_connect  # type: ignore[assignment]
+
+        self.assertTrue(called)
+        self.assertNotIn("Already connected to this peer.", systems)
+
+    async def test_silent_connect_skips_half_open_session(self) -> None:
+        systems: list[str] = []
+        core = I2PChatCore(profile="alice", on_system=systems.append)
+        attach_mock_live_session(
+            core,
+            PEER_BARE,
+            (_FakeReader(b""), _FakeWriter()),
+            handshake_complete=False,
+            use_encryption=False,
+        )
+
+        import i2pchat.core.i2p_chat_core as core_module
+
+        original_nacl_available = core_module.crypto.NACL_AVAILABLE
+        original_stream_connect = core_module.i2plib.stream_connect
+        called = False
+
+        async def _unexpected_stream_connect(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("silent connect must not redial a half-open session")
+
+        core_module.crypto.NACL_AVAILABLE = True
+        core_module.i2plib.stream_connect = _unexpected_stream_connect  # type: ignore[assignment]
+        try:
+            await core.connect_to_peer(
+                PEER_BARE, activate_as_current=False, announce_to_ui=False
+            )
+        finally:
+            core_module.crypto.NACL_AVAILABLE = original_nacl_available
+            core_module.i2plib.stream_connect = original_stream_connect  # type: ignore[assignment]
+
+        self.assertFalse(called)
 
     async def test_disconnect_peer_cancels_owned_receive_task(self) -> None:
         core = I2PChatCore(profile="alice")
