@@ -222,10 +222,12 @@ public:
     /// Send a chat message, splitting it into protocol-sized parts.
     ///
     /// Takes the live channel when the peer has one, and the offline path
-    /// otherwise. Returns the message id of each part, in order; empty when
+    /// otherwise. `force_offline` skips the reconnect wait and writes BlindBox
+    /// immediately. Returns the message id of each part, in order; empty when
     /// nothing could be sent.
     asio::awaitable<std::vector<std::uint64_t>> send_text(std::string peer,
-                                                          std::string text);
+                                                          std::string text,
+                                                          bool force_offline = false);
 
     /// Send a file over the live channel. Offline file transfer is not part of
     /// the protocol: the peer has to be connected.

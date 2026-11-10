@@ -138,6 +138,8 @@ struct ChatService::Peer {
     bool had_secure = false;
     bool user_disconnected = false;
     bool auto_reconnect_inflight = false;
+    /// The post-drop hold already elapsed once; the next send may use BlindBox.
+    bool reconnect_grace_spent = false;
     unsigned auto_attempt = 0;
     std::shared_ptr<asio::steady_timer> auto_reconnect;
 };
@@ -910,6 +912,7 @@ void ChatService::on_established(PeerLink& link) {
     peer.connect_succeeded = true;
     peer.had_secure = true;
     peer.user_disconnected = false;
+    peer.reconnect_grace_spent = false;
     peer.auto_attempt = 0;
     peer.auto_reconnect_inflight = false;
     if (peer.auto_reconnect) {
@@ -1115,7 +1118,8 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
 }
 
 asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string peer,
-                                                                   std::string text) {
+                                                                   std::string text,
+                                                                   bool force_offline) {
     std::vector<std::uint64_t> ids;
     const std::string peer_addr = std::string(sam::normalize_peer_address(peer));
     if (peer_addr.empty()) {
@@ -1123,7 +1127,7 @@ asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string p
         co_return ids;
     }
 
-    {
+    if (!force_offline) {
         Peer* target = find_peer(peer_addr);
         if (target == nullptr || !live_link(target->link.get(), sessions_, peer_addr)) {
             (void)co_await connect_peer(peer);
@@ -1140,8 +1144,46 @@ asio::awaitable<std::vector<std::uint64_t>> ChatService::send_text(std::string p
         entry.message_id = std::to_string(msg_id);
 
         Peer* target = find_peer(peer_addr);
-        const bool live_path =
-            target != nullptr && live_link(target->link.get(), sessions_, peer_addr);
+        bool live_path = !force_offline && target != nullptr &&
+                         live_link(target->link.get(), sessions_, peer_addr);
+        // A contact that was just secure may be back on the next tunnel. Hold
+        // the message for that window instead of dropping it into BlindBox.
+        // An explicit offline send, including the quit flush, does not wait.
+        if (!force_offline && !live_path && target != nullptr && target->had_secure &&
+            !target->user_disconnected && !target->reconnect_grace_spent && !stopping_) {
+            emit_system("Waiting for " + peer_addr.substr(0, 16) +
+                        "… to reconnect before offline delivery");
+            bool nudged = false;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            while (!stopping_ && std::chrono::steady_clock::now() < deadline) {
+                Peer* again = find_peer(peer_addr);
+                if (again != nullptr && live_link(again->link.get(), sessions_, peer_addr)) {
+                    target = again;
+                    live_path = true;
+                    break;
+                }
+                if (!nudged && again != nullptr && again->auto_reconnect &&
+                    !again->auto_reconnect_inflight) {
+                    again->auto_reconnect->expires_after(std::chrono::seconds(0));
+                    nudged = true;
+                } else if (again != nullptr) {
+                    schedule_auto_reconnect(*again);
+                }
+                asio::steady_timer breath(executor_);
+                breath.expires_after(std::chrono::seconds(1));
+                boost::system::error_code ignored;
+                co_await breath.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+            }
+            if (!live_path && !stopping_) {
+                if (Peer* spent = find_peer(peer_addr); spent != nullptr) {
+                    spent->reconnect_grace_spent = true;
+                }
+            }
+        }
+        // Shutdown cancelled the wait. Do not drop the text into BlindBox on the way out.
+        if (stopping_ && !live_path) {
+            co_return ids;
+        }
         if (live_path) {
             entry.delivery_state = "sent";
             entry.delivery_route = "live";

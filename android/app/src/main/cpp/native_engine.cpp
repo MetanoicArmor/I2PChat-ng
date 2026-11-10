@@ -1023,6 +1023,26 @@ Java_org_i2pchat_android_NativeEngine_nativeSendText(JNIEnv* env, jclass, jstrin
     }
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSendOfflineText(JNIEnv* env, jclass, jstring j_peer,
+                                                            jstring j_text) {
+    if (!g_engine.service) {
+        return utf8_to_jstring(env, "[]");
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    const std::string text = jstring_to_utf8(env, j_text);
+    try {
+        const auto ids = g_engine.await_core<std::vector<std::uint64_t>>(
+            [peer, text]() -> asio::awaitable<std::vector<std::uint64_t>> {
+                co_return co_await g_engine.service->send_text(peer, text, true);
+            });
+        return utf8_to_jstring(env, nlohmann::json(ids).dump());
+    } catch (const std::exception& ex) {
+        nlohmann::json json = {{"error", ex.what()}};
+        return utf8_to_jstring(env, json.dump());
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeSendFile(JNIEnv* env, jclass, jstring j_peer,
                                                     jstring j_path, jboolean image) {

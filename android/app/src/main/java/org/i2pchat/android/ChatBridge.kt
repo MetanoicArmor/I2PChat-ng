@@ -215,6 +215,8 @@ data class ChatUiState(
     val lockedProfiles: Set<String> = emptySet(),
     val profile: String = "",
     val running: Boolean = false,
+    /** Quit in progress. Keeps the profile screen from mounting and starting the router again. */
+    val quitting: Boolean = false,
     val starting: Boolean = false,
     val status: String = "",
     val localAddr: String = "",
@@ -742,31 +744,73 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             issue.arg.ifBlank { str(R.string.diag_router_crashed) }
     }
 
-    fun stop() {
+    /** Direct-chat drafts only. Group compose stays on disk. */
+    fun directDrafts(): List<Pair<String, String>> {
+        persistDraft(_state.value.selectedId, _state.value.compose)
+        val groups = _state.value.groups.map { it.addr }.toSet()
+        return _state.value.drafts
+            .filter { (id, text) -> id !in groups && text.isNotBlank() }
+            .map { (id, text) -> id to text.trim() }
+    }
+
+    fun quit(flushOffline: Boolean, onClosed: () -> Unit = {}) {
+        stop(if (flushOffline) directDrafts() else emptyList(), onClosed)
+    }
+
+    fun stop(flushOffline: List<Pair<String, String>> = emptyList(), onClosed: () -> Unit = {}) {
+        _state.update { it.copy(quitting = true) }
         pollJob?.cancel()
         tunnelWatchJob?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
+            val sent = mutableSetOf<String>()
+            for ((id, text) in flushOffline) {
+                val raw = runCatching { NativeEngine.nativeSendOfflineText(id, text) }.getOrDefault("")
+                    .trim()
+                // A queued send returns a JSON list of message ids. An error object
+                // can also contain digits, so only an array counts.
+                if (raw.startsWith("[") && raw.any { it.isDigit() }) sent += id
+            }
+            if (sent.isNotEmpty()) {
+                val drafts = _state.value.drafts.filterKeys { it !in sent }
+                val json = JSONObject()
+                drafts.forEach { (key, value) -> json.put(key, value) }
+                runCatching { NativeEngine.nativeComposeDrafts(true, json.toString()) }
+                onMain {
+                    _state.update { state ->
+                        state.copy(
+                            drafts = drafts,
+                            compose = if (state.selectedId in sent) "" else state.compose,
+                        )
+                    }
+                }
+            }
             runCatching { NativeEngine.nativeStop() }
             MemoryImages.clear()
             SealedFiles.clear()
             clearIncomingCache()
             I2pdForegroundService.stop(getApplication())
-            _state.update {
-                it.copy(
-                    running = false,
-                    starting = false,
-                    samReady = false,
-                    routerIssue = null,
-                    transport = "stopped",
-                    status = str(R.string.status_stopped),
-                    localAddr = "",
-                    contacts = emptyList(),
-                    groups = emptyList(),
-                    messages = emptyList(),
-                    notices = emptyList(),
-                    verboseLog = emptyList(),
-                    peerStates = emptyMap(),
-                )
+            onMain {
+                // Close first. Flipping running=false rebuilds NavHost onto the
+                // profile screen, and that screen starts the router again.
+                onClosed()
+                _state.update {
+                    it.copy(
+                        quitting = true,
+                        running = false,
+                        starting = false,
+                        samReady = false,
+                        routerIssue = null,
+                        transport = "stopped",
+                        status = str(R.string.status_stopped),
+                        localAddr = "",
+                        contacts = emptyList(),
+                        groups = emptyList(),
+                        messages = emptyList(),
+                        notices = emptyList(),
+                        verboseLog = emptyList(),
+                        peerStates = emptyMap(),
+                    )
+                }
             }
         }
     }

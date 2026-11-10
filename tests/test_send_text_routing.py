@@ -271,6 +271,56 @@ class SendTextRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.reason, "blindbox-ready")
             core._send_text_via_blindbox.assert_awaited_once()  # type: ignore[attr-defined]
 
+    async def test_send_text_holds_a_dropped_peer_before_blindbox(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "I2PCHAT_BLINDBOX_ENABLED": "1",
+                "I2PCHAT_BLINDBOX_REPLICAS": "r1.b32.i2p",
+            },
+            clear=False,
+        ):
+            core = I2PChatCore(profile="alice")
+            core.stored_peer = STORED_PEER_1
+            core.my_dest = _DummyDest()
+            peer = core._normalize_peer_addr(STORED_PEER_1)
+            core.current_peer_addr = peer
+            core._auto_reconnect.note_secure(peer)
+            core._reconnect_grace_sec = 0.35
+            core._send_text_via_blindbox = AsyncMock(return_value=41)  # type: ignore[method-assign]
+            started = asyncio.get_running_loop().time()
+            result = await core.send_text("held-for-reconnect", peer_address=peer)
+            self.assertGreaterEqual(asyncio.get_running_loop().time() - started, 0.3)
+            self.assertEqual(result.route, "offline-queued")
+            core._send_text_via_blindbox.assert_awaited_once()  # type: ignore[attr-defined]
+            self.assertFalse(core.reconnect_grace_active(peer))
+            started_again = asyncio.get_running_loop().time()
+            again = await core.send_text("after-grace", peer_address=peer)
+            self.assertLess(asyncio.get_running_loop().time() - started_again, 0.2)
+            self.assertEqual(again.route, "offline-queued")
+
+    async def test_send_text_offline_route_skips_reconnect_grace(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "I2PCHAT_BLINDBOX_ENABLED": "1",
+                "I2PCHAT_BLINDBOX_REPLICAS": "r1.b32.i2p",
+            },
+            clear=False,
+        ):
+            core = I2PChatCore(profile="alice")
+            core.stored_peer = STORED_PEER_1
+            core.my_dest = _DummyDest()
+            peer = core._normalize_peer_addr(STORED_PEER_1)
+            core.current_peer_addr = peer
+            core._auto_reconnect.note_secure(peer)
+            core._reconnect_grace_sec = 30
+            core._send_text_via_blindbox = AsyncMock(return_value=41)  # type: ignore[method-assign]
+            started = asyncio.get_running_loop().time()
+            result = await core.send_text("explicit-offline", route="offline", peer_address=peer)
+            self.assertLess(asyncio.get_running_loop().time() - started, 2)
+            self.assertEqual(result.route, "offline-queued")
+
     async def test_send_text_queues_offline_when_blindbox_ready(self) -> None:
         with patch.dict(
             os.environ,

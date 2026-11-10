@@ -38,6 +38,15 @@ def test_success_resets_and_a_user_hangup_stops_the_redial():
     assert book.tick(1000, secure=set(), jitter=_still) == []
 
 
+def test_nudge_makes_the_next_tick_dial():
+    book = AutoReconnectBook()
+    book.note_secure("peer.b32.i2p")
+    book.tick(0, secure=set(), jitter=_still)
+    assert book.tick(1, secure=set(), jitter=_still) == []
+    book.nudge("peer.b32.i2p", 1)
+    assert book.tick(1, secure=set(), jitter=_still) == ["peer.b32.i2p"]
+
+
 def test_a_peer_that_was_never_secure_is_not_dialled():
     book = AutoReconnectBook()
     assert book.tick(1000, secure=set(), jitter=_still) == []

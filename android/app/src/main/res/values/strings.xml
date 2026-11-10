@@ -154,6 +154,14 @@
     <string name="max_age_days">Max age (days, 0 = none)</string>
     <string name="save_retention">Save retention</string>
     <string name="foreground_note">I2P stays in a foreground service on this phone. That is required to keep tunnels alive; it uses battery.</string>
+    <string name="exit_app">Exit</string>
+    <string name="exit_hint">Leave I2P running in the background, or quit and stop the router.</string>
+    <string name="exit_background">Leave in background</string>
+    <string name="exit_quit">Quit</string>
+    <string name="unsent_title">Unsent messages</string>
+    <string name="unsent_body">Some chats still have text in the compose box. Send it through BlindBox before quitting? Otherwise it stays as a draft.</string>
+    <string name="unsent_send">Send via BlindBox</string>
+    <string name="unsent_keep">Keep as drafts</string>
     <string name="verbose_log">Verbose log</string>
     <string name="verbose_log_hint">Show technical messages on the Status screen: handshakes, BlindBox, connects and disconnects.</string>
 

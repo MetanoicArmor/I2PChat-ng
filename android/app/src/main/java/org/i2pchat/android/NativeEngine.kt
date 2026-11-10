@@ -91,6 +91,8 @@ object NativeEngine {
     @JvmStatic external fun nativeConnectPeer(peer: String): Boolean
     @JvmStatic external fun nativeDisconnectPeer(peer: String)
     @JvmStatic external fun nativeSendText(peer: String, text: String): String
+    /** BlindBox immediately, without the reconnect wait. */
+    @JvmStatic external fun nativeSendOfflineText(peer: String, text: String): String
     @JvmStatic external fun nativeSendFile(peer: String, path: String, image: Boolean): Boolean
     @JvmStatic external fun nativePollBlindbox(): Int
     @JvmStatic external fun nativeSnapshot(): String

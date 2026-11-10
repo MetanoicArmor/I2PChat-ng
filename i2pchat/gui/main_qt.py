@@ -9512,15 +9512,29 @@ class ChatWindow(QtWidgets.QMainWindow):
         bb_runtime = bool(delivery.get("blindbox_runtime_ready"))
         can_send = self._send_action_allowed()
         self.send_button.setEnabled(can_send)
+        peer_for_button = ""
+        try:
+            peer_for_button = self._resolved_peer_addr_for_actions() or ""
+        except Exception:
+            peer_for_button = ""
+        grace = bool(
+            peer_for_button and self.core.reconnect_grace_active(peer_for_button)
+        )
         if (
             state == "offline-ready"
             and not secure_live
             and bb_runtime
+            and not grace
         ):
             self.send_button.setText("Send\noffline")
         else:
             self.send_button.setText("Send")
-        if can_send:
+        if can_send and grace:
+            send_tip = (
+                "This contact just dropped. Send waits up to a minute for them to "
+                "reconnect, then uses BlindBox. Send offline appears after that window."
+            )
+        elif can_send:
             send_tip = route_tip
         elif state == "awaiting-tofu" or bool(delivery.get("tofu_awaiting")):
             send_tip = (
@@ -12065,8 +12079,12 @@ class ChatWindow(QtWidgets.QMainWindow):
                 else:
                     self._refresh_groups_list()
                 return
+            send_route: Literal["auto", "live", "offline"] = "auto"
+            if self.send_button.text().replace("\n", " ") == "Send offline":
+                send_route = "offline"
             result = await self.core.send_text(
                 text,
+                route=send_route,
                 peer_address=self._outbound_peer_arg(),
             )
             if result.accepted:
@@ -13921,11 +13939,52 @@ class ChatWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _unsent_direct_drafts(self) -> list[tuple[str, str]]:
+        """Compose text for direct chats. Group drafts stay on disk."""
+        self._merge_active_input_into_compose_drafts()
+        pending: list[tuple[str, str]] = []
+        for key, raw in self._compose_drafts.items():
+            body = str(raw).strip()
+            if not body or str(key).startswith("group:"):
+                continue
+            pending.append((str(key), body))
+        return pending
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Останавливаем ядро и event loop при закрытии окна."""
         if self._close_shutdown_scheduled:
             event.ignore()
             return
+        flush_offline: list[tuple[str, str]] = []
+        if self.core is not None:
+            pending = self._unsent_direct_drafts()
+            if pending:
+                box = QtWidgets.QMessageBox(self)
+                box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+                box.setWindowTitle("Unsent messages")
+                box.setText(
+                    f"{len(pending)} unsent message(s) are still in the compose box."
+                )
+                box.setInformativeText(
+                    "Send them through BlindBox before quitting? "
+                    "Otherwise they stay as drafts."
+                )
+                send_btn = box.addButton(
+                    "Send via BlindBox",
+                    QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+                )
+                box.addButton(
+                    "Keep as drafts",
+                    QtWidgets.QMessageBox.ButtonRole.ActionRole,
+                )
+                cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is None or clicked is cancel_btn:
+                    event.ignore()
+                    return
+                if clicked is send_btn:
+                    flush_offline = pending
         self._close_shutdown_scheduled = True
         # Не закрываем окно в Qt до конца async shutdown — иначе цикл событий
         # может завершиться до await core/router (Windows/qasync).
@@ -13958,6 +14017,27 @@ class ChatWindow(QtWidgets.QMainWindow):
                 from i2pchat.storage.media_prefs import clear_ephemeral_media
 
                 clear_ephemeral_media()
+                if flush_offline and self.core is not None:
+                    sent: list[str] = []
+                    for peer, body in flush_offline:
+                        try:
+                            result = await asyncio.wait_for(
+                                self.core.send_text(
+                                    body, route="offline", peer_address=peer
+                                ),
+                                timeout=25.0,
+                            )
+                            if result.accepted:
+                                sent.append(peer)
+                        except Exception:
+                            logger.exception(
+                                "Could not queue an unsent message for BlindBox"
+                            )
+                    for key in sent:
+                        self._compose_drafts.pop(key, None)
+                    if self._compose_draft_active_key in sent:
+                        self.input_edit.clear()
+                    self._flush_compose_drafts_to_disk()
                 try:
                     if self.core is not None:
                         await asyncio.wait_for(self.core.shutdown(), timeout=15.0)

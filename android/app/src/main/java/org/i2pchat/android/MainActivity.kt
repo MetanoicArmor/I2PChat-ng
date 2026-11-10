@@ -1,6 +1,7 @@
 package org.i2pchat.android
 
 import android.Manifest
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
@@ -179,7 +180,10 @@ fun I2PChatRoot(bridge: ChatBridge) {
         }
         return
     }
-    NavHost(navController = nav, startDestination = if (state.running) "chats" else "profile") {
+    NavHost(
+        navController = nav,
+        startDestination = if (state.running || state.quitting) "chats" else "profile",
+    ) {
         composable("profile") { ProfileScreen(bridge, nav, switching = false) }
         composable("switchProfile") { ProfileScreen(bridge, nav, switching = true) }
         composable("status") { StatusScreen(bridge, nav) }
@@ -559,6 +563,7 @@ fun ProfileScreen(bridge: ChatBridge, nav: NavHostController, switching: Boolean
     var opError by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
+        if (state.quitting) return@LaunchedEffect
         bridge.refreshProfiles()
         bridge.warmRouter()
     }
@@ -938,6 +943,8 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
     val active = state.running || state.starting
     val issue = state.routerIssue
     val routerDown = state.transport == "failed"
+    var askExit by remember { mutableStateOf(false) }
+    var askFlush by remember { mutableStateOf(false) }
     val routerCheck = when {
         routerDown -> "failed"
         state.samReady -> "ok"
@@ -1058,6 +1065,12 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(stringResource(R.string.status_choose_profile)) }
                 }
+                if (state.running) {
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { askExit = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.exit_app))
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
                 Text(stringResource(R.string.status_events), fontWeight = FontWeight.SemiBold)
                 if (state.notices.isEmpty()) {
@@ -1073,6 +1086,55 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                 items(state.verboseLog.asReversed()) { notice -> NoticeRow(notice, technical = true) }
             }
         }
+    }
+    if (askExit) {
+        AlertDialog(
+            onDismissRequest = { askExit = false },
+            title = { Text(stringResource(R.string.exit_app)) },
+            text = { Text(stringResource(R.string.exit_hint)) },
+            // Stack actions: long RU/EN labels overflow Material3's horizontal button row.
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = {
+                        askExit = false
+                        (context as? Activity)?.moveTaskToBack(true)
+                    }) { Text(stringResource(R.string.exit_background)) }
+                    TextButton(onClick = {
+                        askExit = false
+                        if (bridge.directDrafts().isNotEmpty()) {
+                            askFlush = true
+                        } else {
+                            bridge.quit(false) { (context as? Activity)?.finishAndRemoveTask() }
+                        }
+                    }) { Text(stringResource(R.string.exit_quit)) }
+                    TextButton(onClick = { askExit = false }) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+            },
+        )
+    }
+    if (askFlush) {
+        AlertDialog(
+            onDismissRequest = { askFlush = false },
+            title = { Text(stringResource(R.string.unsent_title)) },
+            text = { Text(stringResource(R.string.unsent_body)) },
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = {
+                        askFlush = false
+                        bridge.quit(true) { (context as? Activity)?.finishAndRemoveTask() }
+                    }) { Text(stringResource(R.string.unsent_send)) }
+                    TextButton(onClick = {
+                        askFlush = false
+                        bridge.quit(false) { (context as? Activity)?.finishAndRemoveTask() }
+                    }) { Text(stringResource(R.string.unsent_keep)) }
+                    TextButton(onClick = { askFlush = false }) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+            },
+        )
     }
 }
 

@@ -95,6 +95,7 @@ class AutoReconnectBook:
         self._peers[peer_id] = {
             "eligible": True,
             "cancelled": False,
+            "grace_spent": False,
             "attempt": 0,
             "due": 0.0,
             "inflight": False,
@@ -109,6 +110,28 @@ class AutoReconnectBook:
 
     def tracked(self) -> list[str]:
         return list(self._peers)
+
+    def expects_reconnect(self, peer_id: str) -> bool:
+        """True after a secure session this run, until the user hangs up."""
+        meta = self._peers.get(peer_id)
+        return bool(
+            meta and meta["eligible"] and not meta["cancelled"] and not meta.get("grace_spent")
+        )
+
+    def nudge(self, peer_id: str, now: float) -> None:
+        """A send is waiting, so the next tick should dial instead of sitting out the backoff."""
+        meta = self._peers.get(peer_id)
+        if meta is None or not meta["eligible"] or meta["cancelled"] or meta["inflight"]:
+            return
+        if int(meta["attempt"]) < 1:
+            meta["attempt"] = 1
+        meta["due"] = now
+
+    def note_grace_spent(self, peer_id: str) -> None:
+        """The hold already elapsed without a live session; further sends may go offline."""
+        meta = self._peers.get(peer_id)
+        if meta is not None:
+            meta["grace_spent"] = True
 
     def waiting(self, peer_id: str) -> bool:
         meta = self._peers.get(peer_id)

@@ -1581,6 +1581,9 @@ class I2PChatCore:
         self.session_manager = SessionManager()
         self._auto_reconnect = AutoReconnectBook()
         self._auto_reconnect_task: Optional[asyncio.Task] = None
+        # After a live drop, hold a new message this long so a reconnect can
+        # take it. An explicit offline send does not wait.
+        self._reconnect_grace_sec = 60.0
         self.group_manager = GroupManager(
             session_manager=self.session_manager,
             send_live=self._send_group_envelope_live,
@@ -2441,6 +2444,16 @@ class I2PChatCore:
             k, reason="heal-from-live-session"
         )
         self.session_manager.mark_live_healthy(peer_id=k)
+
+    def reconnect_grace_active(self, peer_address: str) -> bool:
+        """The peer dropped a secure session this run and Send should wait before BlindBox."""
+        try:
+            peer = self._normalize_peer_addr(peer_address or "")
+        except ValueError:
+            return False
+        if not peer or self._live_session_secure_ready(peer):
+            return False
+        return self._auto_reconnect.expects_reconnect(peer)
 
     def is_secure_live_for_peer(self, peer_id: str) -> bool:
         """True if this peer has a finished secure LivePeerSession (wire-ready).
@@ -8669,6 +8682,28 @@ class I2PChatCore:
                     delivery_state=lifecycle.state,
                     retryable=lifecycle.retryable,
                 )
+
+        if (
+            policy == OutboundPolicy.QUEUE_THEN_RETRY_LIVE
+            and not secure_live
+            and r == "auto"
+            and peer_for_route
+            and self._auto_reconnect.expects_reconnect(peer_for_route)
+        ):
+            self._emit_system(
+                "Waiting for the peer to reconnect before offline delivery…"
+            )
+            self._auto_reconnect.nudge(peer_for_route, time.monotonic())
+            self._ensure_auto_reconnect()
+            deadline = time.monotonic() + float(self._reconnect_grace_sec)
+            while time.monotonic() < deadline:
+                if self._live_session_secure_ready(peer_for_route):
+                    self._heal_session_manager_secure(peer_for_route)
+                    secure_live = True
+                    break
+                await asyncio.sleep(0.25)
+            if not secure_live:
+                self._auto_reconnect.note_grace_spent(peer_for_route)
 
         if policy == OutboundPolicy.QUEUE_THEN_RETRY_LIVE and not secure_live:
             if self._blindbox_send_lock.locked():

@@ -143,6 +143,14 @@
     <string name="max_age_days">Максимальный возраст (дней, 0 — без ограничения)</string>
     <string name="save_retention">Сохранить</string>
     <string name="foreground_note">I2P работает на телефоне как постоянная фоновая служба. Это нужно, чтобы туннели оставались активными; расходуется батарея.</string>
+    <string name="exit_app">Выход</string>
+    <string name="exit_hint">Оставить I2P в фоне или завершить работу и остановить роутер.</string>
+    <string name="exit_background">Оставить в фоне</string>
+    <string name="exit_quit">Завершить</string>
+    <string name="unsent_title">Неотправленные сообщения</string>
+    <string name="unsent_body">В некоторых чатах остался текст. Отправить его через BlindBox перед выходом? Иначе он останется черновиком.</string>
+    <string name="unsent_send">Отправить через BlindBox</string>
+    <string name="unsent_keep">Оставить черновиками</string>
     <string name="verbose_log">Подробный лог</string>
     <string name="verbose_log_hint">Показывать на экране «Статус» технические сообщения: рукопожатия, BlindBox, подключения и отключения.</string>
 
