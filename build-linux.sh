@@ -34,8 +34,16 @@ case "${ARCH_SUFFIX}" in
   *)       I2PD_LINUX_SUBDIR="linux-x86_64" ;;
 esac
 
-if command -v python3.14 >/dev/null 2>&1; then
+# Prefer release-parity 3.14, then 3.13/3.12. Bare python3 may be 3.15+, which
+# breaks PyInstaller 6.19 in uv.lock (KeyError: LOAD_CONST_IMMORTAL).
+if [[ -n "${I2PCHAT_PYTHON:-}" ]]; then
+  PYTHON_BIN="${I2PCHAT_PYTHON}"
+elif command -v python3.14 >/dev/null 2>&1; then
   PYTHON_BIN="python3.14"
+elif command -v python3.13 >/dev/null 2>&1; then
+  PYTHON_BIN="python3.13"
+elif command -v python3.12 >/dev/null 2>&1; then
+  PYTHON_BIN="python3.12"
 else
   PYTHON_BIN="python3"
 fi
@@ -153,6 +161,7 @@ if [ "$(id -u)" != 0 ] && [ -d "${UV_PROJECT_ENVIRONMENT}" ]; then
   fi
 fi
 
+echo "==> Using Python: ${PYTHON_BIN}"
 uv sync --frozen --python "${PYTHON_BIN}" --group build --no-dev
 
 # Не полагаемся на source activate (в Docker + set -u иногда не появляется python в PATH)
@@ -161,6 +170,13 @@ VENV_PY="${VENV_ABS}/bin/python"
 export VIRTUAL_ENV="${VENV_ABS}"
 export PATH="${VENV_ABS}/bin:${PATH}"
 unset PYTHONHOME
+
+# PyInstaller 6.19 (uv.lock) не поддерживает CPython 3.15+; 6.21+ — да.
+if ! "${VENV_PY}" -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 15) else 1)'; then
+  echo "ERROR: venv Python $("${VENV_PY}" -c 'import sys; print("%d.%d"%sys.version_info[:2])') несовместим с PyInstaller 6.19 (KeyError: LOAD_CONST_IMMORTAL)." >&2
+  echo "  Нужен python3.14 (рекомендуется) или 3.12/3.13; либо I2PCHAT_PYTHON=... ." >&2
+  exit 1
+fi
 
 # Security gate: secure protocol requires PyNaCl
 "${VENV_PY}" - <<'PY'

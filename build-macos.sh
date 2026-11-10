@@ -49,15 +49,21 @@ fi
 
 # На Apple Silicon при сборке x64 через Rosetta Homebrew может подставить arm64 Python 3.14 —
 # тогда PyInstaller соберёт не тот Mach-O. Задайте I2PCHAT_PYTHON=/usr/local/bin/python3 (Intel).
+# Не падать на голый python3 (часто Homebrew 3.15): PyInstaller в lockfile (6.19)
+# ещё не знает bytecode 3.15 (KeyError: LOAD_CONST_IMMORTAL). CI/релиз — 3.14.
 if [[ -n "${I2PCHAT_PYTHON:-}" ]]; then
   PYTHON_BIN="${I2PCHAT_PYTHON}"
 elif command -v python3.14 >/dev/null 2>&1; then
   PYTHON_BIN="python3.14"
+elif command -v python3.13 >/dev/null 2>&1; then
+  PYTHON_BIN="python3.13"
+elif command -v python3.12 >/dev/null 2>&1; then
+  PYTHON_BIN="python3.12"
 else
   PYTHON_BIN="python3"
 fi
 
-echo "==> Синхронизирую зависимости (uv → ${VENV_DIR}, группа build)"
+echo "==> Синхронизирую зависимости (uv → ${VENV_DIR}, группа build; python=${PYTHON_BIN})"
 export UV_PROJECT_ENVIRONMENT="$(pwd)/${VENV_DIR}"
 uv sync --frozen --python "${PYTHON_BIN}" --group build --no-dev
 
@@ -67,6 +73,14 @@ elif [ -x "${VENV_DIR}/bin/python3" ]; then
   PYTHON_CMD="${VENV_DIR}/bin/python3"
 else
   echo "ERROR: после uv sync не найден интерпретатор в ${VENV_DIR}/bin" >&2
+  exit 1
+fi
+
+# PyInstaller 6.19 (uv.lock) не поддерживает CPython 3.15+; 6.21+ — да.
+if ! "${PYTHON_CMD}" -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 15) else 1)'; then
+  echo "ERROR: venv Python $("${PYTHON_CMD}" -c 'import sys; print("%d.%d"%sys.version_info[:2])') несовместим с PyInstaller 6.19 (KeyError: LOAD_CONST_IMMORTAL)." >&2
+  echo "  Поставьте python3.14 (рекомендуется) или 3.12/3.13, либо I2PCHAT_PYTHON=... с этим бинарником." >&2
+  echo "  Пример: brew install python@3.14 && ./build-macos.sh" >&2
   exit 1
 fi
 

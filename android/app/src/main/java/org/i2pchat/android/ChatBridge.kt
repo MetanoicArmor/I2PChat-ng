@@ -671,7 +671,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             val drafts = runCatching {
                 val obj = JSONObject(NativeEngine.nativeComposeDrafts(false, "{}"))
                 buildMap {
-                    obj.keys().forEach { key -> put(key, obj.getString(key)) }
+                    obj.keys().forEach { key ->
+                        val text = obj.optString(key).trim()
+                        if (key.isNotBlank() && text.isNotEmpty()) put(key, text)
+                    }
                 }
             }.getOrDefault(emptyMap())
             val addr = result.optString("localAddr")
@@ -749,9 +752,16 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         persistDraft(_state.value.selectedId, _state.value.compose)
         val groups = _state.value.groups.map { it.addr }.toSet()
         return _state.value.drafts
-            .filter { (id, text) -> id !in groups && text.isNotBlank() }
-            .map { (id, text) -> id to text.trim() }
+            .mapNotNull { (id, text) ->
+                val body = text.trim()
+                if (id.isBlank() || body.isEmpty()) return@mapNotNull null
+                if (id in groups || id.startsWith("group:")) return@mapNotNull null
+                id to body
+            }
     }
+
+    /** True only when a quit prompt should offer BlindBox flush. */
+    fun hasUnsentDirectDrafts(): Boolean = directDrafts().isNotEmpty()
 
     fun quit(flushOffline: Boolean, onClosed: () -> Unit = {}) {
         stop(if (flushOffline) directDrafts() else emptyList(), onClosed)
@@ -1004,6 +1014,11 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    /** Re-read BlindBox/replica fields for Status without waiting for a peer event. */
+    fun refreshStatus() {
+        viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
+    }
+
     fun pollOffline() {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativePollBlindbox()
@@ -1140,14 +1155,32 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
-    fun saveReplicas(endpoints: List<String>, auth: Map<String, String>) {
+    fun saveReplicas(endpoints: List<String>, auth: Map<String, String>, done: ((Boolean) -> Unit)? = null) {
+        if (!_state.value.running && !_state.value.starting) {
+            onMain {
+                Toast.makeText(getApplication(), str(R.string.blindbox_need_session), Toast.LENGTH_LONG).show()
+                done?.invoke(false)
+            }
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val json = JSONObject().put("endpoints", JSONArray(endpoints))
             val authJson = JSONObject()
             auth.forEach { (k, v) -> authJson.put(k, v) }
             json.put("auth", authJson)
-            NativeEngine.nativeSaveReplicas(json.toString())
+            val ok = runCatching {
+                NativeEngine.nativeSaveReplicas(json.toString())
+                true
+            }.getOrDefault(false)
             refreshSnapshot()
+            onMain {
+                Toast.makeText(
+                    getApplication(),
+                    if (ok) str(R.string.replicas_saved) else str(R.string.blindbox_need_session),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                done?.invoke(ok)
+            }
         }
     }
 
@@ -1245,20 +1278,40 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     private fun refreshSnapshot() {
         val snap = runCatching { JSONObject(NativeEngine.nativeSnapshot()) }.getOrNull() ?: return
+        // A failed/empty native reply must not wipe BlindBox readiness while the
+        // session is still up (optBoolean defaults missing keys to false).
+        if (snap.has("error") && !snap.has("blindboxReady") && !snap.has("replicas")) return
         val contacts = jsonContacts(snap.optJSONArray("contacts") ?: JSONArray())
         val groups = jsonGroups(snap.optJSONArray("groups") ?: JSONArray())
         val unreadContacts = mergeUnread(contacts, _state.value.contacts)
         val unreadGroups = mergeUnread(groups, _state.value.groups)
-        val replicas = buildList {
-            val arr = snap.optJSONArray("replicas") ?: JSONArray()
-            for (i in 0 until arr.length()) add(arr.getString(i))
+        val hasReplicaList = snap.has("replicas")
+        val replicas = if (hasReplicaList) {
+            buildList {
+                val arr = snap.optJSONArray("replicas") ?: JSONArray()
+                for (i in 0 until arr.length()) add(arr.getString(i))
+            }
+        } else {
+            _state.value.replicas
+        }
+        // Native ready = enabled + endpoints. Do not invent true from an
+        // empty/partial snapshot; Status still waits for tunnelsReady.
+        val bbReady = when {
+            snap.has("blindboxReady") -> snap.optBoolean("blindboxReady")
+            replicas.isNotEmpty() -> true
+            else -> _state.value.blindboxReady
+        }
+        val replicaSource = when {
+            snap.has("replicaSource") -> snap.optString("replicaSource")
+            replicas.isNotEmpty() && _state.value.replicaSource.isBlank() -> "profile-file"
+            else -> _state.value.replicaSource
         }
         _state.update {
             it.copy(
                 localAddr = snap.optString("localAddr", it.localAddr),
                 running = snap.optBoolean("running", it.running),
-                blindboxReady = snap.optBoolean("blindboxReady"),
-                replicaSource = snap.optString("replicaSource"),
+                blindboxReady = bbReady,
+                replicaSource = replicaSource,
                 replicas = replicas,
                 contacts = unreadContacts,
                 groups = unreadGroups,
@@ -1561,6 +1614,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 routerIssue = issue,
             )
         }
+        // Replica list is known early in start(); refresh so Status does not
+        // keep a stale blindboxReady=false from the first empty paint.
+        viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
     }
 
     override fun onTransfer(peer: String, json: String) = onMain { }

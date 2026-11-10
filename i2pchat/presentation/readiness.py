@@ -159,12 +159,35 @@ class ReadinessTracker:
         bb_state, bb_value = STATE_OFF, ""
         if core is not None:
             try:
+                # Telemetry has no "state" field. "ready" means enabled +
+                # replicas + local identity — but offline PUT still needs I2P
+                # tunnels, so do not show OK before transport is ready.
                 bb = core.get_blindbox_telemetry()
                 if bb.get("enabled"):
-                    bb_value = str(bb.get("state", "off"))
-                    bb_state = STATE_OK if bb_value == "ready" else STATE_PENDING
+                    replica_count = int(
+                        bb.get("blind_boxes", bb.get("replicas", 0)) or 0
+                    )
+                    source = str(
+                        bb.get("replicas_source")
+                        or bb.get("blind_boxes_source")
+                        or ""
+                    ).strip()
+                    configured = bool(bb.get("ready")) or replica_count > 0
+                    if configured and transport == "ready":
+                        bb_value = source or "ready"
+                        bb_state = STATE_OK
+                    elif configured or started:
+                        bb_value = source
+                        bb_state = STATE_PENDING
+                    else:
+                        bb_value = tr("status.state.off")
+                        bb_state = STATE_OFF
+                else:
+                    bb_value = tr("status.state.off")
+                    bb_state = STATE_OFF
             except Exception:
                 bb_state = STATE_OFF
+                bb_value = ""
         checks = (
             ReadinessCheck(tr("status.check.router"), router_value, router_state),
             ReadinessCheck(tr("status.check.sam"), sam_value, sam_state),

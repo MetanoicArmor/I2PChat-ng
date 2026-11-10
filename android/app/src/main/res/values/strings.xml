@@ -186,9 +186,16 @@
     <string name="restart_bundled_hint">Use this if the router does not start or a previous i2pd did not shut down.</string>
 
     <!-- BlindBox -->
+    <string name="blindbox_settings">BlindBox (offline delivery)</string>
+    <string name="blindbox_intro">Offline delivery stores messages on BlindBox replicas until the peer comes back. Edit the replica list like on desktop — one endpoint per line (for example *.b32.i2p:19444). Leave empty and save to disable. Comments starting with # are ignored.</string>
+    <string name="blindbox_need_session">Open a profile first so BlindBox settings can be saved.</string>
     <string name="blindbox_state">Ready: %1$s · source: %2$s</string>
     <string name="replicas_label">Replica endpoints, one per line</string>
+    <string name="replicas_auth_label">Replica auth (optional)</string>
+    <string name="replicas_auth_hint">One line per replica: endpoint&lt;TAB&gt;token — or endpoint = token</string>
     <string name="save_replicas">Save replicas</string>
+    <string name="use_default_replicas">Use built-in defaults</string>
+    <string name="replicas_saved">BlindBox replicas saved</string>
     <string name="check_now">Check now</string>
 
     <!-- Backup -->

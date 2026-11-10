@@ -1041,9 +1041,9 @@ THEMES: dict[str, dict[str, object]] = {
             QMessageBox QPushButton {
                 background-color: #ffffff;
                 border-radius: 6px;
-                padding: 6px 16px;
+                padding: 8px 18px;
                 color: #1d1d1f;
-                min-width: 70px;
+                min-width: 0px;
                 border: none;
             }
             QMessageBox QPushButton:hover { background-color: #f6f8fc; }
@@ -1610,9 +1610,9 @@ THEMES: dict[str, dict[str, object]] = {
             QMessageBox QPushButton {
                 background-color: #2b2b30;
                 border-radius: 6px;
-                padding: 6px 16px;
+                padding: 8px 18px;
                 color: #f5f5f7;
-                min-width: 70px;
+                min-width: 0px;
             }
             QMessageBox QPushButton:hover { background-color: #3a3a40; }
             QMessageBox QPushButton:pressed { background-color: #0a84ff; }
@@ -3801,7 +3801,7 @@ class MessageInputEdit(QtWidgets.QTextEdit):
             return
         super().paste()
 
-    def insertFromMimeData(self, source: QtGui.QMimeData) -> None:  # type: ignore[override]
+    def insertFromMimeData(self, source: QtCore.QMimeData) -> None:  # type: ignore[override]
         if source.hasImage():
             raw = source.imageData()
             qimg = QtGui.QImage()
@@ -3855,7 +3855,7 @@ class MessageInputEdit(QtWidgets.QTextEdit):
             return
         super().insertFromMimeData(source)
 
-    def _local_urls_from_mime(self, source: QtGui.QMimeData) -> list[str]:
+    def _local_urls_from_mime(self, source: QtCore.QMimeData) -> list[str]:
         paths: list[str] = []
         if not source.hasUrls():
             return paths
@@ -13973,11 +13973,16 @@ class ChatWindow(QtWidgets.QMainWindow):
                     "Send via BlindBox",
                     QtWidgets.QMessageBox.ButtonRole.AcceptRole,
                 )
-                box.addButton(
+                keep_btn = box.addButton(
                     "Keep as drafts",
                     QtWidgets.QMessageBox.ButtonRole.ActionRole,
                 )
                 cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+                # Global QMessageBox min-width used to clip long custom labels.
+                for btn in (send_btn, keep_btn, cancel_btn):
+                    hint = btn.sizeHint()
+                    btn.setMinimumWidth(max(hint.width() + 24, 120))
+                box.setMinimumWidth(max(box.sizeHint().width(), 520))
                 box.exec()
                 clicked = box.clickedButton()
                 if clicked is None or clicked is cancel_btn:

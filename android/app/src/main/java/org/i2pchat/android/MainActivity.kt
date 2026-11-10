@@ -945,6 +945,14 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
     val routerDown = state.transport == "failed"
     var askExit by remember { mutableStateOf(false) }
     var askFlush by remember { mutableStateOf(false) }
+    LaunchedEffect(state.running, state.tunnelsReady) {
+        if (!state.running) return@LaunchedEffect
+        // BlindBox readiness can lag the first Status paint after start.
+        bridge.refreshStatus()
+        if (state.blindboxReady || state.replicas.isNotEmpty()) return@LaunchedEffect
+        delay(1_500)
+        bridge.refreshStatus()
+    }
     val routerCheck = when {
         routerDown -> "failed"
         state.samReady -> "ok"
@@ -1051,12 +1059,23 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                 )
                 CheckRow(
                     stringResource(R.string.check_blindbox),
-                    "",
                     when {
-                        state.blindboxReady -> "ok"
-                        state.running && state.replicaSource != "none" -> "pending"
+                        state.blindboxReady || state.replicas.isNotEmpty() ->
+                            state.replicaSource.ifBlank {
+                                stringResource(R.string.state_ok)
+                            }
+                        else -> stringResource(R.string.state_off)
+                    },
+                    // Same as desktop Status: replicas configured is not enough —
+                    // offline PUT needs I2P tunnels before we show OK.
+                    when {
+                        (state.blindboxReady || state.replicas.isNotEmpty()) &&
+                            state.tunnelsReady -> "ok"
+                        state.blindboxReady || state.replicas.isNotEmpty() ||
+                            state.starting || state.running -> "pending"
                         else -> "off"
                     },
+                    onClick = { nav.navigate("blindbox") },
                 )
                 if (!active) {
                     Spacer(Modifier.height(8.dp))
@@ -1101,9 +1120,10 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                     }) { Text(stringResource(R.string.exit_background)) }
                     TextButton(onClick = {
                         askExit = false
-                        if (bridge.directDrafts().isNotEmpty()) {
+                        if (bridge.hasUnsentDirectDrafts()) {
                             askFlush = true
                         } else {
+                            // Nothing sitting in compose — quit without the BlindBox prompt.
                             bridge.quit(false) { (context as? Activity)?.finishAndRemoveTask() }
                         }
                     }) { Text(stringResource(R.string.exit_quit)) }
@@ -1492,7 +1512,7 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                     Text(stringResource(R.string.i2p_router))
                 }
                 Button(onClick = { nav.navigate("blindbox") }, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.blindbox))
+                    Text(stringResource(R.string.blindbox_settings))
                 }
                 Button(onClick = { nav.navigate("backup") }, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.backup_restore))
@@ -1741,15 +1761,55 @@ fun RouterScreen(bridge: ChatBridge, nav: NavHostController) {
     }
 }
 
+private val DefaultReleaseBlindboxEndpoints = listOf(
+    "tcglilyjadosrez5gu3kqvrdpu6ri622jwrzamtpburtnpge7wgq.b32.i2p:19444",
+    "dzyhukukogujr6r2vwfy667cwm7vg3oomhx2sryxhb6mn4i4wbjq.b32.i2p:19444",
+)
+
+/** Parse desktop-style auth lines: `endpoint\\ttoken` or `endpoint = token`. */
+private fun parseReplicaAuthLines(raw: String): Map<String, String> {
+    val out = linkedMapOf<String, String>()
+    for (line in raw.lineSequence()) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
+        val parts = when {
+            "\t" in trimmed -> trimmed.split("\t", limit = 2)
+            "=" in trimmed -> trimmed.split("=", limit = 2)
+            else -> continue
+        }
+        val endpoint = parts[0].trim()
+        val token = parts.getOrNull(1)?.trim().orEmpty()
+        if (endpoint.isNotEmpty() && token.isNotEmpty()) out[endpoint] = token
+    }
+    return out
+}
+
+private fun replicaEndpointLines(raw: String): List<String> =
+    raw.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .toList()
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BlindBoxScreen(bridge: ChatBridge, nav: NavHostController) {
     val state by bridge.state.collectAsStateWithLifecycle()
-    var text by remember { mutableStateOf(state.replicas.joinToString("\n")) }
+    var text by remember { mutableStateOf("") }
+    var authText by remember { mutableStateOf("") }
+    var seeded by remember { mutableStateOf(false) }
+    LaunchedEffect(state.replicas, state.running) {
+        if (!seeded && (state.replicas.isNotEmpty() || state.running || !state.starting)) {
+            text = buildString {
+                if (state.replicaSource == "release-builtin") append("# default servers\n")
+                append(state.replicas.joinToString("\n"))
+            }
+            seeded = true
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.blindbox)) },
+                title = { Text(stringResource(R.string.blindbox_settings)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -1758,25 +1818,79 @@ fun BlindBoxScreen(bridge: ChatBridge, nav: NavHostController) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).padding(16.dp)) {
+        Column(
+            Modifier
+                .padding(padding)
+                .padding(16.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Text(stringResource(R.string.blindbox_intro), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(12.dp))
             Text(
-                stringResource(
+                    stringResource(
                     R.string.blindbox_state,
-                    stringResource(if (state.blindboxReady) R.string.yes_value else R.string.no_value),
+                    stringResource(
+                        if (state.blindboxReady || state.replicas.isNotEmpty()) {
+                            R.string.yes_value
+                        } else {
+                            R.string.no_value
+                        },
+                    ),
                     state.replicaSource.ifBlank { stringResource(R.string.none_value) },
                 ),
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.height(8.dp))
+            if (!state.running && !state.starting) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    stringResource(R.string.blindbox_need_session),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 modifier = Modifier.fillMaxWidth().height(180.dp),
                 label = { Text(stringResource(R.string.replicas_label)) },
             )
-            Button(onClick = {
-                bridge.saveReplicas(text.lines().map { it.trim() }.filter { it.isNotBlank() }, emptyMap())
-            }) { Text(stringResource(R.string.save_replicas)) }
-            Button(onClick = { bridge.pollOffline() }) { Text(stringResource(R.string.check_now)) }
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = authText,
+                onValueChange = { authText = it },
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                label = { Text(stringResource(R.string.replicas_auth_label)) },
+                supportingText = { Text(stringResource(R.string.replicas_auth_hint)) },
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    bridge.saveReplicas(
+                        replicaEndpointLines(text),
+                        parseReplicaAuthLines(authText),
+                    ) { ok ->
+                        if (ok) seeded = true
+                    }
+                },
+                enabled = state.running || state.starting,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.save_replicas)) }
+            OutlinedButton(
+                onClick = {
+                    text = buildString {
+                        append("# default servers\n")
+                        append(DefaultReleaseBlindboxEndpoints.joinToString("\n"))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.use_default_replicas)) }
+            Button(
+                onClick = { bridge.pollOffline() },
+                enabled = state.running,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.check_now)) }
         }
     }
 }

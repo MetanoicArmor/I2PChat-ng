@@ -90,11 +90,28 @@ if (-not $ReleaseVersion) {
     throw "VERSION file is empty: $VersionFile"
 }
 
-# Используем установленный Python 3.14+, с fallback на latest Python 3
-$PyLauncherArgs = @("-3.14")
-& py @PyLauncherArgs -c "import sys; print(sys.version)" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    $PyLauncherArgs = @("-3")
+# Prefer release-parity 3.14, then 3.13/3.12. Bare py -3 may be 3.15+, which
+# breaks PyInstaller 6.19 in uv.lock (KeyError: LOAD_CONST_IMMORTAL).
+# Override: $env:I2PCHAT_PYTHON = full path to python.exe
+$uvPy = $null
+if ($env:I2PCHAT_PYTHON) {
+    $uvPy = $env:I2PCHAT_PYTHON
+}
+else {
+    foreach ($minor in @("3.14", "3.13", "3.12")) {
+        & py "-$minor" -c "import sys; print(sys.version)" | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $uvPy = $minor
+            break
+        }
+    }
+    if (-not $uvPy) {
+        & py -3 -c "import sys; print(sys.version)" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "No usable Python 3 found (need 3.12–3.14 for PyInstaller 6.19; install 3.14 recommended)."
+        }
+        $uvPy = "3"
+    }
 }
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -184,13 +201,19 @@ if ($env:I2PCHAT_OMIT_BUNDLED_I2PD -ne "1" -and -not (Test-Path "vendor\i2pd\win
     }
 }
 
-Write-Host "==> uv sync (locked runtime + build group, no dev tools)"
-$uvPy = if ($PyLauncherArgs -contains "-3.14") { "3.14" } else { "3" }
+Write-Host "==> uv sync (locked runtime + build group, no dev tools; python=$uvPy)"
 Invoke-NativeChecked "uv" @("sync", "--frozen", "--python", $uvPy, "--group", "build", "--no-dev")
 
 $PythonExe = Join-Path $RepoRoot (Join-Path $VenvDir "Scripts\python.exe")
 if (-not (Test-Path $PythonExe)) {
     throw "Virtualenv python not found after uv sync: $PythonExe"
+}
+
+# PyInstaller 6.19 (uv.lock) does not support CPython 3.15+; 6.21+ does.
+& $PythonExe -c "import sys; raise SystemExit(0 if sys.version_info < (3, 15) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    $ver = & $PythonExe -c "import sys; print('%d.%d' % sys.version_info[:2])"
+    throw "venv Python $ver incompatible with PyInstaller 6.19 (KeyError: LOAD_CONST_IMMORTAL). Install Python 3.14 (recommended) or 3.12/3.13, or set I2PCHAT_PYTHON."
 }
 
 Write-Host "==> Check PyNaCl (required for secure protocol)"

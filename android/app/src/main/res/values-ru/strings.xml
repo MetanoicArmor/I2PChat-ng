@@ -173,9 +173,16 @@
     <string name="restart_bundled">Перезапустить встроенный i2pd</string>
     <string name="restart_bundled_hint">Используйте, если роутер не запускается или предыдущий i2pd не завершился.</string>
 
+    <string name="blindbox_settings">BlindBox (офлайн-доставка)</string>
+    <string name="blindbox_intro">Офлайн-доставка хранит сообщения на репликах BlindBox, пока пир снова не появится. Список реплик редактируется как на десктопе — один адрес на строку (например *.b32.i2p:19444). Пустой список и «Сохранить» отключает доставку. Строки с # — комментарии.</string>
+    <string name="blindbox_need_session">Сначала откройте профиль, чтобы сохранить настройки BlindBox.</string>
     <string name="blindbox_state">Готов: %1$s · источник: %2$s</string>
     <string name="replicas_label">Адреса реплик, по одному на строку</string>
+    <string name="replicas_auth_label">Auth реплик (необязательно)</string>
+    <string name="replicas_auth_hint">По одной строке: endpoint&lt;TAB&gt;token — или endpoint = token</string>
     <string name="save_replicas">Сохранить реплики</string>
+    <string name="use_default_replicas">Встроенные по умолчанию</string>
+    <string name="replicas_saved">Реплики BlindBox сохранены</string>
     <string name="check_now">Проверить сейчас</string>
 
     <string name="backup_title">Резервная копия</string>

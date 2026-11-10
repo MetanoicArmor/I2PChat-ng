@@ -36,8 +36,9 @@ struct ReplicaSettings {
     bool auth_locked = false;
 };
 
-/// Project public BlindBox replica, matching Python `DEFAULT_RELEASE_BLINDBOX_ENDPOINTS`.
+/// Project public BlindBox replicas, matching Python `DEFAULT_RELEASE_BLINDBOX_ENDPOINTS`.
 inline constexpr std::string_view kDefaultReleaseBlindboxEndpoints[] = {
+    "tcglilyjadosrez5gu3kqvrdpu6ri622jwrzamtpburtnpge7wgq.b32.i2p:19444",
     "dzyhukukogujr6r2vwfy667cwm7vg3oomhx2sryxhb6mn4i4wbjq.b32.i2p:19444",
 };
 
