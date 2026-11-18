@@ -78,6 +78,12 @@ std::optional<ContactRecord> record_from_json(const nlohmann::json& entry) {
     record.last_preview =
         truncate_code_points(field_text(entry, "last_preview"), kPreviewMaxLength);
     record.last_activity_ts = field_text(entry, "last_activity_ts");
+    const auto days_it = entry.find("history_retention_days");
+    if (days_it != entry.end() && days_it->is_number_integer()) {
+        const auto days = days_it->get<long long>();
+        record.history_retention_days = static_cast<unsigned>(
+            std::clamp<long long>(days, 0, kMaxPeerHistoryRetentionDays));
+    }
     return record;
 }
 
@@ -88,6 +94,9 @@ nlohmann::json record_to_json(const ContactRecord& record) {
     out["note"] = record.note;
     out["last_preview"] = record.last_preview;
     out["last_activity_ts"] = record.last_activity_ts;
+    if (record.history_retention_days > 0) {
+        out["history_retention_days"] = record.history_retention_days;
+    }
     return out;
 }
 
@@ -208,6 +217,27 @@ bool ContactBook::set_peer_profile(std::string_view addr, std::string_view displ
     }
     record->display_name = name;
     record->note = trimmed_note;
+    return true;
+}
+
+bool ContactBook::set_peer_history_retention_days(std::string_view addr, unsigned days) {
+    const std::string normalized = normalize_contact_address(addr);
+    if (normalized.empty()) {
+        return false;
+    }
+    days = std::min(days, kMaxPeerHistoryRetentionDays);
+    ContactRecord* record = get(normalized);
+    if (record == nullptr) {
+        if (days == 0) {
+            return false;
+        }
+        remember_peer(normalized);
+        record = get(normalized);
+    }
+    if (record == nullptr || record->history_retention_days == days) {
+        return false;
+    }
+    record->history_retention_days = days;
     return true;
 }
 

@@ -32,26 +32,23 @@ def _render(renderable) -> str:  # type: ignore[no-untyped-def]
     return console.export_text()
 
 
-def test_ascii_image_from_peer_is_rendered_as_plain_text() -> None:
+def test_ascii_image_from_peer_is_not_rendered_in_terminal() -> None:
     app = object.__new__(I2PChat)
-    log = _Log()
+    posted: list[tuple[str, str]] = []
     app._record_transfer_event = lambda *a, **k: None  # type: ignore[method-assign]
     app._peer_display_name = lambda peer: "Peer"  # type: ignore[method-assign]
     app._current_target_peer = lambda: None  # type: ignore[method-assign]
+    app.post = lambda kind, text, **_kw: posted.append((kind, text))  # type: ignore[method-assign]
 
-    # Unbalanced closing tag raises MarkupError when parsed as markup; the
-    # escape sequence would retitle the terminal if passed through.
+    # Peer-supplied art must not be drawn; only a system note.
     art = "[/bold] [red]x[/red] \x1b]0;pwned\x07 ##"
-    with patch.object(I2PChat, "chat_log", new_callable=PropertyMock, return_value=log):
-        I2PChat.handle_image_received(app, art)
+    I2PChat.handle_image_received(app, art)
 
-    assert len(log.items) == 1
-    panel = log.items[0].renderable  # Align -> Panel
-    assert isinstance(panel.renderable, Text)
-    rendered = _render(panel)
-    assert "[/bold]" in rendered
-    assert "[red]x[/red]" in rendered
-    assert "\x1b" not in rendered
+    assert len(posted) == 1
+    assert posted[0][0] == "system"
+    assert "not rendered" in posted[0][1]
+    assert "\x1b" not in posted[0][1]
+    assert "[/bold]" not in posted[0][1]
 
 
 def test_post_strips_control_characters_from_peer_message() -> None:

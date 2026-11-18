@@ -40,6 +40,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -78,18 +79,22 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -107,13 +112,14 @@ import androidx.navigation.compose.rememberNavController
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
 import org.i2pchat.android.ui.ChatListScreen
 import org.i2pchat.android.ui.EmojiChars
 import org.i2pchat.android.ui.KeetComposer
 import org.i2pchat.android.ui.KeetMessageBubble
+import org.i2pchat.android.ui.MediaViewerDialog
+import org.i2pchat.android.ui.MediaViewerRequest
 import org.i2pchat.android.ui.PeerAvatar
 import org.i2pchat.android.ui.theme.I2PChatTheme
 import org.i2pchat.android.ui.theme.TerminalPalettes
@@ -259,13 +265,14 @@ fun PeerLinkDot(link: String) {
     Text("●", color = color, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatImageThumb(
     path: String = "",
     memoryKey: String = "",
-    onOpenPath: ((String) -> Unit)? = null,
+    onOpen: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
-    val context = LocalContext.current
     val caption = when {
         path.isNotBlank() -> File(path).name
         memoryKey.isNotBlank() -> memoryKey.substringAfter('\n', memoryKey)
@@ -276,11 +283,12 @@ fun ChatImageThumb(
             decodeChatImageThumb(path, memoryKey)
         }.getOrNull()
     }
-    val openPath: (() -> Unit)? = when {
-        path.isNotBlank() -> ({
-            if (onOpenPath != null) onOpenPath(path) else openReceivedFile(context, path)
-        })
-        else -> null
+    // combinedClickable, not clickable: a plain clickable swallows the long
+    // press and the message menu (Save As) would never open from a picture.
+    val tap = if (onOpen != null || onLongClick != null) {
+        Modifier.combinedClickable(onClick = { onOpen?.invoke() }, onLongClick = onLongClick)
+    } else {
+        Modifier
     }
     if (bitmap != null) {
         Image(
@@ -290,13 +298,13 @@ fun ChatImageThumb(
                 .widthIn(max = 260.dp)
                 .heightIn(max = 320.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .then(if (openPath != null) Modifier.clickable(onClick = openPath) else Modifier),
+                .then(tap),
             contentScale = ContentScale.Fit,
         )
     } else {
         Text(
             "📷 ${caption.ifBlank { path.ifBlank { memoryKey } }}",
-            modifier = if (openPath != null) Modifier.clickable(onClick = openPath) else Modifier,
+            modifier = tap,
         )
     }
 }
@@ -350,6 +358,14 @@ fun isEphemeralViewFile(context: android.content.Context, file: File): Boolean {
     return real.isFile && real.parentFile == view
 }
 
+/** CreateDocument whose MIME type is set per launch, so Save As suggests the right type. */
+class CreateTypedDocument : ActivityResultContracts.CreateDocument("application/octet-stream") {
+    var mimeType: String = "application/octet-stream"
+
+    override fun createIntent(context: android.content.Context, input: String): Intent =
+        super.createIntent(context, input).setType(mimeType)
+}
+
 fun openReceivedFile(context: android.content.Context, path: String) {
     val file = File(path)
     if (!file.isFile) return
@@ -359,13 +375,7 @@ fun openReceivedFile(context: android.content.Context, path: String) {
     val uri = runCatching {
         FileProvider.getUriForFile(context, "${context.packageName}.files", file.canonicalFile)
     }.getOrNull() ?: return
-    val ext = file.extension.lowercase()
-    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-        ?: when {
-            ext in listOf("jpg", "jpeg", "png", "gif", "webp", "heic") -> "image/*"
-            ext == "pdf" -> "application/pdf"
-            else -> "*/*"
-        }
+    val mime = mimeTypeForName(file.name) ?: "*/*"
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, mime)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -400,26 +410,6 @@ fun formatReplyQuote(sender: String, text: String): String {
 }
 
 @Composable
-fun OpenFileWarningDialog(
-    path: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val name = File(path).name
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.open_file_title)) },
-        text = { Text(stringResource(R.string.open_file_body, name)) },
-        confirmButton = {
-            TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_open)) }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
-        },
-    )
-}
-
-@Composable
 fun MessageActionsDialog(
     msg: MessageUi,
     onDismiss: () -> Unit,
@@ -430,6 +420,8 @@ fun MessageActionsDialog(
     onOpenFolder: (String) -> Unit,
     onSaveMemoryImage: ((String) -> Unit)? = null,
     onSaveSealed: ((String) -> Unit)? = null,
+    onSaveFile: ((String) -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
 ) {
     val path = msg.imagePath.ifBlank { msg.filePath }
     val folder = path.takeIf { it.isNotBlank() }?.let { File(it).parentFile }?.takeIf {
@@ -447,6 +439,9 @@ fun MessageActionsDialog(
             Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                 if (path.isNotBlank()) {
                     TextButton(onClick = { onOpen(path) }) { Text(stringResource(R.string.action_open)) }
+                    if (onSaveFile != null) {
+                        TextButton(onClick = { onSaveFile(path) }) { Text(stringResource(R.string.action_save_as)) }
+                    }
                     TextButton(onClick = { onCopy(path) }) { Text(stringResource(R.string.menu_copy_path)) }
                 }
                 if (msg.memoryImage.isNotBlank() && onSaveMemoryImage != null) {
@@ -482,6 +477,14 @@ fun MessageActionsDialog(
                 }
                 if (detail.isNotBlank()) {
                     TextButton(onClick = { onCopy(detail) }) { Text(stringResource(R.string.menu_copy_delivery)) }
+                }
+                if (onDelete != null) {
+                    TextButton(onClick = onDelete) {
+                        Text(
+                            stringResource(R.string.menu_delete_message),
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
         },
@@ -1167,6 +1170,9 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     val group = state.selectedIsGroup
     val context = LocalContext.current
     var emoji by remember { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val composeFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var finding by remember { mutableStateOf(false) }
     var search by remember { mutableStateOf("") }
@@ -1179,6 +1185,8 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var pendingOpenSealed by remember { mutableStateOf<String?>(null) }
     var pendingSaveSealed by remember { mutableStateOf<String?>(null) }
     var pendingSaveSealedPeer by remember { mutableStateOf("") }
+    var pendingSaveFile by remember { mutableStateOf<String?>(null) }
+    var viewer by remember { mutableStateOf<MediaViewerRequest?>(null) }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, false)
@@ -1192,6 +1200,12 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         val key = pendingSaveMemoryKey
         pendingSaveMemoryKey = null
         if (uri != null && key != null) bridge.saveMemoryImage(key, uri)
+    }
+    val saveFileContract = remember { CreateTypedDocument() }
+    val saveFile = rememberLauncherForActivityResult(saveFileContract) { uri ->
+        val src = pendingSaveFile
+        pendingSaveFile = null
+        if (uri != null && src != null) bridge.saveLocalFile(src, uri)
     }
     val saveSealedFile = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
@@ -1208,6 +1222,9 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     val conversation = state.conversations.firstOrNull { it.addr == id }
     val title = conversation?.title ?: id.take(18)
     val contact = state.contacts.firstOrNull { it.addr == id } ?: ContactUi(addr = id).takeIf { !group }
+    var peerRetentionDays by remember(id, contact?.historyRetentionDays) {
+        mutableStateOf((contact?.historyRetentionDays ?: 0).toString())
+    }
     if (renaming) {
         AlertDialog(
             onDismissRequest = { renaming = false },
@@ -1216,37 +1233,46 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 Column {
                     OutlinedTextField(newName, { newName = it }, label = { Text(stringResource(R.string.name)) }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(newNote, { newNote = it }, label = { Text(stringResource(R.string.peer_note)) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        peerRetentionDays,
+                        { peerRetentionDays = it.filter { ch -> ch.isDigit() }.take(4) },
+                        label = { Text(stringResource(R.string.peer_retention_days)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
                     bridge.setPeerProfile(id, newName, newNote)
+                    bridge.setPeerRetentionDays(id, peerRetentionDays.toIntOrNull() ?: 0)
                     renaming = false
                 }) { Text(stringResource(R.string.action_save)) }
             },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text(stringResource(R.string.action_cancel)) } },
         )
     }
-    pendingOpenPath?.let { path ->
-        OpenFileWarningDialog(
-            path = path,
-            onConfirm = {
-                pendingOpenPath = null
-                openReceivedFile(context, path)
-            },
-            onDismiss = { pendingOpenPath = null },
-        )
+    // Open received files immediately (no "Open file?" confirm dialog).
+    // Pictures and videos play in the in-app fullscreen viewer; everything
+    // else goes to an external app.
+    LaunchedEffect(pendingOpenPath) {
+        val path = pendingOpenPath ?: return@LaunchedEffect
+        pendingOpenPath = null
+        val file = File(path)
+        val kind = mediaKindForName(path)
+        if ((kind == MediaKind.Image || kind == MediaKind.Video) && file.isFile &&
+            (isReceivedMediaFile(context, file) || isEphemeralViewFile(context, file))
+        ) {
+            viewer = MediaViewerRequest(kind, path = path, title = file.name)
+        } else {
+            openReceivedFile(context, path)
+        }
     }
-    pendingOpenSealed?.let { id ->
-        OpenFileWarningDialog(
-            path = SealedFiles.get(state.selectedId, id)?.displayName ?: id,
-            onConfirm = {
-                pendingOpenSealed = null
-                bridge.openSealedFile(state.selectedId, id)
-            },
-            onDismiss = { pendingOpenSealed = null },
-        )
+    LaunchedEffect(pendingOpenSealed) {
+        val sealedId = pendingOpenSealed ?: return@LaunchedEffect
+        pendingOpenSealed = null
+        bridge.openSealedFile(state.selectedId, sealedId, onReady = { pendingOpenPath = it })
     }
+    viewer?.let { MediaViewerDialog(it, onDismiss = { viewer = null }) }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -1350,7 +1376,13 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                         messageMenu = null
                     },
                     onReply = {
-                        val quote = formatReplyQuote(msg.sender, msg.text)
+                        val mine = msg.kind == "out" || msg.kind == "me"
+                        val author = when {
+                            mine -> REPLY_AUTHOR_ME
+                            msg.sender.isNotBlank() -> msg.sender
+                            else -> title
+                        }
+                        val quote = formatReplyQuote(author, msg.text)
                         val draft = state.compose
                         bridge.setCompose(if (draft.isBlank()) quote else "$draft\n\n$quote")
                         messageMenu = null
@@ -1372,16 +1404,29 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                         messageMenu = null
                         saveMemoryImage.launch(msg.fileCaption.ifBlank { "image.jpg" })
                     },
+                    onSaveFile = { src ->
+                        pendingSaveFile = src
+                        saveFileContract.mimeType = mimeTypeForName(src) ?: "application/octet-stream"
+                        messageMenu = null
+                        saveFile.launch(File(src).name)
+                    },
                     onSaveSealed = { id ->
                         pendingSaveSealed = id
                         pendingSaveSealedPeer = state.selectedId
                         messageMenu = null
                         saveSealedFile.launch(msg.fileCaption.ifBlank { "file" })
                     },
+                    // History is stored per direct chat; group rows have no delete API.
+                    onDelete = if (group) null else {
+                        {
+                            bridge.deleteMessage(msg)
+                            messageMenu = null
+                        }
+                    },
                 )
             }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
-                items(shown) { msg ->
+                itemsIndexed(shown) { index, msg ->
                     if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
                         HistoryNoticeRow(msg, onLongClick = { messageMenu = msg })
                     } else {
@@ -1392,6 +1437,25 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                             textStyle = emojiSafeTextStyle(),
                             onOpenFile = { pendingOpenPath = it },
                             onOpenSealed = { pendingOpenSealed = it },
+                            onOpenMemoryImage = { key ->
+                                viewer = MediaViewerRequest(
+                                    MediaKind.Image,
+                                    memoryKey = key,
+                                    title = key.substringAfter('\n', key),
+                                )
+                            },
+                            resolveSealed = { sealedId, done ->
+                                bridge.openSealedFile(
+                                    state.selectedId,
+                                    sealedId,
+                                    onReady = done,
+                                    onFailed = { done("") },
+                                )
+                            },
+                            onQuoteClick = { quote ->
+                                val target = findQuotedMessage(shown, index, quote)
+                                if (target >= 0) scope.launch { list.animateScrollToItem(target) }
+                            },
                             onLongClick = { messageMenu = msg },
                         )
                     }
@@ -1414,10 +1478,24 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 text = state.compose,
                 onTextChange = bridge::setCompose,
                 onSend = { bridge.send() },
-                onToggleEmoji = { emoji = !emoji },
+                onToggleEmoji = {
+                    // Telegram-style: the panel and the keyboard take turns.
+                    emoji = !emoji
+                    if (emoji) {
+                        keyboard?.hide()
+                    } else {
+                        composeFocus.requestFocus()
+                        keyboard?.show()
+                    }
+                },
                 showAttach = !group,
                 onPickFile = { filePicker.launch("*/*") },
                 onPickImage = { imagePicker.launch("image/*") },
+                focusRequester = composeFocus,
+                onFieldTap = {
+                    if (emoji) emoji = false
+                    keyboard?.show()
+                },
             )
             LaunchedEffect(state.inviteToken) {
                 if (state.inviteToken.isNotBlank()) {

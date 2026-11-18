@@ -99,9 +99,18 @@ object NativeEngine {
     @JvmStatic external fun nativeHistory(peer: String): String
     @JvmStatic external fun nativeGroupHistory(groupId: String): String
     @JvmStatic external fun nativeSetPeerProfile(addr: String, name: String, note: String)
+    @JvmStatic external fun nativeSetPeerRetentionDays(addr: String, days: Int)
     @JvmStatic external fun nativeRemovePeer(addr: String)
     @JvmStatic external fun nativeForgetPin(addr: String)
     @JvmStatic external fun nativeClearHistory(addr: String)
+    /** Removes one row from a direct chat's history, in memory and on disk. False when no row matched. */
+    @JvmStatic external fun nativeDeleteMessage(
+        peer: String,
+        messageId: String,
+        kind: String,
+        ts: String,
+        text: String,
+    ): Boolean
     @JvmStatic external fun nativeCreateGroup(title: String, membersJson: String): String
     @JvmStatic external fun nativeUpdateGroup(id: String, title: String, membersJson: String): String
     @JvmStatic external fun nativeDeleteGroup(id: String): Boolean

@@ -96,8 +96,12 @@ from i2pchat.storage.compose_drafts_store import (
     save_compose_drafts,
 )
 from i2pchat.storage.sealed_json import is_sealed_json_file
+from i2pchat.storage.history_retention import peer_max_age_days
 from i2pchat.storage.contact_book import (
     CONTACTS_STORE_MAGIC,
+    coerce_peer_retention_days,
+    get_peer_history_retention_days,
+    set_peer_history_retention_days,
     ContactBook,
     ContactRecord,
     load_book,
@@ -434,9 +438,15 @@ class I2PChat(App):
         stripped = text.strip()
         if not stripped:
             return
-        if "\n" not in stripped and stripped.startswith("/"):
+        if stripped.startswith("//"):
+            # Escape: "//text" is sent as the plain message "/text".
+            text = text.lstrip()[1:]
+        elif "\n" not in stripped and stripped.startswith("/"):
             await self._execute_command(stripped)
             return
+        await self._send_compose_text(text)
+
+    async def _send_compose_text(self, text: str) -> None:
         if self._active_group_id:
             try:
                 await self.core.send_group_text(self._active_group_id, text, route="auto")
@@ -522,6 +532,13 @@ class I2PChat(App):
         data = self._load_ui_prefs()
         data["history_retention_days"] = max(0, int(days))
         self._save_ui_prefs(data)
+
+    def _effective_history_max_age_days(self, peer: Optional[str]) -> int:
+        """Global age limit unless the contact has a per-peer override (days > 0)."""
+        global_days = self._load_history_retention_days()
+        if not peer:
+            return global_days
+        return peer_max_age_days(self._contact_book, peer, global_days)
 
     def _load_privacy_mode_enabled(self) -> bool:
         return self._load_ui_prefs().get("privacy_mode_enabled") is True
@@ -1052,26 +1069,11 @@ class I2PChat(App):
         self.chat_log.write(Align(panel, align=align), expand=True)
 
     def _render_inline_image(self, path: str, *, is_from_me: bool, label: str) -> None:
-        try:
-            art = "\n".join(render_bw(path))
-        except Exception:
-            art = f"Saved image: {path}"
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        border = "green" if is_from_me else "cyan"
-        align = "left" if is_from_me else "right"
-        panel = Panel(
-            Text(strip_terminal_controls(art)),
-            title=(
-                f"[#5f5f5f][{now_utc} UTC][/] [bold {border}]{escape(label)}[/] "
-                f"[dim]{escape(os.path.basename(path))}[/]"
-            ),
-            title_align="left",
-            border_style=border,
-            box=box.ROUNDED,
-            expand=False,
-        )
-        self.chat_log.write(Align(panel, align=align), expand=True)
-        note = f"Image saved at {path}"
+        # Binary images are never drawn as terminal art; only report the saved file.
+        if is_from_me:
+            note = f"Image sent ({label}): {path}"
+        else:
+            note = f"Image received from {label}, saved at {path}"
         if not is_from_me:
             from i2pchat.storage.media_prefs import load_media_prefs
 
@@ -1336,6 +1338,11 @@ class I2PChat(App):
             identity_key,
             app_data_root=self.core.get_profiles_dir(),
         )
+        entries, _ = apply_history_retention(
+            entries,
+            max_messages=self._load_history_max_messages(),
+            max_age_days=self._effective_history_max_age_days(normalized_peer),
+        )
         self._history_loaded_for_peer = normalized_peer
         self._history_entries = list(entries)
         self._history_dirty = False
@@ -1380,10 +1387,11 @@ class I2PChat(App):
         identity_key = self.core.get_identity_key_bytes()
         if not identity_key:
             return
+        max_age_days = self._effective_history_max_age_days(peer)
         entries, _ = apply_history_retention(
             self._history_entries,
             max_messages=self._load_history_max_messages(),
-            max_age_days=self._load_history_retention_days(),
+            max_age_days=max_age_days,
         )
         self._history_entries = list(entries)
         if entries:
@@ -1394,7 +1402,7 @@ class I2PChat(App):
                 entries,
                 identity_key,
                 max_messages=self._load_history_max_messages(),
-                max_age_days=self._load_history_retention_days(),
+                max_age_days=max_age_days,
                 app_data_root=self.core.get_profiles_dir(),
             )
         self._history_dirty = False
@@ -1618,19 +1626,14 @@ class I2PChat(App):
             self._transfer_progress_buckets.pop(key, None)
 
     def handle_image_received(self, art: str) -> None:
+        # Do not render peer ASCII-image payloads in the terminal; report only.
         self._record_transfer_event("image", "inline-image", "received")
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        # The ASCII art is peer-supplied text: it is rendered as plain Text
-        # so that neither Rich markup nor control characters in it take effect.
-        panel = Panel(
-            Text(strip_terminal_controls(art)),
-            title=f"[#5f5f5f][{now_utc} UTC][/] [bold cyan]{escape(self._peer_display_name(self._current_target_peer()))}[/] [dim]ASCII image[/]",
-            title_align="left",
-            border_style="cyan",
-            box=box.ROUNDED,
-            expand=False,
+        peer = self._peer_display_name(self._current_target_peer())
+        lines = max(1, len(art.splitlines())) if art else 0
+        self.post(
+            "system",
+            f"ASCII image received from {peer} ({lines} line(s); not rendered in TUI).",
         )
-        self.chat_log.write(Align(panel, align="right"), expand=True)
 
     def handle_inline_image_received(
         self, path: str, is_from_me: bool, sent_filename: Optional[str] = None
@@ -2092,6 +2095,52 @@ class I2PChat(App):
 
         asyncio.create_task(_runner())
 
+    def _handle_history_peer_command(self, args: list[str]) -> None:
+        usage = "Usage: /history peer <addr|index> [days]  (0 = use global retention)"
+        if not args:
+            self.post("error", usage)
+            return
+        peer = self._resolve_selector_to_peer(args[0])
+        if not peer:
+            self.post("error", "Unknown contact selector.")
+            return
+        global_days = self._load_history_retention_days()
+        if len(args) < 2:
+            days = get_peer_history_retention_days(self._contact_book, peer)
+            if days:
+                self.post("system", f"Auto-delete for {peer}: {days} day(s) (overrides global).")
+            else:
+                self.post(
+                    "system",
+                    f"Auto-delete for {peer}: using global ({global_days} day(s); 0 = off).",
+                )
+            return
+        try:
+            days = int(args[1])
+        except ValueError:
+            self.post("error", usage)
+            return
+        if days < 0:
+            self.post("error", usage)
+            return
+        days = coerce_peer_retention_days(days)
+        if set_peer_history_retention_days(self._contact_book, peer, days):
+            self._save_contacts_book()
+        if self._history_loaded_for_peer == normalize_peer_addr(peer):
+            retained, _ = apply_history_retention(
+                self._history_entries,
+                max_messages=self._load_history_max_messages(),
+                max_age_days=self._effective_history_max_age_days(peer),
+            )
+            if len(retained) != len(self._history_entries):
+                self._history_entries = list(retained)
+                self._history_dirty = True
+                self._save_history_if_needed()
+        if days:
+            self.post("success", f"Auto-delete for {peer} set to {days} day(s).")
+        else:
+            self.post("success", f"Auto-delete override cleared for {peer} (using global).")
+
     def _apply_settings_ui(
         self,
         *,
@@ -2106,7 +2155,9 @@ class I2PChat(App):
         retained, _ = apply_history_retention(
             self._history_entries,
             max_messages=max_messages,
-            max_age_days=max_days,
+            max_age_days=self._effective_history_max_age_days(
+                self._history_loaded_for_peer
+            ),
         )
         self._history_entries = list(retained)
         self._history_dirty = True
@@ -2445,6 +2496,16 @@ class I2PChat(App):
             self._flush_compose_drafts_to_disk()
             self._refresh_status_bar()
             return
+        reply_match = re.match(r"^/reply\s+(\d+)\s+(\S.*)$", stripped, flags=re.DOTALL)
+        if reply_match is not None:
+            ref = self._find_recent_ref(int(reply_match.group(1)))
+            if ref is None:
+                self.post("error", f"Unknown message ref #{reply_match.group(1)}.")
+                return
+            await self._send_compose_text(
+                format_reply_quote(ref.sender, ref.text) + reply_match.group(2)
+            )
+            return
         try:
             parts = shlex.split(raw)
         except ValueError as exc:
@@ -2578,7 +2639,7 @@ class I2PChat(App):
 
         elif cmd == "reply":
             if not args or not args[0].isdigit():
-                self.post("error", "Usage: /reply <message-ref>. Use /recent to list refs.")
+                self.post("error", "Usage: /reply <message-ref> [text]. Use /recent to list refs.")
                 return
             ref = self._find_recent_ref(int(args[0]))
             if ref is None:
@@ -2694,14 +2755,18 @@ class I2PChat(App):
                 retained, _ = apply_history_retention(
                     self._history_entries,
                     max_messages=max_messages,
-                    max_age_days=max_days,
+                    max_age_days=self._effective_history_max_age_days(
+                        self._history_loaded_for_peer
+                    ),
                 )
                 self._history_entries = list(retained)
                 self._history_dirty = True
                 self._save_history_if_needed()
                 self.post("success", f"History retention updated: {max_messages} messages, {max_days} day(s).")
+            elif args[0] == "peer":
+                self._handle_history_peer_command(args[1:])
             else:
-                self.post("error", "Usage: /history show [count] | on | off | clear [peer] | retention <max_messages> <days>")
+                self.post("error", "Usage: /history show [count] | on | off | clear [peer] | retention <max_messages> <days> | peer <addr|index> [days]")
 
         elif cmd == "history-clear":
             peer = self._resolve_selector_to_peer(args[0] if args else None)
@@ -2737,7 +2802,9 @@ class I2PChat(App):
             retained, _ = apply_history_retention(
                 self._history_entries,
                 max_messages=max_messages,
-                max_age_days=max_days,
+                max_age_days=self._effective_history_max_age_days(
+                    self._history_loaded_for_peer
+                ),
             )
             self._history_entries = list(retained)
             self._history_dirty = True
@@ -2983,7 +3050,10 @@ class I2PChat(App):
             self.show_help()
 
         else:
-            self.post("error", f"Unknown command: /{cmd}. Type /help.")
+            self.post(
+                "error",
+                f"Unknown command: /{cmd}. Type /help. To send text that starts with /, begin it with //.",
+            )
 
         if cmd != "reply":
             self._set_compose_text("")
@@ -3232,6 +3302,7 @@ class I2PChat(App):
 
     def show_help(self) -> None:
         self.post("help", tr("tui.compose_help"))
+        self.post("help", "Escape: to send a message that starts with /, type // (one leading / is removed), e.g. //help sends \"/help\".")
         self.post("help", "Function keys: F1 actions, F2 contacts, F3 media, F4 groups, F5 settings, F6 router, F7 history, F8 diagnostics, F9 status.")
         self.post("help", "Groups: F8 or /group list|create|open|close|info|members|topology|invite|join|send. Compose box sends to active group when open.")
         self.post("help", "Connection: /connect <addr>, /disconnect, /save, /unlock, /status")
@@ -3240,13 +3311,13 @@ class I2PChat(App):
         self.post("help", "Pictures: /sendpic <path> (/send-picture) sends an image file that the peer sees as a picture in the chat.")
         self.post("help", "Text art: /img <path> converts a picture to Braille characters and sends it as text; /img-bw <path> does the same with solid blocks.")
         self.post("help", "Saving: /savefile <path> copies the last received file or picture to <path>; F3 lists received items with Save as.")
-        self.post("help", "Replies: /recent [count] lists the latest messages with numbers; /reply <number> puts a quote of that message into the compose box.")
+        self.post("help", "Replies: /recent [count] lists the latest messages with numbers; /reply <number> puts a quote of that message into the compose box; /reply <number> <text> sends the quote and your answer at once.")
         self.post("help", "Launcher: optional via /launcher (/menu) if you want the quick launcher overlay.")
         self.post("help", "Contacts: F2 / Ctrl+B or /contacts to view the book. Also: /contacts use|add|edit|remove|info … (legacy /contact-* commands still work).")
         self.post("help", "Media/transfers: F3 / Ctrl+P or /transfers (/media) for send file/picture and recent transfer events.")
         self.post("help", "Router: F5 or /router status|system|bundled|default|restart.")
         self.post("help", "History: F6 or /history-browser for the history browser. Diagnostics: F7 or /diagnostics for BlindBox/trust/updates/app-data.")
-        self.post("help", "History: /history show [count], /history on|off, /history clear [peer], /history retention <max_messages> <days>, /clear-history [peer], /history-retention <max_messages> <days>")
+        self.post("help", "History: /history show [count], /history on|off, /history clear [peer], /history retention <max_messages> <days>, /history peer <addr|index> [days], /clear-history [peer], /history-retention <max_messages> <days>")
         self.post("help", "Profiles/data: /profiles, /profile switch <name>, /profile import-dat <path> [name], /load-profile <path> [name], /backup …")
         self.post("help", "Actions: F1 or Ctrl+D /actions for connect/disconnect, lock peer and copy address.")
         self.post("help", "Backups: open from Settings (F4) → Backups… or use /backups. Also /export-profile-backup <path> <passphrase>, /import-profile-backup <path> <passphrase>, /export-history-backup <path> <passphrase>, /import-history-backup <path> <passphrase> [overwrite|skip]")
@@ -3744,6 +3815,8 @@ class TuiContactEditorScreen(ModalScreen[None]):
             yield Input("", placeholder="Optional name", id="contact_editor_name", classes="contact_editor_input")
             yield Static("Note", classes="contact_editor_label")
             yield Input("", placeholder="Optional note", id="contact_editor_note", classes="contact_editor_input")
+            yield Static("Auto-delete after N days (0 = global)", classes="contact_editor_label")
+            yield Input("0", placeholder="0", id="contact_editor_retention", classes="contact_editor_input")
             yield Static("Ctrl+S save · Esc close", id="contact_editor_help")
             with Horizontal(id="contact_editor_buttons"):
                 yield Button("Save", id="contact_editor_save", variant="primary")
@@ -3756,6 +3829,9 @@ class TuiContactEditorScreen(ModalScreen[None]):
         record = self.host._contact_book.get(self._peer) or ContactRecord(addr=self._peer)
         self.query_one("#contact_editor_name", Input).value = record.display_name
         self.query_one("#contact_editor_note", Input).value = record.note
+        self.query_one("#contact_editor_retention", Input).value = str(
+            record.history_retention_days
+        )
         self.query_one("#contact_editor_name", Input).focus()
 
     def action_close(self) -> None:
@@ -3775,6 +3851,12 @@ class TuiContactEditorScreen(ModalScreen[None]):
             peer,
             display_name=name_input.value.strip(),
             note=note_input.value.strip(),
+        )
+        retention_raw = self.query_one("#contact_editor_retention", Input).value.strip()
+        set_peer_history_retention_days(
+            self.host._contact_book,
+            peer,
+            coerce_peer_retention_days(retention_raw or 0),
         )
         set_last_active_peer(self.host._contact_book, peer)
         self.host._save_contacts_book()

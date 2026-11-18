@@ -113,6 +113,7 @@
     <string name="menu_copy_with_time">Копировать с временем</string>
     <string name="menu_reply">Ответить</string>
     <string name="menu_retry">Повторить</string>
+    <string name="menu_delete_message">Удалить сообщение</string>
     <string name="menu_copy_path">Копировать путь</string>
     <string name="menu_open_folder">Открыть папку</string>
     <string name="menu_copy_folder">Копировать путь к папке</string>
@@ -141,6 +142,7 @@
     <string name="history_retention">Хранение истории</string>
     <string name="max_messages">Максимум сообщений</string>
     <string name="max_age_days">Максимальный возраст (дней, 0 — без ограничения)</string>
+    <string name="peer_retention_days">Автоудаление для этого собеседника (дней, 0 — как глобально)</string>
     <string name="save_retention">Сохранить</string>
     <string name="foreground_note">I2P работает на телефоне как постоянная фоновая служба. Это нужно, чтобы туннели оставались активными; расходуется батарея.</string>
     <string name="exit_app">Выход</string>
@@ -270,4 +272,8 @@
     <string name="notify_trust">Подтвердите ключ собеседника: %1$s…</string>
     <string name="notify_file">Получен файл: %1$s</string>
     <string name="notify_image">Получено изображение</string>
+    <string name="cd_close">Закрыть</string>
+    <string name="cd_play">Воспроизвести</string>
+    <string name="cd_pause">Пауза</string>
+    <string name="media_play_failed">Не удалось воспроизвести файл</string>
 </resources>

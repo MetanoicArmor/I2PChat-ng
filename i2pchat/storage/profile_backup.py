@@ -303,6 +303,19 @@ def _collect_profile_bundle_files(
         files[logical_name] = content
         sidecar_count += 1
 
+    # Own avatar only — never export peer avatar blobs.
+    try:
+        from i2pchat.storage.avatars import OWN_BLOB_NAME, avatars_dir
+
+        own_avatar = _collect_optional_file(
+            os.path.join(avatars_dir(pdir), OWN_BLOB_NAME)
+        )
+        if own_avatar is not None:
+            files["avatars/self.bin"] = own_avatar
+            sidecar_count += 1
+    except Exception:
+        pass
+
     blindbox_prefix = f"{profile}.blindbox."
     try:
         listing = sorted(os.listdir(pdir))
@@ -489,6 +502,15 @@ def import_profile_bundle(
                 )
             dest_name = f"{target_profile}.history.{suffix}"
             history_files += 1
+        elif logical_name == "avatars/self.bin":
+            from i2pchat.storage.avatars import OWN_BLOB_NAME, avatars_dir
+
+            dest_path = os.path.join(avatars_dir(pdir), OWN_BLOB_NAME)
+            if not os.path.realpath(dest_path).startswith(pdir_real + os.sep):
+                raise BackupError("Refusing to write avatar outside profile dir")
+            atomic_write_bytes(dest_path, content)
+            restored_files += 1
+            continue
         else:
             raise BackupError(f"Unexpected file in profile bundle: {logical_name}")
         dest_path = os.path.join(pdir, dest_name)
@@ -496,6 +518,23 @@ def import_profile_bundle(
             raise BackupError(f"Refusing to write bundle entry outside profile dir: {dest_name}")
         atomic_write_bytes(dest_path, content)
         restored_files += 1
+
+    # After import: drop peer avatars (none exported) and queue re-request.
+    try:
+        from i2pchat.storage.avatars import mark_need_request_all_contacts
+        from i2pchat.storage.contact_book import load_book
+
+        book = load_book(
+            os.path.join(pdir, f"{target_profile}.contacts.json"),
+            identity_key=None,
+        )
+        mark_need_request_all_contacts(
+            pdir,
+            None,
+            [rec.addr for rec in book.contacts],
+        )
+    except Exception:
+        pass
 
     return ImportSummary(
         bundle_type="profile",

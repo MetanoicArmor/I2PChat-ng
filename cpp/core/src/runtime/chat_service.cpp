@@ -1676,7 +1676,7 @@ void ChatService::append_history(const std::string& peer_addr, storage::HistoryE
     if (config_.profile != kTransientProfile) {
         try {
             storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
+                                  ByteView(identity_.identity_key), retention_for(peer_addr));
         } catch (const std::exception& error) {
             emit_error(std::string("could not save history: ") + error.what());
         }
@@ -1705,7 +1705,7 @@ void ChatService::update_delivery(const std::string& peer_addr, std::uint64_t ms
     if (config_.profile != kTransientProfile && !entries.empty()) {
         try {
             storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
+                                  ByteView(identity_.identity_key), retention_for(peer_addr));
         } catch (const std::exception&) {
             // A delivery marker is not worth failing a send over.
         }
@@ -1756,7 +1756,7 @@ void ChatService::update_delivery_by_media_name(const std::string& peer_addr,
     if (config_.profile != kTransientProfile && !entries.empty()) {
         try {
             storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
+                                  ByteView(identity_.identity_key), retention_for(peer_addr));
         } catch (const std::exception&) {
         }
     }
@@ -1782,6 +1782,16 @@ void ChatService::remember_contact(const std::string& peer_addr, const std::stri
     }
 }
 
+storage::RetentionPolicy ChatService::retention_for(std::string_view peer_addr) const {
+    storage::RetentionPolicy policy = config_.retention;
+    const storage::ContactRecord* record =
+        contacts_.get(storage::normalize_contact_address(peer_addr));
+    if (record != nullptr && record->history_retention_days > 0) {
+        policy.max_age_days = record->history_retention_days;
+    }
+    return policy;
+}
+
 void ChatService::save_contacts() {
     if (config_.profile == kTransientProfile) {
         return;
@@ -1801,6 +1811,54 @@ std::vector<storage::HistoryEntry> ChatService::history(std::string_view peer) c
         return found->second;
     }
     return storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+}
+
+bool ChatService::delete_history_entry(std::string_view peer, std::string_view message_id,
+                                       std::string_view kind, std::string_view ts,
+                                       std::string_view text) {
+    const std::string peer_addr(peer);
+    std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
+    }
+    auto target = entries.end();
+    if (!message_id.empty()) {
+        for (auto entry = entries.end(); entry != entries.begin();) {
+            --entry;
+            if (entry->message_id.has_value() && *entry->message_id == message_id) {
+                target = entry;
+                break;
+            }
+        }
+    }
+    if (target == entries.end()) {
+        for (auto entry = entries.end(); entry != entries.begin();) {
+            --entry;
+            if (entry->kind == kind && entry->ts == ts && entry->text == text) {
+                target = entry;
+                break;
+            }
+        }
+    }
+    if (target == entries.end()) {
+        return false;
+    }
+    entries.erase(target);
+    if (config_.profile != kTransientProfile) {
+        try {
+            if (entries.empty()) {
+                // save_history writes nothing for an empty list and would leave
+                // the old file, with the deleted row still in it.
+                storage::delete_history(paths_, peer_addr);
+            } else {
+                storage::save_history(paths_, peer_addr, entries,
+                                      ByteView(identity_.identity_key), retention_for(peer_addr));
+            }
+        } catch (const std::exception& error) {
+            emit_error(std::string("could not save history: ") + error.what());
+        }
+    }
+    return true;
 }
 
 bool ChatService::live(std::string_view peer) {

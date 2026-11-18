@@ -19,6 +19,8 @@ from i2pchat.storage.chat_history import (
     save_history,
 )
 
+from i2pchat.storage.contact_book import ContactBook, get_peer_history_retention_days
+
 logger = logging.getLogger("i2pchat.history_retention")
 
 # Key used in gui.json to store retention settings
@@ -229,6 +231,26 @@ def policy_from_gui_settings(settings: dict) -> RetentionPolicy:
     return RetentionPolicy(
         max_age_days=int(max_age_days) if max_age_days is not None else None,
         max_messages=int(max_messages) if max_messages is not None else None,
+    )
+
+
+def effective_max_age_days(global_days: int, peer_days: int = 0) -> int:
+    """
+    Resolve the age limit (days) for one peer.
+
+    A positive per-peer override *replaces* the global value (it may be shorter
+    or longer). ``peer_days == 0`` means "no override": the global value is used,
+    where ``0`` still means no age limit.
+    """
+    if peer_days and peer_days > 0:
+        return int(peer_days)
+    return max(0, int(global_days or 0))
+
+
+def peer_max_age_days(book: ContactBook, peer_addr: str, global_days: int) -> int:
+    """Effective age limit for ``peer_addr`` from the encrypted contact book + global prefs."""
+    return effective_max_age_days(
+        global_days, get_peer_history_retention_days(book, peer_addr)
     )
 
 

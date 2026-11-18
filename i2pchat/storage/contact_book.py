@@ -21,6 +21,7 @@ logger = logging.getLogger("i2pchat.contacts")
 
 _CONTACT_HOST_RE = re.compile(r"^[a-z2-7]{40,80}$")
 MAX_CONTACTS = 500
+MAX_PEER_HISTORY_RETENTION_DAYS = 3650
 BOOK_VERSION = 2
 PREVIEW_MAX_LEN = 80
 CONTACTS_STORE_MAGIC = b"I2CB"
@@ -54,6 +55,17 @@ def same_i2p_destination(left: str, right: str) -> bool:
     return (left or "").strip().lower() == (right or "").strip().lower()
 
 
+def coerce_peer_retention_days(raw: Any) -> int:
+    """Normalize a stored/entered per-peer retention value to ``0..MAX`` (0 = use global)."""
+    if isinstance(raw, bool):
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(MAX_PEER_HISTORY_RETENTION_DAYS, value))
+
+
 @dataclass
 class ContactRecord:
     addr: str
@@ -61,15 +73,20 @@ class ContactRecord:
     note: str = ""
     last_preview: str = ""
     last_activity_ts: str = ""
+    # Per-peer auto-delete: drop messages older than N days. 0 = no override (use global policy).
+    history_retention_days: int = 0
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "addr": self.addr,
             "display_name": self.display_name,
             "note": self.note,
             "last_preview": self.last_preview,
             "last_activity_ts": self.last_activity_ts,
         }
+        if self.history_retention_days > 0:
+            out["history_retention_days"] = self.history_retention_days
+        return out
 
     @staticmethod
     def from_dict(d: Any) -> Optional["ContactRecord"]:
@@ -88,6 +105,9 @@ class ContactRecord:
             note=_s("note").strip(),
             last_preview=_s("last_preview")[:PREVIEW_MAX_LEN],
             last_activity_ts=_s("last_activity_ts"),
+            history_retention_days=coerce_peer_retention_days(
+                d.get("history_retention_days")
+            ),
         )
 
 
@@ -260,6 +280,31 @@ def set_peer_profile(
     rec.display_name = display_name
     rec.note = note
     return True
+
+
+def set_peer_history_retention_days(book: ContactBook, addr: str, days: int) -> bool:
+    """Set per-peer auto-delete age in days (0 = use global). Returns True if changed."""
+    addr = normalize_peer_address(addr) or ""
+    if not addr:
+        return False
+    days = coerce_peer_retention_days(days)
+    rec = book.get(addr)
+    if rec is None:
+        if days == 0:
+            return False
+        remember_peer(book, addr)
+        rec = book.get(addr)
+    if rec is None or rec.history_retention_days == days:
+        return False
+    rec.history_retention_days = days
+    return True
+
+
+def get_peer_history_retention_days(book: ContactBook, addr: str) -> int:
+    """Per-peer override in days; 0 when unset or peer unknown."""
+    n = normalize_peer_address(addr) or ""
+    rec = book.get(n) if n else None
+    return rec.history_retention_days if rec else 0
 
 
 def touch_peer_message_meta(

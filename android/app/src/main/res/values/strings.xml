@@ -123,6 +123,7 @@
     <string name="menu_copy_with_time">Copy with timestamp</string>
     <string name="menu_reply">Reply</string>
     <string name="menu_retry">Retry</string>
+    <string name="menu_delete_message">Delete message</string>
     <string name="menu_copy_path">Copy path</string>
     <string name="menu_open_folder">Open folder</string>
     <string name="menu_copy_folder">Copy folder path</string>
@@ -152,6 +153,7 @@
     <string name="history_retention">History retention</string>
     <string name="max_messages">Max messages</string>
     <string name="max_age_days">Max age (days, 0 = none)</string>
+    <string name="peer_retention_days">Auto-delete for this peer (days, 0 = use global)</string>
     <string name="save_retention">Save retention</string>
     <string name="foreground_note">I2P stays in a foreground service on this phone. That is required to keep tunnels alive; it uses battery.</string>
     <string name="exit_app">Exit</string>
@@ -290,4 +292,8 @@
     <string name="notify_trust">Confirm the contact key: %1$s…</string>
     <string name="notify_file">File received: %1$s</string>
     <string name="notify_image">Image received</string>
+    <string name="cd_close">Close</string>
+    <string name="cd_play">Play</string>
+    <string name="cd_pause">Pause</string>
+    <string name="media_play_failed">Cannot play this file</string>
 </resources>

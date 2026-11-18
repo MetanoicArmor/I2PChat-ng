@@ -63,7 +63,11 @@ from i2pchat.protocol.message_delivery import (
     delivery_state_label,
     normalize_loaded_delivery_state,
 )
-from i2pchat.presentation.reply_format import format_reply_quote
+from i2pchat.presentation.reply_format import (
+    ReplyQuoteLayout,
+    format_reply_quote,
+    split_reply_quote,
+)
 from i2pchat.core.live_peer_session import max_concurrent_live_sessions
 from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _should_start_auto_connect_retry
 from i2pchat.presentation.status_presentation import build_status_presentation
@@ -188,9 +192,11 @@ from i2pchat.storage.contact_book import (
     same_i2p_destination,
     save_book,
     set_last_active_peer,
+    set_peer_history_retention_days,
     set_peer_profile,
     touch_peer_message_meta,
 )
+from i2pchat.storage.history_retention import peer_max_age_days
 
 try:
     from PyQt6.QtMultimedia import QSoundEffect  # type: ignore[attr-defined]
@@ -2424,6 +2430,7 @@ class ChatListView(QtWidgets.QListView):
     cancelTransferRequested = QtCore.pyqtSignal()
     imageOpenRequested = QtCore.pyqtSignal(str)  # path to image
     replyRequested = QtCore.pyqtSignal(str)  # quoted block for compose field
+    quoteJumpRequested = QtCore.pyqtSignal(int, str)  # row of reply, quoted original text
     retryRequested = QtCore.pyqtSignal(int)
 
     _EDGE_FADE_PX = 44
@@ -2434,6 +2441,8 @@ class ChatListView(QtWidgets.QListView):
         self._theme_id = THEME_DEFAULT
         self._context_popup: Optional["ActionsPopup"] = None
         self._context_popup_suppress_until_ms = 0
+        # Окно подставляет автора цитаты: «me» для своих, имя контакта/короткий адрес для чужих.
+        self.reply_author_resolver: Optional[Callable[["ChatItem"], str]] = None
         self.setMouseTracking(True)
         # Только по клику — иначе частые dataChanged при прогрессе файла забирают фокус с поля ввода.
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
@@ -2499,6 +2508,12 @@ class ChatListView(QtWidgets.QListView):
 
     def _copy_path(self, path: str) -> None:
         QtWidgets.QApplication.clipboard().setText(path)
+
+    def _reply_author(self, item: ChatItem) -> str:
+        resolver = self.reply_author_resolver
+        if resolver is not None:
+            return resolver(item)
+        return item.sender
 
     def set_theme(self, theme_id: str) -> None:
         self._theme_id = _resolve_theme(theme_id)
@@ -2595,7 +2610,7 @@ class ChatListView(QtWidgets.QListView):
                 self._context_popup.add_action(
                     "Reply",
                     lambda it=item: self.replyRequested.emit(
-                        format_reply_quote(it.sender, it.text)
+                        format_reply_quote(self._reply_author(it), it.text)
                     ),
                     tool_tip=menu_tt.TT_REPLY,
                 )
@@ -2678,6 +2693,16 @@ class ChatListView(QtWidgets.QListView):
                 elif item.kind == "success" and item.open_folder_path and os.path.isdir(item.open_folder_path):
                     QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.open_folder_path))
                     return
+                elif item.kind in ("me", "peer"):
+                    delegate = self.itemDelegate()
+                    if isinstance(delegate, ChatItemDelegate):
+                        quoted = delegate.reply_quote_at(
+                            self.visualRect(index), event.pos(), item, self.font()
+                        )
+                        if quoted is not None:
+                            super().mousePressEvent(event)
+                            self.quoteJumpRequested.emit(index.row(), quoted)
+                            return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
@@ -2782,6 +2807,59 @@ def _center_qtextdocument_blocks(doc: QtGui.QTextDocument) -> None:
         cursor.setBlockFormat(fmt)
         block = block.next()
     cursor.endEditBlock()
+
+
+_REPLY_BLOCK_AUTHOR = 1
+_REPLY_BLOCK_QUOTE = 2
+_REPLY_BAR_WIDTH = 3.0
+_REPLY_QUOTE_INDENT = 10
+_REPLY_QUOTE_GAP_PX = 4
+
+
+def _style_reply_quote_blocks(
+    doc: QtGui.QTextDocument,
+    layout: ReplyQuoteLayout,
+    text_color: QtGui.QColor,
+) -> None:
+    """Отступ и приглушённый цвет для автора/цитаты; метки блоков нужны для полосы и hit-test."""
+    muted = QtGui.QColor(text_color)
+    muted.setAlpha(190)
+    char_fmt = QtGui.QTextCharFormat()
+    char_fmt.setForeground(muted)
+    last = layout.header_lines + layout.quote_lines - 1
+    cursor = QtGui.QTextCursor(doc)
+    cursor.beginEditBlock()
+    block = doc.firstBlock()
+    idx = 0
+    while block.isValid() and idx <= last:
+        cursor.setPosition(block.position())
+        fmt = QtGui.QTextBlockFormat(block.blockFormat())
+        fmt.setLeftMargin(float(_REPLY_QUOTE_INDENT))
+        if idx == last:
+            fmt.setBottomMargin(float(_REPLY_QUOTE_GAP_PX))
+        cursor.setBlockFormat(fmt)
+        cursor.movePosition(
+            QtGui.QTextCursor.MoveOperation.EndOfBlock,
+            QtGui.QTextCursor.MoveMode.KeepAnchor,
+        )
+        cursor.mergeCharFormat(char_fmt)
+        is_author = idx < layout.header_lines
+        block.setUserState(_REPLY_BLOCK_AUTHOR if is_author else _REPLY_BLOCK_QUOTE)
+        block = block.next()
+        idx += 1
+    cursor.endEditBlock()
+
+
+def _reply_quote_doc_rect(doc: QtGui.QTextDocument) -> Optional[QtCore.QRectF]:
+    """Прямоугольник (в координатах документа) от автора до конца цитаты; None если цитаты нет."""
+    doc_layout = doc.documentLayout()
+    rect: Optional[QtCore.QRectF] = None
+    block = doc.firstBlock()
+    while block.isValid() and block.userState() in (_REPLY_BLOCK_AUTHOR, _REPLY_BLOCK_QUOTE):
+        br = doc_layout.blockBoundingRect(block)
+        rect = br if rect is None else rect.united(br)
+        block = block.next()
+    return rect
 
 
 class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
@@ -2939,8 +3017,11 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
     def _bubble_width_for_item(
         self, cell_width: int, item: "ChatItem", font: QtGui.QFont
     ) -> int:
-        text = item.text or " "
+        reply_layout = self._reply_layout(item)
+        text = (reply_layout.display_text if reply_layout else item.text) or " "
         width = self._bubble_width(cell_width, text, font)
+        if reply_layout is not None:
+            width = min(int(cell_width * 0.75), width + _REPLY_QUOTE_INDENT)
         label = self._sender_label_text(item)
         if not label:
             return width
@@ -2950,6 +3031,63 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         )
         max_w = int(cell_width * 0.75)
         return max(width, min(max_w, label_w))
+
+    @staticmethod
+    def _reply_layout(item: "ChatItem") -> Optional[ReplyQuoteLayout]:
+        if item.kind not in {"me", "peer"}:
+            return None
+        return split_reply_quote(item.text)
+
+    def _build_message_doc(
+        self,
+        item: "ChatItem",
+        font: QtGui.QFont,
+        text_color: QtGui.QColor,
+        width: float,
+    ) -> QtGui.QTextDocument:
+        """Документ бабла; для ответов `>`-строки превращаются в блок цитаты."""
+        layout = self._reply_layout(item)
+        doc = make_message_qtextdocument(
+            layout.display_text if layout else (item.text or " "),
+            font,
+            text_color,
+            width,
+            emoji_paths_cached(),
+        )
+        if layout is not None:
+            _style_reply_quote_blocks(doc, layout, text_color)
+        return doc
+
+    def reply_quote_at(
+        self,
+        cell_rect: QtCore.QRect,
+        pos: QtCore.QPoint,
+        item: "ChatItem",
+        font: QtGui.QFont,
+    ) -> Optional[str]:
+        """Текст исходного сообщения, если клик попал в блок цитаты; иначе None."""
+        if self._reply_layout(item) is None:
+            return None
+        rect = cell_rect.adjusted(0, self.BUBBLE_SPACING_Y, 0, -self.BUBBLE_SPACING_Y)
+        bubble_width = self._bubble_width_for_item(rect.width(), item, font)
+        bubble_left = rect.right() - bubble_width if item.kind == "me" else rect.left()
+        text_left = bubble_left + self.PADDING_X / 2 + self.PADDING_X
+        text_top = (
+            rect.top()
+            + self.BUBBLE_OUTER_MARGIN_Y
+            + self.PADDING_Y
+            + self._sender_label_block_height(item, font)
+        )
+        text_width = self._bubble_inner_text_width_px(bubble_width)
+        doc = self._build_message_doc(item, font, QtGui.QColor("#000000"), text_width)
+        bar = _reply_quote_doc_rect(doc)
+        if bar is None:
+            return None
+        hit = QtCore.QRectF(text_left, text_top + bar.top(), text_width, bar.height())
+        if not hit.contains(QtCore.QPointF(pos)):
+            return None
+        layout = self._reply_layout(item)
+        return layout.quoted_text if layout else None
 
     def _bubble_inner_text_width_px(self, bubble_width: int) -> float:
         """Ширина для QTextDocument в бабле — как text_area.width() в paint() после двойных отступов."""
@@ -3130,7 +3268,6 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         painter.setPen(text_color)
         painter.setFont(base_font)
 
-        full_text = item.text
         meta_font = self._meta_font(base_font)
         meta_metrics = QtGui.QFontMetrics(meta_font)
         sender_label = self._sender_label_text(item)
@@ -3185,19 +3322,22 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
             )
             ts_rect = None
 
-        paths = emoji_paths_cached()
-        doc = make_message_qtextdocument(
-            full_text,
-            base_font,
-            text_color,
-            float(text_area.width()),
-            paths,
+        doc = self._build_message_doc(
+            item, base_font, text_color, float(text_area.width())
         )
         painter.save()
         painter.translate(text_area.left(), text_area.top())
         tw, th = int(text_area.width()), int(text_area.height())
         painter.setClipRect(0, 0, tw, th)
         doc.drawContents(painter, QtCore.QRectF(0, 0, tw, th))
+        quote_rect = _reply_quote_doc_rect(doc)
+        if quote_rect is not None:
+            bar_color = QtGui.QColor(text_color)
+            bar_color.setAlpha(200)
+            painter.fillRect(
+                QtCore.QRectF(0.0, quote_rect.top(), _REPLY_BAR_WIDTH, quote_rect.height()),
+                bar_color,
+            )
         painter.restore()
 
         meta_text = _chat_item_delivery_meta_text(item)
@@ -3666,13 +3806,7 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         bubble_width = self._bubble_width_for_item(cell_width, item, font)
         inner_w = self._bubble_inner_text_width_px(bubble_width)
 
-        text = item.text or " "
-
-        paths = emoji_paths_cached()
-        dummy_color = QtGui.QColor("#000000")
-        doc = make_message_qtextdocument(
-            text, font, dummy_color, inner_w, paths
-        )
+        doc = self._build_message_doc(item, font, QtGui.QColor("#000000"), inner_w)
         text_height = math.ceil(float(doc.size().height()))
 
         # Высота строки = высота документа + цепочка отступов как в paint():
@@ -5602,6 +5736,7 @@ class _ContactNameNoteDialog(QtWidgets.QDialog):
         *,
         display_name: str,
         note: str,
+        history_retention_days: int = 0,
         theme_id: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
@@ -5614,6 +5749,16 @@ class _ContactNameNoteDialog(QtWidgets.QDialog):
         self._note.setPlaceholderText("Short note (shown under title when no preview)")
         lay.addRow("Display name", self._name)
         lay.addRow("Note", self._note)
+        self._sp_retention_days = QtWidgets.QSpinBox()
+        self._sp_retention_days.setRange(0, 3650)
+        self._sp_retention_days.setValue(history_retention_days)
+        self._sp_retention_days.setSpecialValueText("Use global")
+        self._sp_retention_days.setSuffix(" days")
+        self._sp_retention_days.setToolTip(
+            "Auto-delete messages older than N days for this peer only. "
+            "0 (Use global) follows the global History retention setting."
+        )
+        lay.addRow("Auto-delete after", self._sp_retention_days)
         bb = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -5624,6 +5769,9 @@ class _ContactNameNoteDialog(QtWidgets.QDialog):
 
     def profile_values(self) -> tuple[str, str]:
         return self._name.text().strip(), self._note.text().strip()
+
+    def history_retention_days(self) -> int:
+        return int(self._sp_retention_days.value())
 
 
 class _RemoveSavedPeerDialog(QtWidgets.QDialog):
@@ -7417,6 +7565,11 @@ class ChatWindow(QtWidgets.QMainWindow):
             shortcut_hint=_native_shortcut_text("Ctrl+D"),
         )
         self.more_actions_popup.add_action(
+            "Set my avatar…",
+            self._set_own_avatar,
+            text_key="menu.set_avatar",
+        )
+        self.more_actions_popup.add_action(
             "Export profile backup…",
             self._export_profile_backup,
             text_key="menu.export_profile",
@@ -7554,6 +7707,8 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.chat_view.cancelTransferRequested.connect(self.on_cancel_transfer)
         self.chat_view.imageOpenRequested.connect(self.on_image_open_requested)
         self.chat_view.replyRequested.connect(self._on_reply_requested)
+        self.chat_view.reply_author_resolver = self._reply_author_for_item
+        self.chat_view.quoteJumpRequested.connect(self._on_quote_jump_requested)
         self.chat_view.retryRequested.connect(self._on_retry_requested)
 
         self._router_settings: RouterSettings = load_router_settings()
@@ -9087,14 +9242,41 @@ class ChatWindow(QtWidgets.QMainWindow):
             self,
             display_name=(rec.display_name if rec else ""),
             note=(rec.note if rec else ""),
+            history_retention_days=(rec.history_retention_days if rec else 0),
             theme_id=self.theme_id,
         )
         if d.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         name, note = d.profile_values()
-        if set_peer_profile(self._contact_book, norm, display_name=name, note=note):
+        changed = set_peer_profile(self._contact_book, norm, display_name=name, note=note)
+        retention_changed = set_peer_history_retention_days(
+            self._contact_book, norm, d.history_retention_days()
+        )
+        if retention_changed:
+            self._apply_retention_to_loaded_history(norm)
+        if changed or retention_changed:
             self._save_contacts_book()
             self._refresh_contacts_sidebar_list()
+
+    def _effective_history_max_age_days(self, peer: Optional[str]) -> int:
+        """Global age limit unless the contact has a per-peer override (days > 0)."""
+        global_days = load_history_retention_days()
+        if not peer:
+            return global_days
+        return peer_max_age_days(self._contact_book, peer, global_days)
+
+    def _apply_retention_to_loaded_history(self, peer: str) -> None:
+        loaded = self._history_loaded_for_peer
+        if not loaded or normalize_peer_addr(loaded) != normalize_peer_addr(peer):
+            return
+        retained, _ = apply_history_retention(
+            self._history_entries,
+            max_messages=load_history_max_messages(),
+            max_age_days=self._effective_history_max_age_days(peer),
+        )
+        if len(retained) != len(self._history_entries):
+            self._history_entries = retained
+            self._history_dirty = True
 
     def _saved_peer_contact_details(self, addr: str) -> None:
         norm = normalize_peer_address(addr) or (addr or "").strip().lower()
@@ -10359,7 +10541,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             entries, _ = apply_history_retention(
                 entries,
                 max_messages=load_history_max_messages(),
-                max_age_days=load_history_retention_days(),
+                max_age_days=self._effective_history_max_age_days(peer),
             )
             save_history(
                 self.core.get_profile_data_dir(),
@@ -12638,8 +12820,15 @@ class ChatWindow(QtWidgets.QMainWindow):
             identity_key,
             app_data_root=self.core.get_profiles_dir(),
         )
+        pruned_entries, _ = apply_history_retention(
+            entries,
+            max_messages=load_history_max_messages(),
+            max_age_days=self._effective_history_max_age_days(peer),
+        )
+        history_pruned_on_load = len(pruned_entries) != len(entries)
+        entries = pruned_entries
         self._history_entries = list(entries)
-        self._history_dirty = False
+        self._history_dirty = history_pruned_on_load
         if entries:
             self._chat_search_sync_suppressed = True
             try:
@@ -12709,7 +12898,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         entries, _ = apply_history_retention(
             self._history_entries,
             max_messages=load_history_max_messages(),
-            max_age_days=load_history_retention_days(),
+            max_age_days=self._effective_history_max_age_days(peer),
         )
         if entries:
             try:
@@ -12863,7 +13052,9 @@ class ChatWindow(QtWidgets.QMainWindow):
         retained, _ = apply_history_retention(
             self._history_entries,
             max_messages=limit,
-            max_age_days=days,
+            max_age_days=self._effective_history_max_age_days(
+                self._history_loaded_for_peer
+            ),
         )
         if len(retained) != len(self._history_entries):
             self._history_entries = retained
@@ -12896,6 +13087,34 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
 
     @QtCore.pyqtSlot()
+    def _set_own_avatar(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose avatar image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.gif);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+            digest = self.core.set_own_avatar_bytes(data)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Avatar", str(exc))
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Avatar",
+            f"Avatar saved ({digest[:12]}…). Trusted peers receive it on the next secure session.",
+        )
+        peer = self._outbound_peer_arg()
+        if peer:
+            try:
+                asyncio.create_task(self.core.push_own_avatar_if_needed(peer))
+            except Exception:
+                pass
+
     def _export_profile_backup(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
@@ -13697,6 +13916,30 @@ class ChatWindow(QtWidgets.QMainWindow):
         asyncio.create_task(
             self.core.send_image(path, peer_address=self._outbound_peer_arg())
         )
+
+    def _reply_author_for_item(self, item: ChatItem) -> str:
+        """Автор цитаты: «me» для своих сообщений, имя контакта или короткий адрес для чужих."""
+        if item.kind == "me":
+            return "me"
+        if item.show_sender_label and item.sender.strip():
+            return item.sender.strip()
+        addr = self._resolved_peer_addr_for_actions()
+        if not addr:
+            return item.sender or "peer"
+        return self._group_member_label(addr)
+
+    @QtCore.pyqtSlot(int, str)
+    def _on_quote_jump_requested(self, row: int, quoted: str) -> None:
+        """Прокрутить чат к исходному сообщению цитаты (сначала выше ответа, затем ниже)."""
+        wanted = quoted.rstrip("\n")
+        if not wanted:
+            return
+        total = self.chat_model.rowCount()
+        for r in [*range(row - 1, -1, -1), *range(row + 1, total)]:
+            it = self.chat_model.item_at(r)
+            if it is not None and it.kind in ("me", "peer") and it.text.rstrip("\n") == wanted:
+                self._scroll_chat_to_row(r)
+                return
 
     @QtCore.pyqtSlot(str)
     def _on_reply_requested(self, block: str) -> None:

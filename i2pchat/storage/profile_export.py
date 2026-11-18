@@ -218,12 +218,28 @@ def export_profile(
     contacts = _read_contacts(profiles_dir, profile_name)
     gui_settings = _read_gui_settings(profiles_dir) if include_gui_settings else None
 
+    # Own avatar only (sealed blob as stored on disk). Peer avatars are omitted
+    # and re-requested after import.
+    own_avatar_sealed_b64 = None
+    try:
+        from i2pchat.core.i2p_chat_core import get_profile_data_dir
+        from i2pchat.storage.avatars import OWN_BLOB_NAME, avatars_dir
+
+        pdir = get_profile_data_dir(profile_name, create=False, app_root=profiles_dir)
+        own_path = os.path.join(avatars_dir(pdir), OWN_BLOB_NAME)
+        if os.path.isfile(own_path):
+            with open(own_path, "rb") as handle:
+                own_avatar_sealed_b64 = base64.b64encode(handle.read()).decode("ascii")
+    except Exception:
+        own_avatar_sealed_b64 = None
+
     payload: dict[str, Any] = {
         "version": PROFILE_VERSION,
         "export_ts": datetime.now(timezone.utc).isoformat(),
         "dat_content": base64.b64encode(dat_bytes).decode("ascii"),
         "contacts": contacts,
         "gui_settings": gui_settings,
+        "own_avatar_sealed_b64": own_avatar_sealed_b64,
     }
     plaintext = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
@@ -430,5 +446,34 @@ def import_profile(
         gui_path = os.path.join(profiles_dir, "gui.json")
         gui_bytes = json.dumps(gui_settings, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8")
         _atomic_write_profile(gui_path, gui_bytes)
+
+    sealed_b64 = payload.get("own_avatar_sealed_b64")
+    if isinstance(sealed_b64, str) and sealed_b64:
+        try:
+            from i2pchat.storage.avatars import (
+                OWN_BLOB_NAME,
+                avatars_dir,
+                mark_need_request_all_contacts,
+            )
+
+            avatar_bytes = base64.b64decode(sealed_b64.encode("ascii"), validate=True)
+            avatar_path = os.path.join(avatars_dir(pdir), OWN_BLOB_NAME)
+            _atomic_write_profile(avatar_path, avatar_bytes)
+            peer_addrs: list[str] = []
+            if isinstance(contacts, dict):
+                for item in contacts.get("contacts") or contacts.get("peers") or []:
+                    if isinstance(item, dict) and item.get("addr"):
+                        peer_addrs.append(str(item["addr"]))
+                    elif isinstance(item, str):
+                        peer_addrs.append(item)
+            elif isinstance(contacts, list):
+                for item in contacts:
+                    if isinstance(item, str):
+                        peer_addrs.append(item)
+                    elif isinstance(item, dict) and item.get("addr"):
+                        peer_addrs.append(str(item["addr"]))
+            mark_need_request_all_contacts(pdir, None, peer_addrs)
+        except Exception:
+            pass
 
     return final_name

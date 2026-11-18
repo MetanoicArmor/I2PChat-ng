@@ -39,13 +39,34 @@ fun avatarLetter(label: String): String {
     return trimmed.first().uppercase()
 }
 
-/** Clock portion of an ISO-ish timestamp, or the raw string when it is already short. */
+/**
+ * Local HH:mm for an ISO-8601 timestamp (UTC or offset). Wire/storage stay UTC;
+ * only the bubble/list clock is converted to the device timezone.
+ */
 fun shortClock(ts: String): String {
     val text = ts.trim()
-    if (text.length >= 16 && (text[10] == 'T' || text[10] == ' ')) {
-        return text.substring(11, 16)
+    if (text.isEmpty()) return text
+    // Already a short clock (e.g. Status Events HH:mm:ss) — leave as-is.
+    if (text.length <= 8 && text.count { it == ':' } >= 1 && !text.contains('T') && text.indexOf('-') < 0) {
+        return text.take(5)
     }
-    return text.take(5)
+    return try {
+        val normalized = text.replace(' ', 'T').let { raw ->
+            when {
+                raw.endsWith("Z", ignoreCase = true) -> raw
+                Regex(".*[+-]\\d{2}:?\\d{2}$").matches(raw) -> raw
+                raw.length >= 19 -> raw.take(19) + "Z"
+                else -> raw
+            }
+        }
+        val instant = java.time.OffsetDateTime.parse(normalized).toInstant()
+        java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+            .withZone(java.time.ZoneId.systemDefault())
+            .format(instant)
+    } catch (_: Exception) {
+        if (text.length >= 16 && (text[10] == 'T' || text[10] == ' ')) text.substring(11, 16)
+        else text.take(5)
+    }
 }
 
 @Composable

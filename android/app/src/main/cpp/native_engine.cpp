@@ -1102,6 +1102,7 @@ Java_org_i2pchat_android_NativeEngine_nativeSnapshot(JNIEnv* env, jclass) {
                     {"note", record.note},
                     {"lastPreview", record.last_preview},
                     {"lastActivityTs", record.last_activity_ts},
+                    {"historyRetentionDays", record.history_retention_days},
                     {"live", service.live(record.addr)},
                     {"offlineReady", service.peer_offline_ready(record.addr)},
                 });
@@ -1193,6 +1194,25 @@ Java_org_i2pchat_android_NativeEngine_nativeSetPeerProfile(JNIEnv* env, jclass, 
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetPeerRetentionDays(JNIEnv* env, jclass,
+                                                                jstring j_addr, jint days) {
+    if (!g_engine.service) {
+        return;
+    }
+    const std::string addr = jstring_to_utf8(env, j_addr);
+    const unsigned value = static_cast<unsigned>(std::max(0, days));
+    try {
+        g_engine.on_core<void>([addr, value] {
+            if (g_engine.service->contacts().set_peer_history_retention_days(addr, value)) {
+                g_engine.service->save_contacts();
+            }
+        });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_org_i2pchat_android_NativeEngine_nativeRemovePeer(JNIEnv* env, jclass, jstring j_addr) {
     if (!g_engine.service) {
         return;
@@ -1233,6 +1253,29 @@ Java_org_i2pchat_android_NativeEngine_nativeClearHistory(JNIEnv* env, jclass, js
             [addr] { i2pchat::storage::delete_history(g_engine.service->paths(), addr); });
     } catch (const std::exception& ex) {
         g_engine.emit_string("onError", ex.what());
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeDeleteMessage(JNIEnv* env, jclass, jstring j_peer,
+                                                         jstring j_message_id, jstring j_kind,
+                                                         jstring j_ts, jstring j_text) {
+    if (!g_engine.service) {
+        return JNI_FALSE;
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    const std::string message_id = jstring_to_utf8(env, j_message_id);
+    const std::string kind = jstring_to_utf8(env, j_kind);
+    const std::string ts = jstring_to_utf8(env, j_ts);
+    const std::string text = jstring_to_utf8(env, j_text);
+    try {
+        const bool removed = g_engine.on_core<bool>([peer, message_id, kind, ts, text] {
+            return g_engine.service->delete_history_entry(peer, message_id, kind, ts, text);
+        });
+        return removed ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+        return JNI_FALSE;
     }
 }
 

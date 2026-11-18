@@ -16,6 +16,7 @@ fun renderNotice(context: Context, notice: NoticeUi): String {
         "router.restarting" -> context.getString(R.string.notice_router_restarting)
         "router.waiting" -> context.getString(R.string.notice_router_waiting, notice.arg)
         "router.sam_ready" -> context.getString(R.string.notice_router_sam_ready, notice.arg)
+        "app.version" -> notice.text.ifBlank { notice.code }
         "trust.prompt" -> context.getString(R.string.notice_trust_prompt, peer)
         "file.offer" -> context.getString(R.string.notice_file_offer, peer) + " " + notice.text
         "file.offer_stale" -> context.getString(R.string.notice_file_offer_stale, notice.arg)

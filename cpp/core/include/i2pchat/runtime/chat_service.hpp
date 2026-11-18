@@ -269,6 +269,13 @@ public:
     void save_contacts();
 
     [[nodiscard]] std::vector<storage::HistoryEntry> history(std::string_view peer) const;
+    /// Drop one row from a conversation, in memory and on disk. A non-empty
+    /// `message_id` is matched first; otherwise (or when it finds nothing) the
+    /// row is matched by `kind`, `ts` and `text`. The last such row goes, so a
+    /// repeated line costs the newest copy. Returns whether a row was removed.
+    bool delete_history_entry(std::string_view peer, std::string_view message_id,
+                              std::string_view kind, std::string_view ts,
+                              std::string_view text);
     [[nodiscard]] bool live(std::string_view peer);
     [[nodiscard]] bool peer_offline_ready(std::string_view peer) const;
     [[nodiscard]] std::vector<std::string> connected_peers() const;
@@ -302,6 +309,9 @@ private:
 
     Peer& ensure_peer(const std::string& peer_addr);
     Peer* find_peer(std::string_view peer_addr);
+    /// Global retention policy, with the contact's own age limit (days > 0) taking
+    /// its place when one is set.
+    [[nodiscard]] storage::RetentionPolicy retention_for(std::string_view peer_addr) const;
 
     void attach_link(Peer& peer, std::shared_ptr<PeerLink> link);
     void wire_transfers(Peer& peer);

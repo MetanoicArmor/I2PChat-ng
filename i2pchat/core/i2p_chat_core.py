@@ -2712,6 +2712,80 @@ class I2PChatCore:
             return bytes(data)
         return None
 
+    def set_own_avatar_bytes(self, image_bytes: bytes) -> str:
+        """Store the profile avatar; returns sha256 hex of the image."""
+        from i2pchat.storage.avatars import set_own_avatar
+
+        return set_own_avatar(
+            self.get_profile_data_dir(create=True),
+            self.get_identity_key_bytes(),
+            image_bytes,
+        )
+
+    def get_own_avatar_bytes(self) -> Optional[bytes]:
+        from i2pchat.storage.avatars import get_own_avatar
+
+        return get_own_avatar(
+            self.get_profile_data_dir(create=False),
+            self.get_identity_key_bytes(),
+        )
+
+    def get_peer_avatar_bytes(self, peer_addr: str) -> Optional[bytes]:
+        from i2pchat.storage.avatars import get_peer_avatar
+
+        return get_peer_avatar(
+            self.get_profile_data_dir(create=False),
+            self.get_identity_key_bytes(),
+            peer_addr,
+        )
+
+    async def push_own_avatar_if_needed(self, peer_addr: str) -> bool:
+        """Send the current own avatar to a trusted peer that has not received it yet."""
+        from i2pchat.storage.avatars import (
+            AVATAR_WIRE_FILENAME,
+            get_own_avatar,
+            mark_delivered,
+            peers_needing_own_avatar,
+            sha256_hex,
+        )
+
+        peer = self._normalize_peer_addr(peer_addr or "")
+        if not peer or not self._handshake_complete_for_peer_route(peer):
+            return False
+        if peer not in self.peer_trusted_signing_keys:
+            return False
+        pdir = self.get_profile_data_dir(create=True)
+        key = self.get_identity_key_bytes()
+        if peer not in peers_needing_own_avatar(pdir, key, [peer]):
+            return False
+        data = get_own_avatar(pdir, key)
+        if not data:
+            return False
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(
+            prefix=".i2pchat-avatar-", suffix=".jpg", delete=False
+        )
+        try:
+            tmp.write(data)
+            tmp.close()
+            # Rename to the reserved wire name in the same directory.
+            wire_path = os.path.join(os.path.dirname(tmp.name), AVATAR_WIRE_FILENAME)
+            try:
+                os.replace(tmp.name, wire_path)
+            except OSError:
+                wire_path = tmp.name
+            await self.send_file(wire_path, peer_address=peer)
+            mark_delivered(pdir, key, peer, sha256_hex(data))
+            return True
+        finally:
+            for path in (tmp.name, os.path.join(os.path.dirname(tmp.name), AVATAR_WIRE_FILENAME)):
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
     def get_profiles_dir(self) -> str:
         """Корневой каталог данных приложения (см. ``get_profiles_dir``)."""
         return get_profiles_dir()
@@ -11576,7 +11650,13 @@ class I2PChatCore:
                             sess.incoming_info = None
                             continue
                         safe_name = os.path.basename(filename)
-                        decision = await self._request_file_offer_decision(safe_name, size)
+                        from i2pchat.storage.avatars import is_avatar_wire_filename
+
+                        # Avatar pushes are silent metadata: auto-accept, no offer UI.
+                        if is_avatar_wire_filename(safe_name):
+                            decision = True
+                        else:
+                            decision = await self._request_file_offer_decision(safe_name, size)
                         if decision is None:
                             prj = peer_id or self._normalize_peer_addr(
                                 self.current_peer_addr or ""
@@ -11714,14 +11794,43 @@ class I2PChatCore:
                             sess._incoming_file_msg_id = None
                             continue
                         ack_msg_id = sess._incoming_file_msg_id or 0
-                        self._emit_file_event(
-                            FileTransferInfo(
-                                filename=ack_filename,
-                                size=expected_size,
-                                received=expected_size,
-                                is_sending=False,
-                            )
+                        from i2pchat.storage.avatars import (
+                            is_avatar_wire_filename,
+                            set_peer_avatar,
                         )
+
+                        if is_avatar_wire_filename(os.path.basename(ack_filename)):
+                            try:
+                                with open(ack_filename, "rb") as avatar_fh:
+                                    avatar_bytes = avatar_fh.read()
+                                peer_for_avatar = peer_id or self._normalize_peer_addr(
+                                    self.current_peer_addr or ""
+                                )
+                                set_peer_avatar(
+                                    self.get_profile_data_dir(create=True),
+                                    self.get_identity_key_bytes(),
+                                    peer_for_avatar or "",
+                                    avatar_bytes,
+                                )
+                                self._emit_system(
+                                    f"Avatar updated for {peer_for_avatar or 'peer'}"
+                                )
+                            except Exception as avatar_exc:
+                                self._emit_error(f"Avatar ingest failed: {avatar_exc}")
+                            finally:
+                                try:
+                                    os.remove(ack_filename)
+                                except OSError:
+                                    pass
+                        else:
+                            self._emit_file_event(
+                                FileTransferInfo(
+                                    filename=ack_filename,
+                                    size=expected_size,
+                                    received=expected_size,
+                                    is_sending=False,
+                                )
+                            )
                         sess.incoming_file = None
                         sess.incoming_info = None
                         # Подтверждение получения файла (галочки у отправителя); отправляем basename, чтобы совпало с file_name у отправителя

@@ -3,11 +3,17 @@ package org.i2pchat.android.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -27,16 +33,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.i2pchat.android.ChatImageThumb
+import org.i2pchat.android.MediaKind
 import org.i2pchat.android.MessageUi
 import org.i2pchat.android.R
+import org.i2pchat.android.ReplyQuoteParts
+import org.i2pchat.android.mediaKindForName
+import org.i2pchat.android.splitReplyQuote
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -47,6 +64,9 @@ fun KeetMessageBubble(
     textStyle: TextStyle,
     onOpenFile: (String) -> Unit,
     onOpenSealed: (String) -> Unit = {},
+    onOpenMemoryImage: (String) -> Unit = {},
+    resolveSealed: (String, (String) -> Unit) -> Unit = { _, done -> done("") },
+    onQuoteClick: (ReplyQuoteParts) -> Unit = {},
     onLongClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(
@@ -65,6 +85,14 @@ fun KeetMessageBubble(
     } else {
         MaterialTheme.colorScheme.onSurface
     }
+    val fileLabel = msg.fileCaption.ifBlank {
+        msg.filePath.substringAfterLast('/').ifBlank {
+            msg.sealedFile.ifBlank { msg.text.removePrefix("[file] ").trim() }
+        }
+    }
+    val audioCandidate = msg.filePath.ifBlank { fileLabel }
+    val isAudio = mediaKindForName(audioCandidate) == MediaKind.Audio ||
+        mediaKindForName(fileLabel) == MediaKind.Audio
     Column(
         Modifier.fillMaxWidth().padding(vertical = 3.dp),
         horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
@@ -76,9 +104,13 @@ fun KeetMessageBubble(
                 .background(background)
                 .combinedClickable(
                     onClick = {
-                        val path = msg.imagePath.ifBlank { msg.filePath }
-                        if (path.isNotBlank()) onOpenFile(path)
-                        else if (msg.sealedFile.isNotBlank()) onOpenSealed(msg.sealedFile)
+                        when {
+                            msg.memoryImage.isNotBlank() -> onOpenMemoryImage(msg.memoryImage)
+                            msg.imagePath.isNotBlank() -> onOpenFile(msg.imagePath)
+                            isAudio -> Unit // controls live in the bubble
+                            msg.filePath.isNotBlank() -> onOpenFile(msg.filePath)
+                            msg.sealedFile.isNotBlank() -> onOpenSealed(msg.sealedFile)
+                        }
                     },
                     onLongClick = onLongClick,
                 )
@@ -95,11 +127,25 @@ fun KeetMessageBubble(
                 ChatImageThumb(
                     path = msg.imagePath,
                     memoryKey = msg.memoryImage,
-                    onOpenPath = { onOpenFile(it) },
+                    onOpen = {
+                        when {
+                            msg.memoryImage.isNotBlank() -> onOpenMemoryImage(msg.memoryImage)
+                            msg.imagePath.isNotBlank() -> onOpenFile(msg.imagePath)
+                        }
+                    },
+                    onLongClick = onLongClick,
                 )
                 if (msg.fileCaption.isNotBlank()) {
                     Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall, color = foreground)
                 }
+            } else if (isAudio && (msg.filePath.isNotBlank() || msg.sealedFile.isNotBlank() || msg.text.startsWith("[file] "))) {
+                InlineAudioPlayer(
+                    name = fileLabel.ifBlank { "audio" },
+                    path = msg.filePath,
+                    sealedId = msg.sealedFile,
+                    resolveSealed = resolveSealed,
+                    color = foreground,
+                )
             } else if (msg.filePath.isNotBlank() || msg.sealedFile.isNotBlank() || msg.text.startsWith("[file] ")) {
                 val path = msg.filePath
                 Text(
@@ -118,7 +164,21 @@ fun KeetMessageBubble(
                 // in-memory copy was dropped after "Do not keep files".
                 Text("📷 ${msg.fileCaption.ifBlank { msg.text }}", color = foreground)
             } else {
-                Text(msg.text, style = textStyle, color = foreground)
+                val quote = splitReplyQuote(msg.text)
+                if (quote == null) {
+                    Text(msg.text, style = textStyle, color = foreground)
+                } else {
+                    ReplyQuoteBlock(
+                        quote = quote,
+                        textStyle = textStyle,
+                        color = foreground,
+                        onClick = { onQuoteClick(quote) },
+                        onLongClick = onLongClick,
+                    )
+                    if (quote.answer.isNotBlank()) {
+                        Text(quote.answer, style = textStyle, color = foreground)
+                    }
+                }
             }
             val meta = listOf(
                 shortClock(msg.ts),
@@ -143,6 +203,48 @@ fun KeetMessageBubble(
     }
 }
 
+/** A reply's quoted lines behind a vertical bar, with the `@author` line on top. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ReplyQuoteBlock(
+    quote: ReplyQuoteParts,
+    textStyle: TextStyle,
+    color: Color,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .padding(bottom = 4.dp)
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(6.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+    ) {
+        Box(
+            Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(color.copy(alpha = 0.6f)),
+        )
+        Column(Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp)) {
+            if (quote.author.isNotBlank()) {
+                Text(
+                    "@${quote.author}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color.copy(alpha = 0.8f),
+                )
+            }
+            Text(
+                quote.quoted,
+                style = textStyle,
+                color = color.copy(alpha = 0.75f),
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 @Composable
 fun KeetComposer(
     text: String,
@@ -152,7 +254,11 @@ fun KeetComposer(
     showAttach: Boolean,
     onPickFile: () -> Unit,
     onPickImage: () -> Unit,
+    focusRequester: FocusRequester = remember { FocusRequester() },
+    /** A touch landed on the text field; the screen swaps the emoji panel for the keyboard. */
+    onFieldTap: () -> Unit = {},
 ) {
+    val currentFieldTap by rememberUpdatedState(onFieldTap)
     var attach by remember { mutableStateOf(false) }
     Row(
         Modifier
@@ -191,7 +297,17 @@ fun KeetComposer(
         BasicTextField(
             value = text,
             onValueChange = onTextChange,
-            modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 12.dp)
+                .focusRequester(focusRequester)
+                .pointerInput(Unit) {
+                    // Watch only: the field still handles the touch itself.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        currentFieldTap()
+                    }
+                },
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
             decorationBox = { inner ->
                 Box {

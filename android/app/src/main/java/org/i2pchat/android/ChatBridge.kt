@@ -23,6 +23,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import org.i2pchat.android.BuildConfig
 
 data class ContactUi(
     val addr: String,
@@ -30,6 +31,8 @@ data class ContactUi(
     val note: String = "",
     val lastPreview: String = "",
     val lastActivityTs: String = "",
+    /** Per-peer auto-delete age in days; 0 = follow the global history retention. */
+    val historyRetentionDays: Int = 0,
     val live: Boolean = false,
     val offlineReady: Boolean = false,
     val unread: Int = 0,
@@ -635,6 +638,11 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 return@launch
             }
             appendNotice("router.sam_ready", NoticeUi.LEVEL_VERBOSE, sam)
+            appendNotice(
+                "app.version",
+                NoticeUi.LEVEL_USER,
+                text = "I2PChat ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            )
             _state.update { it.copy(samReady = true, routerIssue = null) }
             clearIncomingCache()
             MemoryImages.clear()
@@ -644,24 +652,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             val profileDir = File(appRoot, "profiles/$profile")
             activeFilesDir = if (filesDir.isBlank()) File(profileDir, "downloads") else File(filesDir)
             activeImagesDir = if (imagesDir.isBlank()) File(profileDir, "images") else File(imagesDir)
+            sessionPassword = profilePassword
             val result = runCatching {
-                JSONObject(
-                    NativeEngine.nativeStart(
-                        appRoot.absolutePath,
-                        profile,
-                        router.samHost,
-                        router.samPort,
-                        ui.historyMaxMessages,
-                        ui.historyRetentionDays,
-                        router.tunnelLength,
-                        filesDir,
-                        imagesDir,
-                        profilePassword,
-                        // Received pictures then never reach the cache
-                        // directory, which is on flash storage like any other.
-                        ui.ephemeralMedia,
-                    ),
-                )
+                nativeStartSession(profile, profilePassword, router, ui, filesDir, imagesDir)
             }.getOrElse { ex ->
                 failStart(str(R.string.notice_start_failed, ex.message.orEmpty()), null)
                 return@launch
@@ -698,16 +691,84 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     private var tunnelWatchJob: Job? = null
 
-    /** While tunnels are not ready, keep looking for a router problem the user can fix. */
+    /**
+     * Profile password of the running session, kept in memory only so the
+     * engine can be started again when an external router comes back.
+     */
+    private var sessionPassword = ""
+
+    private fun nativeStartSession(
+        profile: String,
+        profilePassword: String,
+        router: RouterPrefs,
+        ui: UiPrefs,
+        filesDir: String,
+        imagesDir: String,
+    ): JSONObject = JSONObject(
+        NativeEngine.nativeStart(
+            appRoot.absolutePath,
+            profile,
+            router.samHost,
+            router.samPort,
+            ui.historyMaxMessages,
+            ui.historyRetentionDays,
+            router.tunnelLength,
+            filesDir,
+            imagesDir,
+            profilePassword,
+            // Received pictures then never reach the cache
+            // directory, which is on flash storage like any other.
+            ui.ephemeralMedia,
+        ),
+    )
+
+    /**
+     * While tunnels are not ready, keep looking for a router problem the user
+     * can fix. With an external router the watch goes on after tunnels are up:
+     * when its SAM bridge dies the problem is shown, and once it answers again
+     * the engine session is rebuilt without restarting the app.
+     */
     private fun startTunnelWatch(router: RouterPrefs) {
         tunnelWatchJob?.cancel()
         tunnelWatchJob = viewModelScope.launch(Dispatchers.IO) {
             val t0 = System.currentTimeMillis()
+            var samLost = false
+            var misses = 0
             while (isActive && _state.value.running) {
                 delay(5_000)
+                if (!router.usingBundled) {
+                    val up = samProbe(router.samHost, router.samPort)
+                    misses = if (up) 0 else misses + 1
+                    // One failed probe can be a busy router; two in a row is an outage.
+                    if (!up && misses < 2) continue
+                    if (!up) {
+                        if (!samLost) {
+                            samLost = true
+                            onMain {
+                                _state.update {
+                                    it.copy(
+                                        samReady = false,
+                                        status = str(R.string.status_failed),
+                                        routerIssue = RouterIssue(
+                                            RouterIssueCode.SYSTEM_SAM_UNREACHABLE,
+                                            "${router.samHost}:${router.samPort}",
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        continue
+                    }
+                    if (samLost) {
+                        // Router answered but the session did not come up: try again next tick.
+                        if (!rebuildExternalSession(router)) continue
+                        samLost = false
+                    }
+                }
                 if (_state.value.tunnelsReady) {
                     onMain { _state.update { it.copy(routerIssue = null) } }
-                    return@launch
+                    if (router.usingBundled) return@launch
+                    continue
                 }
                 val sec = (System.currentTimeMillis() - t0) / 1000
                 val issue = if (router.usingBundled) {
@@ -720,6 +781,67 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 onMain { _state.update { it.copy(routerIssue = issue) } }
             }
         }
+    }
+
+    /**
+     * The external router's SAM bridge is back after an outage. Stops the engine
+     * and starts it again on the same profile so tunnels and the SAM session are
+     * rebuilt; the open chat, drafts and contacts stay on screen. Returns false
+     * when the engine did not come back, so the caller can try again.
+     */
+    private suspend fun rebuildExternalSession(router: RouterPrefs): Boolean {
+        val profile = _state.value.profile
+        if (profile.isBlank()) return false
+        pollJob?.cancel()
+        runCatching { NativeEngine.nativeStop() }
+        // nativeStop destroys the session key that opens sealed downloads.
+        SealedFiles.clear()
+        onMain {
+            _state.update {
+                it.copy(
+                    transport = "starting",
+                    status = str(R.string.status_starting),
+                    peerStates = emptyMap(),
+                )
+            }
+        }
+        // Quit while the engine was stopping: do not bring it back.
+        if (!_state.value.running || _state.value.quitting) return true
+        val ui = UiPrefs.load(appRoot)
+        val (filesDir, imagesDir) = mediaDirs(ui)
+        val result = runCatching {
+            nativeStartSession(profile, sessionPassword, router, ui, filesDir, imagesDir)
+        }.getOrNull()
+        if (result == null || !result.optBoolean("ok", false)) {
+            onMain {
+                _state.update {
+                    it.copy(
+                        samReady = false,
+                        status = str(R.string.status_failed),
+                        routerIssue = RouterIssue(
+                            RouterIssueCode.SYSTEM_SAM_UNREACHABLE,
+                            "${router.samHost}:${router.samPort}",
+                        ),
+                    )
+                }
+            }
+            return false
+        }
+        refreshSnapshot()
+        onMain {
+            _state.update {
+                it.copy(
+                    samReady = true,
+                    routerIssue = null,
+                    localAddr = result.optString("localAddr", it.localAddr),
+                    status = str(R.string.status_warming),
+                    error = "",
+                )
+            }
+        }
+        startPolling()
+        loadHistory()
+        return true
     }
 
     private fun bundledIssue(warmingSeconds: Long): RouterIssue? {
@@ -797,6 +919,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 }
             }
             runCatching { NativeEngine.nativeStop() }
+            sessionPassword = ""
             MemoryImages.clear()
             SealedFiles.clear()
             clearIncomingCache()
@@ -1093,6 +1216,13 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    fun setPeerRetentionDays(addr: String, days: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeSetPeerRetentionDays(addr, days.coerceIn(0, 3650))
+            refreshSnapshot()
+        }
+    }
+
     fun removePeer(addr: String) {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeRemovePeer(addr)
@@ -1115,6 +1245,18 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             MemoryImages.removePeer(addr)
             SealedFiles.removePeer(addr)
             loadHistory()
+        }
+    }
+
+    /** Deletes one direct-chat message from the list, the in-memory history and the history file. */
+    fun deleteMessage(msg: MessageUi) {
+        val peer = _state.value.selectedId
+        if (peer.isBlank() || _state.value.selectedIsGroup) return
+        _state.update { s -> s.copy(messages = s.messages.filterNot { it === msg }) }
+        viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeDeleteMessage(peer, msg.messageId, msg.kind, msg.ts, msg.text)
+            loadHistory()
+            refreshSnapshot()
         }
     }
 
@@ -1341,6 +1483,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     note = o.optString("note"),
                     lastPreview = o.optString("lastPreview"),
                     lastActivityTs = o.optString("lastActivityTs"),
+                    historyRetentionDays = o.optInt("historyRetentionDays", 0),
                     live = o.optBoolean("live"),
                     offlineReady = o.optBoolean("offlineReady"),
                 ),
@@ -1506,6 +1649,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     private fun failStart(message: String, issue: RouterIssue?) {
+        sessionPassword = ""
         onMain {
             _state.update {
                 it.copy(
@@ -1670,15 +1814,44 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     /** Decrypts a sealed download into a short-lived cache file and opens it. */
-    fun openSealedFile(peer: String, id: String) {
+    fun openSealedFile(
+        peer: String,
+        id: String,
+        onReady: (String) -> Unit = { openReceivedFile(getApplication(), it) },
+        onFailed: () -> Unit = {},
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val plain = decryptSealedToView(peer, id)
             onMain {
                 if (plain == null) {
                     Toast.makeText(getApplication(), str(R.string.file_gone), Toast.LENGTH_SHORT).show()
+                    onFailed()
                 } else {
-                    openReceivedFile(getApplication(), plain.absolutePath)
+                    onReady(plain.absolutePath)
                 }
+            }
+        }
+    }
+
+    /** Copies a received file the core wrote into a document the user picked. */
+    fun saveLocalFile(path: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val src = File(path)
+            val saved = runCatching {
+                val allowed = isReceivedMediaFile(getApplication(), src) ||
+                    isEphemeralViewFile(getApplication(), src)
+                if (!allowed || !src.isFile) return@runCatching false
+                val out = getApplication<Application>().contentResolver.openOutputStream(uri)
+                    ?: return@runCatching false
+                out.use { dest -> src.inputStream().use { it.copyTo(dest) } }
+                true
+            }.getOrDefault(false)
+            onMain {
+                Toast.makeText(
+                    getApplication(),
+                    str(if (saved) R.string.file_saved else R.string.file_gone),
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         }
     }

@@ -19,6 +19,7 @@ namespace i2pchat::storage {
 
 inline constexpr std::size_t kMaxContacts = 500;
 inline constexpr std::uint32_t kContactBookVersion = 2;
+inline constexpr unsigned kMaxPeerHistoryRetentionDays = 3650;
 /// Measured in Unicode code points, matching the reference implementation.
 inline constexpr std::size_t kPreviewMaxLength = 80;
 
@@ -40,6 +41,8 @@ struct ContactRecord {
     std::string note;
     std::string last_preview;
     std::string last_activity_ts;
+    /// Per-peer auto-delete age in days; 0 = no override (use the global policy).
+    unsigned history_retention_days = 0;
 };
 
 class ContactBook {
@@ -66,6 +69,7 @@ public:
     bool set_last_active_peer(std::optional<std::string_view> addr);
     bool set_peer_profile(std::string_view addr, std::string_view display_name,
                           std::string_view note);
+    bool set_peer_history_retention_days(std::string_view addr, unsigned days);
     bool touch_peer_message_meta(std::string_view addr, std::string_view preview,
                                  std::string_view ts_iso);
     bool remove_peer(std::string_view addr);

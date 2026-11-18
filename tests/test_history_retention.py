@@ -18,6 +18,7 @@ from i2pchat.storage.history_retention import (
     GUI_RETENTION_KEY,
     RetentionPolicy,
     apply_retention,
+    effective_max_age_days,
     enforce_retention_all,
     enforce_retention_for_peer,
     policy_from_gui_settings,
@@ -278,6 +279,14 @@ class PolicyFromGuiSettingsTests(unittest.TestCase):
         # If gui.json has non-dict value for the key, fall back to defaults
         policy = policy_from_gui_settings({GUI_RETENTION_KEY: "bad"})
         self.assertEqual(policy.max_messages, DEFAULT_MAX_MESSAGES)
+
+
+class PeerOverrideAgeTests(unittest.TestCase):
+    def test_peer_override_replaces_global(self) -> None:
+        self.assertEqual(effective_max_age_days(30, 7), 7)
+        self.assertEqual(effective_max_age_days(7, 30), 30)
+        self.assertEqual(effective_max_age_days(30, 0), 30)
+        self.assertEqual(effective_max_age_days(0, 0), 0)
 
 
 if __name__ == "__main__":
