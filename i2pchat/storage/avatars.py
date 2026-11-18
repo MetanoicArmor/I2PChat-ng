@@ -28,8 +28,10 @@ from i2pchat.storage.sealed_json import read_sealed_json, write_sealed_json
 logger = logging.getLogger("i2pchat.avatars")
 
 AVATAR_DIR_NAME = "avatars"
+PREVIEW_DIR_NAME = "preview"
 LEDGER_NAME = "ledger.json"
 OWN_BLOB_NAME = "self.bin"
+OWN_PREVIEW_NAME = "self.jpg"
 PEER_BLOB_PREFIX = "peer."
 
 AVATAR_LEDGER_MAGIC = b"I2AV"
@@ -50,6 +52,12 @@ def avatars_dir(profile_data_dir: str) -> str:
     return path
 
 
+def preview_dir(profile_data_dir: str) -> str:
+    path = os.path.join(avatars_dir(profile_data_dir), PREVIEW_DIR_NAME)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
 def _peer_key(addr: str) -> Optional[str]:
     return normalize_peer_address(addr)
 
@@ -60,6 +68,33 @@ def _peer_blob_name(addr: str) -> Optional[str]:
         return None
     digest = hashlib.sha256(key.encode("ascii")).hexdigest()[:32]
     return f"{PEER_BLOB_PREFIX}{digest}.bin"
+
+
+def _peer_preview_name(addr: str) -> Optional[str]:
+    key = _peer_key(addr)
+    if key is None:
+        return None
+    digest = hashlib.sha256(key.encode("ascii")).hexdigest()[:32]
+    return f"{digest}.jpg"
+
+
+def _write_preview(path: str, image_bytes: bytes) -> None:
+    atomic_write_bytes(path, image_bytes)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def own_preview_path(profile_data_dir: str) -> str:
+    return os.path.join(preview_dir(profile_data_dir), OWN_PREVIEW_NAME)
+
+
+def peer_preview_path(profile_data_dir: str, peer_addr: str) -> Optional[str]:
+    name = _peer_preview_name(peer_addr)
+    if name is None:
+        return None
+    return os.path.join(preview_dir(profile_data_dir), name)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -195,6 +230,7 @@ def set_own_avatar(
     digest = sha256_hex(image_bytes)
     path = os.path.join(avatars_dir(profile_data_dir), OWN_BLOB_NAME)
     _seal_blob(path, image_bytes, identity_key)
+    _write_preview(own_preview_path(profile_data_dir), image_bytes)
     ledger = load_ledger(profile_data_dir, identity_key)
     ledger.own_sha256 = digest
     ledger.delivered.clear()
@@ -204,7 +240,17 @@ def set_own_avatar(
 
 def get_own_avatar(profile_data_dir: str, identity_key: bytes | None) -> bytes | None:
     path = os.path.join(avatars_dir(profile_data_dir), OWN_BLOB_NAME)
-    return _unseal_blob(path, identity_key)
+    data = _unseal_blob(path, identity_key)
+    if data:
+        return data
+    preview = own_preview_path(profile_data_dir)
+    if os.path.isfile(preview):
+        try:
+            with open(preview, "rb") as handle:
+                return handle.read()
+        except OSError:
+            return None
+    return None
 
 
 def set_peer_avatar(
@@ -224,6 +270,9 @@ def set_peer_avatar(
     digest = sha256_hex(image_bytes)
     path = os.path.join(avatars_dir(profile_data_dir), name)
     _seal_blob(path, image_bytes, identity_key)
+    preview = peer_preview_path(profile_data_dir, peer_addr)
+    if preview:
+        _write_preview(preview, image_bytes)
     ledger = load_ledger(profile_data_dir, identity_key)
     if key in ledger.need_request:
         ledger.need_request = [p for p in ledger.need_request if p != key]
@@ -240,7 +289,32 @@ def get_peer_avatar(
     if name is None:
         return None
     path = os.path.join(avatars_dir(profile_data_dir), name)
-    return _unseal_blob(path, identity_key)
+    data = _unseal_blob(path, identity_key)
+    if data:
+        return data
+    preview = peer_preview_path(profile_data_dir, peer_addr)
+    if preview and os.path.isfile(preview):
+        try:
+            with open(preview, "rb") as handle:
+                return handle.read()
+        except OSError:
+            return None
+    return None
+
+
+def clear_need_request(
+    profile_data_dir: str,
+    identity_key: bytes | None,
+    peer_addr: str,
+) -> None:
+    key = _peer_key(peer_addr)
+    if key is None:
+        return
+    ledger = load_ledger(profile_data_dir, identity_key)
+    if key not in ledger.need_request:
+        return
+    ledger.need_request = [p for p in ledger.need_request if p != key]
+    save_ledger(profile_data_dir, ledger, identity_key)
 
 
 def mark_delivered(
@@ -296,6 +370,14 @@ def mark_need_request_all_contacts(
                 os.unlink(os.path.join(root, name))
             except OSError:
                 pass
+    prev = preview_dir(profile_data_dir)
+    for name in os.listdir(prev):
+        if name == OWN_PREVIEW_NAME:
+            continue
+        try:
+            os.unlink(os.path.join(prev, name))
+        except OSError:
+            pass
     ledger = load_ledger(profile_data_dir, identity_key)
     need: list[str] = []
     for peer in peer_addrs:

@@ -1493,6 +1493,7 @@ class I2PChatCore:
         self.on_trust_decision = on_trust_decision
         self.on_trust_mismatch_decision = on_trust_mismatch_decision
         self.on_saved_contacts_changed = on_saved_contacts_changed
+        self.on_avatar_updated: Optional[Callable[[str], Any]] = None
         self.profile_password = ""
         self.on_profile_password: Optional[Callable[[], Any]] = None
         self._trust_auto = (
@@ -2739,7 +2740,9 @@ class I2PChatCore:
             peer_addr,
         )
 
-    async def push_own_avatar_if_needed(self, peer_addr: str) -> bool:
+    async def push_own_avatar_if_needed(
+        self, peer_addr: str, *, force: bool = False
+    ) -> bool:
         """Send the current own avatar to a trusted peer that has not received it yet."""
         from i2pchat.storage.avatars import (
             AVATAR_WIRE_FILENAME,
@@ -2756,7 +2759,7 @@ class I2PChatCore:
             return False
         pdir = self.get_profile_data_dir(create=True)
         key = self.get_identity_key_bytes()
-        if peer not in peers_needing_own_avatar(pdir, key, [peer]):
+        if not force and peer not in peers_needing_own_avatar(pdir, key, [peer]):
             return False
         data = get_own_avatar(pdir, key)
         if not data:
@@ -2785,6 +2788,62 @@ class I2PChatCore:
                         os.remove(path)
                 except OSError:
                     pass
+
+    async def send_control_to_peer(self, peer_addr: str, signal: str) -> bool:
+        """Send an authenticated ``__SIGNAL__:…`` frame to a specific live peer."""
+        peer = self._normalize_peer_addr(peer_addr or "")
+        if not peer or not signal:
+            return False
+        writer, fpid, _ = self._writer_frame_peer_and_text_acks(peer)
+        if writer is None:
+            return False
+        try:
+            writer.write(
+                self.frame_message("S", f"__SIGNAL__:{signal}", peer_id=fpid)
+            )
+            await writer.drain()
+            return True
+        except Exception:
+            return False
+
+    async def _sync_avatars_after_secure(self, peer_addr: str) -> None:
+        """After secure: push our avatar if needed, request peer's after import."""
+        from i2pchat.storage.avatars import peers_needing_avatar_request
+
+        peer = self._normalize_peer_addr(peer_addr or "")
+        if not peer:
+            return
+        try:
+            await self.push_own_avatar_if_needed(peer)
+        except Exception as exc:
+            logger.debug("avatar push after secure failed: %s", exc)
+        try:
+            pdir = self.get_profile_data_dir(create=False)
+            key = self.get_identity_key_bytes()
+            need = peers_needing_avatar_request(pdir, key)
+            if peer in need:
+                await self.send_control_to_peer(peer, "AVATAR_REQUEST")
+        except Exception as exc:
+            logger.debug("avatar request after secure failed: %s", exc)
+
+    def _schedule_avatar_sync(self, peer_addr: str) -> None:
+        peer = self._normalize_peer_addr(peer_addr or "")
+        if not peer:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._sync_avatars_after_secure(peer))
+
+    def _emit_avatar_updated(self, peer_addr: str) -> None:
+        cb = getattr(self, "on_avatar_updated", None)
+        if cb is None:
+            return
+        try:
+            cb(peer_addr)
+        except Exception:
+            logger.debug("on_avatar_updated failed", exc_info=True)
 
     def get_profiles_dir(self) -> str:
         """Корневой каталог данных приложения (см. ``get_profiles_dir``)."""
@@ -10998,6 +11057,8 @@ class I2PChatCore:
                         group_state.group_id,
                         peer_id=peer_id,
                     )
+        if peer_addr_norm:
+            self._schedule_avatar_sync(peer_addr_norm)
         logger.info("Handshake completed (%s)", sess._hs_role or "?")
 
     async def shutdown(self) -> None:
@@ -11815,6 +11876,8 @@ class I2PChatCore:
                                 self._emit_system(
                                     f"Avatar updated for {peer_for_avatar or 'peer'}"
                                 )
+                                if peer_for_avatar:
+                                    self._emit_avatar_updated(peer_for_avatar)
                             except Exception as avatar_exc:
                                 self._emit_error(f"Avatar ingest failed: {avatar_exc}")
                             finally:
@@ -12034,6 +12097,19 @@ class I2PChatCore:
                                     self.on_file_delivered(ack_filename)
                             except Exception:
                                 self._record_ack_drop("invalid_format", "FILE_ACK parse failed")
+                        elif "AVATAR_REQUEST" in body:
+                            peer_for_avatar = peer_id or self._normalize_peer_addr(
+                                sess.peer_id or self.current_peer_addr or ""
+                            )
+                            if peer_for_avatar:
+                                try:
+                                    await self.push_own_avatar_if_needed(
+                                        peer_for_avatar, force=True
+                                    )
+                                except Exception as avatar_exc:
+                                    logger.debug(
+                                        "AVATAR_REQUEST push failed: %s", avatar_exc
+                                    )
                         elif "REJECT_FILE|" in body:
                             sess._transfer_rejected_by_peer = True
                         elif "QUIT" in body:

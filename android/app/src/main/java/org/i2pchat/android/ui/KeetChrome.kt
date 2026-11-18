@@ -1,5 +1,7 @@
 package org.i2pchat.android.ui
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -8,14 +10,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.io.File
 
 private val AvatarPalette = listOf(
     Color(0xFF3D7AD6),
@@ -75,9 +81,20 @@ fun PeerAvatar(
     label: String,
     size: Dp = 48.dp,
     modifier: Modifier = Modifier,
+    imagePath: String? = null,
+    /** Bump when the file behind [imagePath] may have changed. */
+    imageEpoch: Long = 0L,
     onClick: (() -> Unit)? = null,
 ) {
     val click = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    val bitmap = remember(imagePath, imageEpoch) {
+        val path = imagePath?.takeIf { it.isNotBlank() } ?: return@remember null
+        val file = File(path)
+        if (!file.isFile) return@remember null
+        runCatching {
+            BitmapFactory.decodeFile(path)?.asImageBitmap()
+        }.getOrNull()
+    }
     Box(
         modifier = modifier.then(click)
             .size(size)
@@ -85,12 +102,21 @@ fun PeerAvatar(
             .background(avatarColor(seed)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            avatarLetter(label),
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = if (size < 40.dp) 14.sp else 18.sp,
-        )
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.size(size),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Text(
+                avatarLetter(label),
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = if (size < 40.dp) 14.sp else 18.sp,
+            )
+        }
     }
 }
 

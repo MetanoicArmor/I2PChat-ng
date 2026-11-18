@@ -141,6 +141,8 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
                         seed = state.localAddr.ifBlank { state.profile },
                         label = state.profile.ifBlank { stringResource(R.string.app_name) },
                         size = 36.dp,
+                        imagePath = bridge.ownAvatarPath(),
+                        imageEpoch = state.avatarEpoch,
                         onClick = { nav.goTab("settings") },
                         modifier = Modifier.padding(start = 12.dp),
                     )
@@ -182,10 +184,15 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filtered, key = { it.addr }) { item ->
-                    ChatRow(item, state, onClick = {
-                        bridge.selectConversation(item.addr, item.isGroup)
-                        nav.navigate("conversation")
-                    })
+                    ChatRow(
+                        item,
+                        state,
+                        avatarPath = if (item.isGroup) null else bridge.peerAvatarPath(item.addr),
+                        onClick = {
+                            bridge.selectConversation(item.addr, item.isGroup)
+                            nav.navigate("conversation")
+                        },
+                    )
                 }
             }
         }
@@ -208,6 +215,7 @@ private fun SheetAction(label: String, onClick: () -> Unit) {
 private fun ChatRow(
     item: ContactUi,
     state: ChatUiState,
+    avatarPath: String?,
     onClick: () -> Unit,
 ) {
     val title = if (item.isGroup && item.displayName.isBlank()) {
@@ -227,7 +235,12 @@ private fun ChatRow(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PeerAvatar(seed = item.addr, label = title)
+        PeerAvatar(
+            seed = item.addr,
+            label = title,
+            imagePath = avatarPath,
+            imageEpoch = state.avatarEpoch,
+        )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

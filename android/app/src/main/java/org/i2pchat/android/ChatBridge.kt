@@ -251,6 +251,8 @@ data class ChatUiState(
     val topologyJson: String = "",
     val inviteToken: String = "",
     val nativeLoaded: Boolean = true,
+    /** Bumped when an avatar preview file changes so Compose reloads it. */
+    val avatarEpoch: Long = 0,
 ) {
     val conversations: List<ContactUi>
         get() = (groups + contacts).sortedByDescending { it.lastActivityTs }
@@ -1358,6 +1360,11 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 // the staged copy in cacheDir must not outlive the operation.
                 dest.delete()
             }
+            if (result.optBoolean("ok") && op == "importProfile") {
+                val peers = _state.value.contacts.map { it.addr }
+                AvatarStore.markNeedRequestAll(appRoot, _state.value.profile, peers)
+                onMain { bumpAvatarEpoch() }
+            }
             _state.update {
                 it.copy(
                     error = if (result.optBoolean("ok")) "" else result.optString("error"),
@@ -1680,6 +1687,101 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             }
         }
         _state.update { it.copy(peerStates = it.peerStates + (addr to state)) }
+        if (state == "secure") {
+            viewModelScope.launch(Dispatchers.IO) { syncAvatarsAfterSecure(addr) }
+        }
+    }
+
+    fun ownAvatarPath(): String? {
+        val profile = _state.value.profile
+        if (profile.isBlank()) return null
+        val file = AvatarStore.ownPreview(appRoot, profile)
+        return file.takeIf { it.isFile }?.absolutePath
+    }
+
+    fun peerAvatarPath(peer: String): String? {
+        val profile = _state.value.profile
+        if (profile.isBlank() || peer.isBlank()) return null
+        val file = AvatarStore.peerPreview(appRoot, profile, peer) ?: return null
+        return file.takeIf { it.isFile }?.absolutePath
+    }
+
+    fun setOwnAvatarFromUri(uri: Uri, onDone: (Boolean) -> Unit = {}) {
+        val profile = _state.value.profile
+        if (profile.isBlank()) {
+            onDone(false)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                val bytes = getApplication<Application>().contentResolver
+                    .openInputStream(uri)?.use { it.readBytes() }
+                    ?: return@runCatching false
+                AvatarStore.setOwnAvatar(appRoot, profile, bytes)
+                true
+            }.getOrDefault(false)
+            onMain {
+                if (ok) {
+                    _state.update { it.copy(avatarEpoch = it.avatarEpoch + 1) }
+                    val peer = _state.value.selectedId
+                    if (peer.isNotBlank() && !_state.value.selectedIsGroup) {
+                        viewModelScope.launch(Dispatchers.IO) { pushOwnAvatarIfNeeded(peer, force = true) }
+                    }
+                }
+                onDone(ok)
+            }
+        }
+    }
+
+    private fun bumpAvatarEpoch() {
+        _state.update { it.copy(avatarEpoch = it.avatarEpoch + 1) }
+    }
+
+    private fun syncAvatarsAfterSecure(peer: String) {
+        val profile = _state.value.profile
+        if (profile.isBlank() || peer.isBlank()) return
+        pushOwnAvatarIfNeeded(peer)
+        if (AvatarStore.needsRequest(appRoot, profile, peer)) {
+            runCatching {
+                NativeEngine.nativeSendSignal(peer, "AVATAR_REQUEST")
+            }
+        }
+    }
+
+    private fun pushOwnAvatarIfNeeded(peer: String, force: Boolean = false) {
+        val profile = _state.value.profile
+        if (profile.isBlank() || peer.isBlank()) return
+        if (!force && !AvatarStore.needsOwnPush(appRoot, profile, peer)) return
+        val own = AvatarStore.ownPreview(appRoot, profile)
+        if (!own.isFile) return
+        val wire = File(stagingDir().apply { mkdirs() }, AvatarStore.WIRE_FILENAME)
+        try {
+            own.copyTo(wire, overwrite = true)
+            val ok = runCatching {
+                NativeEngine.nativeSendFile(peer, wire.absolutePath, false)
+            }.getOrDefault(false)
+            if (ok) {
+                AvatarStore.markDelivered(appRoot, profile, peer)
+            }
+        } finally {
+            wire.delete()
+        }
+    }
+
+    private fun ingestAvatarFile(peer: String, path: String): Boolean {
+        val profile = _state.value.profile
+        if (profile.isBlank() || !AvatarStore.isWireFilename(path)) return false
+        val src = File(path)
+        if (!src.isFile) return false
+        return try {
+            val bytes = src.readBytes()
+            AvatarStore.setPeerAvatar(appRoot, profile, peer, bytes)
+            src.delete()
+            onMain { bumpAvatarEpoch() }
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun appendNotice(code: String, level: String, arg: String = "", text: String = "") {
@@ -1782,20 +1884,30 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onTransfer(peer: String, json: String) = onMain { }
 
-    override fun onFileReceived(peer: String, path: String) = onMain {
-        val dest = saveAsUri
-        saveAsUri = null
-        if (dest != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                runCatching {
-                    getApplication<Application>().contentResolver.openOutputStream(dest)?.use { out ->
-                        File(path).inputStream().use { input -> input.copyTo(out) }
+    override fun onFileReceived(peer: String, path: String) {
+        if (AvatarStore.isWireFilename(path)) {
+            viewModelScope.launch(Dispatchers.IO) { ingestAvatarFile(peer, path) }
+            return
+        }
+        onMain {
+            val dest = saveAsUri
+            saveAsUri = null
+            if (dest != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        getApplication<Application>().contentResolver.openOutputStream(dest)?.use { out ->
+                            File(path).inputStream().use { input -> input.copyTo(out) }
+                        }
                     }
                 }
             }
+            NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, File(path).name))
+            if (peer == _state.value.selectedId) loadHistory()
         }
-        NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, File(path).name))
-        if (peer == _state.value.selectedId) loadHistory()
+    }
+
+    override fun onAvatarRequest(peer: String) {
+        viewModelScope.launch(Dispatchers.IO) { pushOwnAvatarIfNeeded(peer, force = true) }
     }
 
     override fun onSealedFile(peer: String, id: String, displayName: String, path: String) {
@@ -1975,6 +2087,13 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onFileOffer(peer: String, name: String, size: Long) = onMain {
+        // Avatar pushes are auto-accepted in native; this is a fallback if they defer.
+        if (AvatarStore.isWireFilename(name)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { NativeEngine.nativeFileRespond(peer, true) }
+            }
+            return@onMain
+        }
         // Bytes spool to a .pending file meanwhile; the dialog is the only way to say yes.
         _state.update { it.copy(fileOffer = FileOfferPrompt(peer, name, size)) }
         appendNotice("file.offer", NoticeUi.LEVEL_VERBOSE, peer, "$name (${formatSize(size)})")

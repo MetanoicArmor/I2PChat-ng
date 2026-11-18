@@ -473,6 +473,12 @@ void ChatService::wire_transfers(Peer& peer) {
         }
     };
     callbacks.accept_file = [this, addr](const std::string& name, std::uint64_t size) {
+        // Avatar pushes are silent metadata: auto-accept, no offer UI.
+        const std::filesystem::path offered(name);
+        const std::string base = offered.filename().string();
+        if (base == ".i2pchat-avatar.jpg" || base.rfind(".i2pchat-avatar.", 0) == 0) {
+            return transfer::OfferDecision::Accept;
+        }
         if (events_.offer_file) {
             return events_.offer_file(addr, name, size);
         }
@@ -490,11 +496,16 @@ void ChatService::wire_transfers(Peer& peer) {
     callbacks.on_system = [this](const std::string& message) { emit_system(message); };
     callbacks.on_error = [this](const std::string& message) { emit_error(message); };
     callbacks.on_file_received = [this, addr](const std::filesystem::path& path) {
-        storage::HistoryEntry entry;
-        entry.kind = "in";
-        entry.text = "[file] " + path.string();
-        entry.ts = storage::now_iso8601_utc();
-        append_history(addr, entry);
+        const std::string base = path.filename().string();
+        const bool avatar =
+            base == ".i2pchat-avatar.jpg" || base.rfind(".i2pchat-avatar.", 0) == 0;
+        if (!avatar) {
+            storage::HistoryEntry entry;
+            entry.kind = "in";
+            entry.text = "[file] " + path.string();
+            entry.ts = storage::now_iso8601_utc();
+            append_history(addr, entry);
+        }
         if (events_.on_file_received) {
             events_.on_file_received(addr, path);
         }
@@ -1130,6 +1141,11 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
                 peer->link->close("peer sent QUIT");
             }
             return;
+        case protocol::SignalKind::AvatarRequest:
+            if (events_.on_avatar_request) {
+                events_.on_avatar_request(peer_addr);
+            }
+            return;
         case protocol::SignalKind::BlindBoxRoot: {
             blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
             if (signal.epoch < snapshot.root_epoch) {
@@ -1336,6 +1352,9 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
 
     std::optional<transfer::OutgoingTransfer> outgoing;
     const std::filesystem::path source = path;
+    const std::string source_base = source.filename().string();
+    const bool avatar_wire = source_base == ".i2pchat-avatar.jpg" ||
+                             source_base.rfind(".i2pchat-avatar.", 0) == 0;
     try {
         outgoing.emplace(std::move(path), false);
     } catch (const std::exception& error) {
@@ -1344,17 +1363,20 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     }
 
     const std::uint64_t msg_id = next_msg_id();
-    storage::HistoryEntry entry;
-    entry.kind = "out";
-    entry.text = "[file] " + source.string();
-    entry.ts = storage::now_iso8601_utc();
-    entry.message_id = std::to_string(msg_id);
-    entry.delivery_state = "sent";
-    entry.delivery_route = "live";
-    append_history(peer_addr, entry);
-    sessions_.register_inflight(peer_addr, msg_id);
-    if (events_.on_delivery) {
-        events_.on_delivery(DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+    if (!avatar_wire) {
+        storage::HistoryEntry entry;
+        entry.kind = "out";
+        entry.text = "[file] " + source.string();
+        entry.ts = storage::now_iso8601_utc();
+        entry.message_id = std::to_string(msg_id);
+        entry.delivery_state = "sent";
+        entry.delivery_route = "live";
+        append_history(peer_addr, entry);
+        sessions_.register_inflight(peer_addr, msg_id);
+        if (events_.on_delivery) {
+            events_.on_delivery(
+                DeliveryReport{peer_addr, msg_id, DeliveryState::Sent, "live", "sent"});
+        }
     }
 
     const transfer::Frame header = outgoing->header();
@@ -1449,6 +1471,17 @@ bool ChatService::complete_deferred_trust(std::string_view peer, bool accept) {
         return entry->link->complete_deferred_trust(accept);
     }
     return false;
+}
+
+bool ChatService::send_signal(std::string_view peer, std::string_view signal_payload) {
+    const std::string peer_addr = std::string(sam::normalize_peer_address(peer));
+    Peer* target = find_peer(peer_addr);
+    if (target == nullptr || target->link == nullptr || !target->link->secure() ||
+        target->link->closed()) {
+        return false;
+    }
+    target->link->send_signal(signal_payload, next_msg_id());
+    return true;
 }
 
 bool ChatService::respond_file_offer(std::string_view peer, bool accept) {

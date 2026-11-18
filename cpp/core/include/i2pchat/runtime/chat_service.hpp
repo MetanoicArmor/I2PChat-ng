@@ -188,6 +188,8 @@ struct ChatEvents {
     std::function<void(const std::string& group_id)> on_group_message;
     /// The local address became known, once the SAM session is up.
     std::function<void(const std::string& local_addr)> on_local_address;
+    /// Peer asked us to push our avatar (``.i2pchat-avatar.jpg``).
+    std::function<void(const std::string& peer)> on_avatar_request;
 };
 
 class ChatService {
@@ -238,6 +240,9 @@ public:
     asio::awaitable<bool> send_file(std::string peer, std::filesystem::path path);
     /// Send an image, inline when the peer can display it.
     asio::awaitable<bool> send_image(std::string peer, std::filesystem::path path);
+
+    /// Send an authenticated control signal to a live peer (e.g. AVATAR_REQUEST).
+    bool send_signal(std::string_view peer, std::string_view signal_payload);
 
     /// Answer a file offer that `offer_file` deferred. Returns false when the
     /// peer has no offer waiting any more.

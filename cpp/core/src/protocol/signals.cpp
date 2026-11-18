@@ -192,6 +192,11 @@ Signal parse_signal(std::string_view body) {
         signal.well_formed = true;
         return signal;
     }
+    if (signal.payload.find("AVATAR_REQUEST") != std::string::npos) {
+        signal.kind = SignalKind::AvatarRequest;
+        signal.well_formed = true;
+        return signal;
+    }
     return signal;
 }
 
@@ -216,6 +221,8 @@ std::string build_reject_file(std::string_view filename) {
 }
 
 std::string build_abort_file() { return "ABORT_FILE"; }
+
+std::string build_avatar_request() { return "AVATAR_REQUEST"; }
 
 std::string build_quit() { return "QUIT"; }
 

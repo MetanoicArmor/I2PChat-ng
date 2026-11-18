@@ -1279,7 +1279,13 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        PeerAvatar(seed = id, label = title, size = 36.dp)
+                        PeerAvatar(
+                            seed = id,
+                            label = title,
+                            size = 36.dp,
+                            imagePath = if (group) null else bridge.peerAvatarPath(id),
+                            imageEpoch = state.avatarEpoch,
+                        )
                         Column(Modifier.padding(start = 10.dp)) {
                             Text(title, maxLines = 1)
                             if (!group) {
@@ -1514,6 +1520,16 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     val context = LocalContext.current
     var maxMessages by remember { mutableStateOf(state.uiPrefs.historyMaxMessages.toString()) }
     var days by remember { mutableStateOf(state.uiPrefs.historyRetentionDays.toString()) }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        bridge.setOwnAvatarFromUri(uri) { ok ->
+            Toast.makeText(
+                context,
+                context.getString(if (ok) R.string.avatar_saved else R.string.avatar_failed),
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(title = { Text(stringResource(R.string.tab_settings)) })
@@ -1533,12 +1549,28 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(stringResource(R.string.your_address), fontWeight = FontWeight.SemiBold)
-                        Text(state.localAddr.ifBlank { stringResource(R.string.waiting_for_address) })
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PeerAvatar(
+                                seed = state.localAddr.ifBlank { state.profile },
+                                label = state.profile.ifBlank { stringResource(R.string.app_name) },
+                                size = 56.dp,
+                                imagePath = bridge.ownAvatarPath(),
+                                imageEpoch = state.avatarEpoch,
+                                onClick = { avatarPicker.launch("image/*") },
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(stringResource(R.string.your_address), fontWeight = FontWeight.SemiBold)
+                                Text(state.localAddr.ifBlank { stringResource(R.string.waiting_for_address) })
+                            }
+                        }
                         TextButton(onClick = {
                             val clipboard = context.getSystemService(ClipboardManager::class.java)
                             clipboard.setPrimaryClip(ClipData.newPlainText("i2p", state.localAddr))
                         }) { Text(stringResource(R.string.copy_address)) }
+                        TextButton(onClick = { avatarPicker.launch("image/*") }) {
+                            Text(stringResource(R.string.set_avatar))
+                        }
                     }
                 }
                 Spacer(Modifier.height(16.dp))

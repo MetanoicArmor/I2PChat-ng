@@ -146,6 +146,9 @@
     <string name="your_address">Your address</string>
     <string name="waiting_for_address">Waiting for the router…</string>
     <string name="copy_address">Copy address</string>
+    <string name="set_avatar">Set my avatar</string>
+    <string name="avatar_saved">Avatar saved</string>
+    <string name="avatar_failed">Could not save avatar</string>
     <string name="i2p_router">I2P router</string>
     <string name="blindbox">BlindBox</string>
     <string name="backup_restore">Backup / restore</string>

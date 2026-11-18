@@ -43,6 +43,8 @@ enum class SignalKind {
     GroupBlindBoxRoot,
     /// `GROUP_BLINDBOX_ROOT_ACK|<group_id>|<group_epoch>|<root_epoch>`.
     GroupBlindBoxRootAck,
+    /// Peer asks us to (re)send our avatar file: `AVATAR_REQUEST`.
+    AvatarRequest,
 };
 
 struct Signal {
@@ -89,6 +91,7 @@ struct Signal {
                                           std::uint64_t message_id);
 [[nodiscard]] std::string build_reject_file(std::string_view filename);
 [[nodiscard]] std::string build_abort_file();
+[[nodiscard]] std::string build_avatar_request();
 [[nodiscard]] std::string build_quit();
 [[nodiscard]] std::string build_blindbox_root(std::uint64_t epoch, ByteView root_secret);
 [[nodiscard]] std::string build_blindbox_root_ack(std::uint64_t epoch);

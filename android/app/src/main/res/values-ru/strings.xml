@@ -135,6 +135,9 @@
     <string name="your_address">Ваш адрес</string>
     <string name="waiting_for_address">Ожидание роутера…</string>
     <string name="copy_address">Скопировать адрес</string>
+    <string name="set_avatar">Установить аватар</string>
+    <string name="avatar_saved">Аватар сохранён</string>
+    <string name="avatar_failed">Не удалось сохранить аватар</string>
     <string name="i2p_router">Роутер I2P</string>
     <string name="blindbox">BlindBox</string>
     <string name="backup_restore">Резервная копия</string>

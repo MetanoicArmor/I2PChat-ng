@@ -5431,6 +5431,73 @@ def _sidebar_row_preview_one_line(text: str) -> str:
     return " ".join(s.replace("\r\n", "\n").replace("\r", "\n").split())
 
 
+def _circular_avatar_pixmap(data: bytes, size: int = 36) -> Optional[QtGui.QPixmap]:
+    """Decode image bytes into a circular QPixmap, or None on failure."""
+    if not data:
+        return None
+    image = QtGui.QImage.fromData(data)
+    if image.isNull():
+        return None
+    scaled = image.scaled(
+        size,
+        size,
+        QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        QtCore.Qt.TransformationMode.SmoothTransformation,
+    )
+    if scaled.width() > size or scaled.height() > size:
+        x = max(0, (scaled.width() - size) // 2)
+        y = max(0, (scaled.height() - size) // 2)
+        scaled = scaled.copy(x, y, size, size)
+    out = QtGui.QPixmap(size, size)
+    out.fill(QtCore.Qt.GlobalColor.transparent)
+    painter = QtGui.QPainter(out)
+    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+    path = QtGui.QPainterPath()
+    path.addEllipse(0, 0, size, size)
+    painter.setClipPath(path)
+    painter.drawImage(0, 0, scaled)
+    painter.end()
+    return out
+
+
+def _letter_avatar_pixmap(label: str, seed: str, size: int = 36) -> QtGui.QPixmap:
+    """Fallback coloured circle with the first letter of ``label``."""
+    palette = (
+        "#3D7AD6",
+        "#2E9B68",
+        "#E0A83A",
+        "#D15A5A",
+        "#8E62D6",
+        "#2A9D96",
+        "#E07A45",
+        "#5C86E0",
+    )
+    h = 0
+    for ch in seed or label or "?":
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    color = QtGui.QColor(palette[h % len(palette)])
+    out = QtGui.QPixmap(size, size)
+    out.fill(QtCore.Qt.GlobalColor.transparent)
+    painter = QtGui.QPainter(out)
+    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+    painter.setBrush(color)
+    painter.setPen(QtCore.Qt.PenStyle.NoPen)
+    painter.drawEllipse(0, 0, size, size)
+    letter = (label.strip()[:1] or "?").upper()
+    painter.setPen(QtGui.QColor("#FFFFFF"))
+    font = painter.font()
+    font.setBold(True)
+    font.setPixelSize(max(10, size // 2))
+    painter.setFont(font)
+    painter.drawText(
+        QtCore.QRect(0, 0, size, size),
+        int(QtCore.Qt.AlignmentFlag.AlignCenter),
+        letter,
+    )
+    painter.end()
+    return out
+
+
 class ContactRowWidget(QtWidgets.QWidget):
     """Строка контакта в боковом списке (две строки: имя / превью)."""
 
@@ -5445,10 +5512,19 @@ class ContactRowWidget(QtWidgets.QWidget):
         self._base_sub = _sidebar_row_preview_one_line(
             (record.last_preview or record.note or "").strip()
         )
-        layout = QtWidgets.QVBoxLayout(self)
+        self._avatar_size = 36
+        root = QtWidgets.QHBoxLayout(self)
         # Боковые поля + отступ элемента списка в QSS: иначе край viewport обрезает глифы.
-        layout.setContentsMargins(16, 6, 16, 6)
-        layout.setSpacing(2)
+        root.setContentsMargins(16, 6, 16, 6)
+        root.setSpacing(10)
+        self._avatar = QtWidgets.QLabel(self)
+        self._avatar.setObjectName("ContactRowAvatar")
+        self._avatar.setFixedSize(self._avatar_size, self._avatar_size)
+        self._avatar.setScaledContents(False)
+        root.addWidget(self._avatar, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
         self._full_title = record.display_name.strip() or _contact_row_address_title(
             record.addr
         )
@@ -5477,16 +5553,21 @@ class ContactRowWidget(QtWidgets.QWidget):
         title_row.setSpacing(4)
         title_row.addWidget(self._link_dot, 0)
         title_row.addWidget(self._title, 1)
-        layout.addLayout(title_row)
-        layout.addWidget(self._subtitle)
+        text_col.addLayout(title_row)
+        text_col.addWidget(self._subtitle)
+        root.addLayout(text_col, 1)
+        self.set_avatar_bytes(None)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         # Одна фиксированная высота строки: иначе QListWidget и элипсис при узкой панели дают «прыгающие» строки.
         _th = self._title.fontMetrics().height()
         _sh = self._subtitle.fontMetrics().height()
         self._title.setFixedHeight(_th)
         self._subtitle.setFixedHeight(_sh)
-        _m = layout.contentsMargins()
-        self._row_fixed_height = _m.top() + _th + layout.spacing() + _sh + _m.bottom()
+        _m = root.contentsMargins()
+        text_h = _th + text_col.spacing() + _sh
+        self._row_fixed_height = max(
+            self._avatar_size, text_h
+        ) + _m.top() + _m.bottom()
         self._sidebar_row_h_margin = _m.left()
         self.setFixedHeight(self._row_fixed_height)
         self.setSizePolicy(
@@ -5531,8 +5612,9 @@ class ContactRowWidget(QtWidgets.QWidget):
         if self.width() < 48:
             return
         hm = getattr(self, "_sidebar_row_h_margin", 10)
+        avatar_w = getattr(self, "_avatar_size", 0) + 10
         # −1: запас от субпиксельного клиппинга QLabel по горизонтали.
-        w = max(1, self.width() - 2 * hm - 1)
+        w = max(1, self.width() - 2 * hm - avatar_w - 1)
         title_w = w - (16 if self._link_dot.isVisible() else 0)
         fm = self._title.fontMetrics()
         self._title.setText(
@@ -5561,6 +5643,14 @@ class ContactRowWidget(QtWidgets.QWidget):
         self._sync_row_tooltip()
         self.updateGeometry()
         self._apply_elide()
+
+    def set_avatar_bytes(self, data: Optional[bytes]) -> None:
+        """Show a circular peer avatar, or a letter fallback when ``data`` is empty."""
+        pix = _circular_avatar_pixmap(data or b"", self._avatar_size)
+        if pix is None:
+            label = self._display_name or self._full_title or self._addr
+            pix = _letter_avatar_pixmap(label, self._addr or label, self._avatar_size)
+        self._avatar.setPixmap(pix)
 
     def set_status_badges(self, *, pinned: bool, locked: bool) -> None:
         bits: list[str] = []
@@ -8153,6 +8243,12 @@ class ChatWindow(QtWidgets.QMainWindow):
                         row.set_link_state(self.core.peer_link_state(rec.addr))
                     except Exception:
                         pass
+                    try:
+                        row.set_avatar_bytes(
+                            self.core.get_peer_avatar_bytes(rec.addr)
+                        )
+                    except Exception:
+                        row.set_avatar_bytes(None)
                 row.activate.connect(self._on_contact_row_activated)
                 lst.addItem(item)
                 lst.setItemWidget(item, row)
@@ -11191,6 +11287,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             "on_outbound_delivery_update",
             self.handle_outbound_delivery_update,
         )
+        core.on_avatar_updated = self._on_avatar_updated
         core.on_profile_password = self._ask_profile_password
         return core
 
@@ -13114,6 +13211,15 @@ class ChatWindow(QtWidgets.QMainWindow):
                 asyncio.create_task(self.core.push_own_avatar_if_needed(peer))
             except Exception:
                 pass
+        self._refresh_contacts_sidebar_list()
+
+    def _on_avatar_updated(self, peer_addr: str) -> None:
+        """Peer avatar arrived over the wire — refresh the sidebar image."""
+        del peer_addr
+        try:
+            self._refresh_contacts_sidebar_list()
+        except Exception:
+            pass
 
     def _export_profile_backup(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(

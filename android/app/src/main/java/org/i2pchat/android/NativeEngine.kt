@@ -48,6 +48,8 @@ object NativeEngine {
          * nothing is named, acknowledged or shown before that.
          */
         fun onFileOffer(peer: String, name: String, size: Long)
+        /** Peer asked us to (re)send our avatar over the live channel. */
+        fun onAvatarRequest(peer: String)
         fun onStarted()
         fun onStartFailed(message: String)
     }
@@ -94,6 +96,8 @@ object NativeEngine {
     /** BlindBox immediately, without the reconnect wait. */
     @JvmStatic external fun nativeSendOfflineText(peer: String, text: String): String
     @JvmStatic external fun nativeSendFile(peer: String, path: String, image: Boolean): Boolean
+    /** Authenticated `__SIGNAL__:` payload to a live peer (e.g. `AVATAR_REQUEST`). */
+    @JvmStatic external fun nativeSendSignal(peer: String, signal: String): Boolean
     @JvmStatic external fun nativePollBlindbox(): Int
     @JvmStatic external fun nativeSnapshot(): String
     @JvmStatic external fun nativeHistory(peer: String): String

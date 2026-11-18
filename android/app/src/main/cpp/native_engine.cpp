@@ -745,6 +745,9 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         events.on_file_received = [](const std::string& peer, const fs::path& path) {
             g_engine.emit_2string("onFileReceived", peer, path.string());
         };
+        events.on_avatar_request = [](const std::string& peer) {
+            g_engine.emit_string("onAvatarRequest", peer);
+        };
         events.on_sealed_file = [](const std::string& peer, const std::string& id,
                                    const std::string& display_name, const fs::path& path) {
             g_engine.emit_4string("onSealedFile", peer, id, display_name, path.string());
@@ -1065,6 +1068,24 @@ Java_org_i2pchat_android_NativeEngine_nativeSendFile(JNIEnv* env, jclass, jstrin
                 co_return co_await g_engine.service->send_image(peer, path);
             }
             co_return co_await g_engine.service->send_file(peer, path);
+        });
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSendSignal(JNIEnv* env, jclass, jstring j_peer,
+                                                       jstring j_signal) {
+    if (!g_engine.service) {
+        return JNI_FALSE;
+    }
+    const std::string peer = jstring_to_utf8(env, j_peer);
+    const std::string signal = jstring_to_utf8(env, j_signal);
+    try {
+        const bool ok = g_engine.on_core<bool>([peer, signal] {
+            return g_engine.service->send_signal(peer, signal);
         });
         return ok ? JNI_TRUE : JNI_FALSE;
     } catch (...) {
