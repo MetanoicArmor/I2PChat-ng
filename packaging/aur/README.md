@@ -15,7 +15,12 @@
 
 1. Зарегистрируйтесь на [aur.archlinux.org](https://aur.archlinux.org/).
 2. Добавьте в профиль AUR **SSH public key** (Account → SSH Keys). Проверка: `ssh -T aur@aur.archlinux.org` → **Welcome to AUR, …**
-3. **Первый раз — зарегистрировать имена пакетов.** Пока пакета нет в AUR, `git clone ssh://aur@aur.archlinux.org/<name>.git` не сработает. Откройте [Submit](https://aur.archlinux.org/submit/) и создайте каждый новый пакет, подставив `PKGBUILD` и `.SRCINFO` из соответствующего каталога здесь. Уже существующие **`i2pchat-bin`** / **`i2pchat-tui-bin`** достаточно обновлять через скрипт.
+3. **Первый раз для нового имени** веб-формы Submit больше нет. Пустой репозиторий AUR создаётся клоном:
+   ```bash
+   git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/i2pchat-ng-git.git
+   git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/i2pchat-ng-tui-git.git
+   ```
+   Ожидается предупреждение *empty repository*. Дальше достаточно `./packaging/aur/publish-to-aur.sh` (он сам клонирует, копирует `PKGBUILD`/`.SRCINFO` и пушит). Уже существующие **`i2pchat-bin`** / **`i2pchat-tui-bin`** обновляются тем же скриптом.
 4. Автор git-коммитов (иначе `publish-to-aur.sh` остановится):
    ```bash
    git config user.email "you@example.com"

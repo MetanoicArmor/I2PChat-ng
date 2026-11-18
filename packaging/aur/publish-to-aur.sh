@@ -68,11 +68,12 @@ for pkg in "${PACKAGES[@]}"; do
       rm -f "${clone_err}"
       exit 2
     fi
-    if grep -qiE 'not found|does not appear|Repository not found|404' "${clone_err}"; then
+    if grep -qiE 'not found|does not appear|Repository not found|404|Permission denied' "${clone_err}"; then
       echo "" >&2
-      echo "WARN: репозиторий AUR «${pkg}» ещё не создан." >&2
-      echo "  Один раз зарегистрируйте имя на https://aur.archlinux.org/submit/" >&2
-      echo "  (вставьте PKGBUILD/.SRCINFO из packaging/aur/${pkg}/), затем снова запустите этот скрипт." >&2
+      echo "WARN: не удалось клонировать «${pkg}» (см. вывод выше)." >&2
+      echo "  Новые имена создаются так (нужен ssh-add ключа AUR):" >&2
+      echo "    git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/${pkg}.git" >&2
+      echo "  Затем снова: ./packaging/aur/publish-to-aur.sh" >&2
       rm -f "${clone_err}"
       FAILED=1
       continue
