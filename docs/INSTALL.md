@@ -48,11 +48,13 @@ If **`winget show`** does not list the latest version yet, the catalog may still
 <img src="icons/icons8-arch-linux-48.png" alt="Arch Linux" width="28" height="28" align="middle" /> **Arch Linux (AUR):** with an AUR helper such as **yay** or **paru**:
 
 ```bash
-yay -S i2pchat-bin      # GUI: official AppImage → /opt/i2pchat, command i2pchat
-yay -S i2pchat-tui-bin  # TUI-only: slim Linux zip → /opt/i2pchat-tui, command i2pchat-tui
+yay -S i2pchat-bin         # GUI: official AppImage → /opt/i2pchat, command i2pchat
+yay -S i2pchat-tui-bin     # TUI-only: slim Linux zip → /opt/i2pchat-tui, command i2pchat-tui
+yay -S i2pchat-ng-git      # GUI from git (python branch)
+yay -S i2pchat-ng-tui-git  # TUI from git (python branch)
 ```
 
-Package pages: [i2pchat-bin](https://aur.archlinux.org/packages/i2pchat-bin), [i2pchat-tui-bin](https://aur.archlinux.org/packages/i2pchat-tui-bin). Maintainer sources: [`packaging/aur/`](../packaging/aur/).
+Package pages: [i2pchat-bin](https://aur.archlinux.org/packages/i2pchat-bin), [i2pchat-tui-bin](https://aur.archlinux.org/packages/i2pchat-tui-bin), [i2pchat-ng-git](https://aur.archlinux.org/packages/i2pchat-ng-git), [i2pchat-ng-tui-git](https://aur.archlinux.org/packages/i2pchat-ng-tui-git). Maintainer sources: [`packaging/aur/`](../packaging/aur/). **Not** [`i2pchat-git`](https://aur.archlinux.org/packages/i2pchat-git) (different upstream).
 
 <img src="icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Optional `.deb` (Debian/Ubuntu):** some releases include **`i2pchat_<version>_amd64.deb`** / **`i2pchat-tui_<version>_amd64.deb`** and **`i2pchat_<version>_arm64.deb`** / **`i2pchat-tui_<version>_arm64.deb`**. Install with `sudo apt install ./i2pchat_*_<arch>.deb` (or download from the browser). If missing, use the Linux zips or build locally — [`packaging/debian/README.md`](../packaging/debian/README.md).
 

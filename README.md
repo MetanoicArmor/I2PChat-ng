@@ -532,11 +532,13 @@ brew install --cask metanoicarmor/i2pchat/i2pchat-tui   # TUI only
 <img src="docs/icons/icons8-arch-linux-48.png" alt="Arch Linux" width="28" height="28" align="middle" /> **Arch Linux — [AUR](https://aur.archlinux.org/)** (x86_64 and aarch64; example [yay](https://github.com/Jguer/yay))
 
 ```bash
-yay -S i2pchat-bin       # GUI — AppImage from release
-yay -S i2pchat-tui-bin   # TUI only
+yay -S i2pchat-bin         # GUI — AppImage from release
+yay -S i2pchat-tui-bin     # TUI only
+yay -S i2pchat-ng-git      # GUI from git (python branch)
+yay -S i2pchat-ng-tui-git  # TUI from git (python branch)
 ```
 
-> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) (`yay -S i2pchat-git`) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). It may still install and run as *that* app, but it is **not** **MetanoicArmor/I2PChat-ng** (Python / PyQt6 / Textual TUI). For this project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or clone this repo and run **`python -m i2pchat.gui`** / **`python -m i2pchat.tui`**.
+> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) (`yay -S i2pchat-git`) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). It is **not** **MetanoicArmor/I2PChat**. For this project use the packages above, or clone this repo and run **`python -m i2pchat.gui`** / **`python -m i2pchat.tui`**.
 
 <img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases)** (works without any mirror):
 

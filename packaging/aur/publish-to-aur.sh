@@ -6,26 +6,52 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MONOREPO="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKDIR="${TMPDIR:-/tmp}/aur-i2pchat-publish-$$"
-export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o IdentitiesOnly=yes -i ${HOME}/.ssh/aur_ed25519}"
+AUR_KEY="${AUR_SSH_KEY:-${HOME}/.ssh/aur_ed25519}"
+# Prefer ~/.ssh/config Host aur.archlinux.org; fall back to explicit key.
+# BatchMode avoids N passphrase prompts that end in a misleading publickey error.
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ${AUR_KEY}}"
 
-PACKAGES=(i2pchat-bin i2pchat-tui-bin)
+PACKAGES=(i2pchat-bin i2pchat-tui-bin i2pchat-ng-git i2pchat-ng-tui-git)
 
 echo "==> Monorepo: ${MONOREPO}"
 echo "==> Workdir:  ${WORKDIR}"
 echo "==> SSH:      ${GIT_SSH_COMMAND}"
 echo ""
-if [ -z "${SSH_AUTH_SOCK:-}" ]; then
-  echo "Подсказка: нет ssh-agent → ssh-add не сработает; passphrase спросят при каждом git/ssh."
-  echo "  eval \"\$(ssh-agent -s)\""
-  echo "  ssh-add ~/.ssh/aur_ed25519"
-  echo "  (Fish: см. packaging/aur/README.md — eval \"\$(ssh-agent -s)\" в fish не задаёт агент; удобно bash -lc '…'.)"
-  echo ""
-fi
-echo "Если «Permission denied (publickey)», добавьте ключ: ssh-add ~/.ssh/aur_ed25519"
-echo ""
 
 cleanup() { rm -rf "${WORKDIR}"; }
 trap cleanup EXIT
+
+if [ ! -f "${AUR_KEY}" ]; then
+  echo "ERROR: нет ключа ${AUR_KEY}" >&2
+  exit 1
+fi
+
+if [ -z "${SSH_AUTH_SOCK:-}" ] || ! ssh-add -l >/dev/null 2>&1; then
+  echo "ERROR: ключ AUR не загружен в ssh-agent (иначе каждый git спросит passphrase и push часто падает с Permission denied)." >&2
+  echo "  В этом же терминале (zsh/bash):" >&2
+  echo "    eval \"\$(ssh-agent -s)\"" >&2
+  echo "    ssh-add ${AUR_KEY}" >&2
+  echo "    ssh -T aur@aur.archlinux.org   # должно быть: Welcome to AUR, <nick>" >&2
+  echo "    ./packaging/aur/publish-to-aur.sh" >&2
+  exit 1
+fi
+
+if ! ssh-add -l 2>/dev/null | grep -q -- "$(ssh-keygen -lf "${AUR_KEY}" | awk '{print $2}')"; then
+  echo "ERROR: в агенте нет ${AUR_KEY}. Добавьте: ssh-add ${AUR_KEY}" >&2
+  ssh-add -l >&2 || true
+  exit 1
+fi
+
+echo "==> Preflight: ssh -T aur@aur.archlinux.org"
+greet="$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "${AUR_KEY}" -T aur@aur.archlinux.org 2>&1 || true)"
+if ! grep -qi 'Welcome to AUR' <<<"${greet}"; then
+  echo "${greet}" >&2
+  echo "ERROR: SSH к AUR не прошёл. Проверьте, что публичный ключ добавлен в https://aur.archlinux.org/account/ → SSH Keys:" >&2
+  echo "  $(cat "${AUR_KEY}.pub" 2>/dev/null || true)" >&2
+  exit 1
+fi
+echo "    ${greet}"
+echo ""
 
 mkdir -p "${WORKDIR}"
 

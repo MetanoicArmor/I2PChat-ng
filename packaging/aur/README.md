@@ -1,15 +1,19 @@
-# AUR: i2pchat-bin / i2pchat-tui-bin
+# AUR: i2pchat-bin / i2pchat-tui-bin / i2pchat-ng-git / i2pchat-ng-tui-git
 
-В AUR есть пакет **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat** используйте **`i2pchat-bin`** и **`i2pchat-tui-bin`** ниже (или сборку из исходников).
+В AUR есть пакет **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat** (ветка **`python`**) используйте пакеты ниже.
 
-- [`i2pchat-bin/`](i2pchat-bin/) — GUI: официальный **AppImage**. В одном PKGBUILD два контура: **`source_x86_64`** (`I2PChat-linux-x86_64-v*.zip`) и **`source_aarch64`** (`I2PChat-linux-aarch64-v*.zip`). На **ARM64** (Raspberry Pi, Asahi и т.д.) `makepkg`/`yay` берут aarch64-архив с GitHub Releases — **отдельного пакета на AUR не нужно**.
-- [`i2pchat-tui-bin/`](i2pchat-tui-bin/) — только TUI: **`I2PChat-linux-*-tui-v*.zip`** (x86_64 и aarch64), установка в `/opt/i2pchat-tui`, команда **`i2pchat-tui`**.
+- [`i2pchat-bin/`](i2pchat-bin/) — GUI: официальный **AppImage**. В одном PKGBUILD два контура: **`source_x86_64`** и **`source_aarch64`**.
+- [`i2pchat-tui-bin/`](i2pchat-tui-bin/) — только TUI: **`I2PChat-linux-*-tui-v*.zip`**, установка в `/opt/i2pchat-tui`, команда **`i2pchat-tui`**.
+- [`i2pchat-ng-git/`](i2pchat-ng-git/) — GUI из git (`python` branch), wheel через `python -m build`.
+- [`i2pchat-ng-tui-git/`](i2pchat-ng-tui-git/) — TUI из git (`python` branch); GUI entrypoint из пакета удаляется.
+
+Суффикс **`-ng`** нужен, потому что имя **`i2pchat-git`** уже занято чужим пакетом.
 
 ## Публикация на AUR
 
 1. Зарегистрируйтесь на [aur.archlinux.org](https://aur.archlinux.org/).
 2. Добавьте в профиль AUR **SSH public key** (Account → SSH Keys). Проверка: `ssh -T aur@aur.archlinux.org` → приветствие **Welcome to AUR, …**
-3. **Первый раз — зарегистрировать имена пакетов на сайте.** Пока пакета с таким именем нет в AUR, `git clone ssh://aur@aur.archlinux.org/i2pchat-bin.git` **не сработает**. Откройте [Submit (добавить пакет)](https://aur.archlinux.org/submit/) и создайте **`i2pchat-bin`**, затем снова **`i2pchat-tui-bin`**, подставив `PKGBUILD` и `.SRCINFO` из каталогов [`i2pchat-bin/`](i2pchat-bin/) и [`i2pchat-tui-bin/`](i2pchat-tui-bin/) этого репозитория (или минимальный черновик — см. [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)). После этого появятся пустые Git-репозитории на сервере AUR.
+3. **Первый раз** для нового имени: `git clone ssh://aur@aur.archlinux.org/<pkg>.git` на пустой репозиторий (пакет уже должен существовать на AUR, иначе clone не сработает). При необходимости создайте пакет через [Submit](https://aur.archlinux.org/submit/) или пустой clone после регистрации имени.
 4. **Один раз задайте автора git-коммитов** (в корне I2PChat или глобально), иначе `publish-to-aur.sh` остановится на `git commit`:
    ```bash
    git config user.email "you@example.com"
@@ -17,34 +21,30 @@
    ```
    Либо только для скрипта: `export AUR_GIT_EMAIL=… AUR_GIT_NAME=…`.
 
-5. **Дальнейшие обновления** — из корня клона I2PChat. Удобно поднять агент, чтобы не вводить passphrase дважды:
+5. **Дальнейшие обновления** — из корня клона I2PChat:
    ```bash
    eval "$(ssh-agent -s)"
    ssh-add ~/.ssh/aur_ed25519
    ./packaging/aur/publish-to-aur.sh
    ```
-   Скрипт клонирует оба репозитория во временный каталог, копирует актуальные `PKGBUILD` и `.SRCINFO`, делает `commit` при изменениях и `git push` в ветку **`master`**.
 
-   **Fish:** строка `eval "$(ssh-agent -s)"` — это синтаксис **bash/zsh**; в fish она не задаёт `SSH_AUTH_SOCK`, и `ssh-add` пишет *No such file or directory*. Варианты:
-   - один раз запустить публикацию из bash:  
-     `bash -lc 'eval "$(ssh-agent -s)"; ssh-add ~/.ssh/aur_ed25519; cd ~/GitHub/I2PChat && ./packaging/aur/publish-to-aur.sh'`
-   - или поднять агент по-рыбьи (например пакет **`openssh`** + **`fish_ssh_agent`** из contrib, либо уже запущенный агент из DE), затем **`ssh-add ~/.ssh/aur_ed25519`** и снова **`./packaging/aur/publish-to-aur.sh`**.
-
-Если по SSH с текущей машины зайти нельзя, используйте другой хост с настроенным ключом или только веб-интерфейс Submit, затем правки через `git` там, где `ssh aur@aur.archlinux.org` работает.
+   **Fish:** `eval "$(ssh-agent -s)"` — синтаксис **bash/zsh**. Удобно:
+   `bash -lc 'eval "$(ssh-agent -s)"; ssh-add ~/.ssh/aur_ed25519; cd ~/GitHub/I2PChat && ./packaging/aur/publish-to-aur.sh'`
 
 После изменения `PKGBUILD` пересоберите метаданные:
 
 ```bash
-cd i2pchat-bin
+cd packaging/aur/i2pchat-bin
 makepkg --printsrcinfo > .SRCINFO
 ```
 
 ## Bump версии
 
-0. Актуальные хеши с GitHub Releases: **`./packaging/refresh-checksums.sh vX.Y.Z`** — подставьте две строки для Linux zip в соответствующие `PKGBUILD` (и `pkgrel+1`, если `pkgver` не менялся, а zip перезалили).
+0. Актуальные хеши с GitHub Releases: **`./packaging/refresh-checksums.sh vX.Y.Z`**.
 
-1. Обновите `pkgver` (и при необходимости `pkgrel`) в `PKGBUILD`.
-2. Обновите `sha256sums` для zip и `icon.png` (иконка должна существовать в теге `v$pkgver`).
+1. Обновите `pkgver` (и при необходимости `pkgrel`) в `-bin` PKGBUILD.
+2. Обновите `sha256sums` для zip и `icon.png`.
 3. Выполните `makepkg --printsrcinfo > .SRCINFO`, проверьте `makepkg -f` / `namcap`.
+4. Для `-git` обычно достаточно `publish-to-aur.sh` — `pkgver()` пересчитается на стороне сборщика.
 
 Скрипт [`../refresh-checksums.sh`](../refresh-checksums.sh) печатает контрольные суммы zip-файлов релиза.
