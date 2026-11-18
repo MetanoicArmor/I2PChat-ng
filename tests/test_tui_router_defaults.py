@@ -684,12 +684,14 @@ def test_tui_apply_settings_ui_updates_flags_and_persists(
     app._history_entries = []
     app._history_dirty = False
     app._history_enabled = False
+    app._history_loaded_for_peer = None
     calls: list[tuple[str, object]] = []
     app._save_history_enabled = lambda value: calls.append(("history_enabled", value))  # type: ignore[method-assign]
     app._save_history_max_messages = lambda value: calls.append(("history_max", value))  # type: ignore[method-assign]
     app._save_history_retention_days = lambda value: calls.append(("history_days", value))  # type: ignore[method-assign]
     app._save_history_if_needed = lambda: calls.append(("saved", True))  # type: ignore[method-assign]
     app._try_load_history = lambda force=False: calls.append(("load", force))  # type: ignore[method-assign]
+    app._effective_history_max_age_days = lambda peer=None: 7  # type: ignore[method-assign]
 
     I2PChat._apply_settings_ui(
         app,

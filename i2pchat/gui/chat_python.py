@@ -2156,7 +2156,7 @@ class I2PChat(App):
             self._history_entries,
             max_messages=max_messages,
             max_age_days=self._effective_history_max_age_days(
-                self._history_loaded_for_peer
+                getattr(self, "_history_loaded_for_peer", None)
             ),
         )
         self._history_entries = list(retained)
