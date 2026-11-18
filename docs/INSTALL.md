@@ -50,11 +50,13 @@ Intel: same pattern with **`macOS-x64`** assets.
 <img src="icons/icons8-arch-linux-48.png" alt="Arch Linux" width="28" height="28" align="middle" /> **Arch Linux (AUR):** with an AUR helper such as **yay** or **paru**:
 
 ```bash
-yay -S i2pchat-bin      # GUI: official AppImage → /opt/i2pchat, command i2pchat
-yay -S i2pchat-tui-bin  # TUI-only: slim Linux zip → /opt/i2pchat-tui, command i2pchat-tui
+yay -S i2pchat-bin         # GUI: official AppImage → command i2pchat
+yay -S i2pchat-tui-bin     # TUI: release zip → command i2pchat-tui
+yay -S i2pchat-ng-git      # GUI from git
+yay -S i2pchat-ng-tui-git  # TUI from git
 ```
 
-Package pages: [i2pchat-bin](https://aur.archlinux.org/packages/i2pchat-bin), [i2pchat-tui-bin](https://aur.archlinux.org/packages/i2pchat-tui-bin). Maintainer sources: [`packaging/aur/`](../packaging/aur/).
+Package pages: [i2pchat-bin](https://aur.archlinux.org/packages/i2pchat-bin), [i2pchat-tui-bin](https://aur.archlinux.org/packages/i2pchat-tui-bin), [i2pchat-ng-git](https://aur.archlinux.org/packages/i2pchat-ng-git), [i2pchat-ng-tui-git](https://aur.archlinux.org/packages/i2pchat-ng-tui-git).
 
 <img src="icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **`.deb` (Debian/Ubuntu):** releases include **`i2pchat_<version>_{amd64|arm64}.deb`** and **`i2pchat-tui_<version>_{amd64|arm64}.deb`**. Install with `sudo apt install ./i2pchat_*_<arch>.deb`. See [`packaging/debian/README.md`](../packaging/debian/README.md).
 

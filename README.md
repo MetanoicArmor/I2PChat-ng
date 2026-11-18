@@ -464,14 +464,19 @@ brew install --cask metanoicarmor/i2pchat/i2pchat-tui   # TUI only
 Отдельный `brew tap` подключать не нужно — при установке через `metanoicarmor/i2pchat/...` tap подтянется автоматически.
 (`brew tap MetanoicArmor/i2pchat` then `brew install --cask i2pchat` тоже работает, если нужен классический путь.)
 
-<img src="docs/icons/icons8-arch-linux-48.png" alt="Arch Linux" width="28" height="28" align="middle" /> **Arch Linux — [AUR](https://aur.archlinux.org/)** (x86_64 and aarch64; example [yay](https://github.com/Jguer/yay))
+<img src="docs/icons/icons8-arch-linux-48.png" alt="Arch Linux" width="28" height="28" align="middle" /> **Arch Linux — [AUR](https://aur.archlinux.org/)** (x86_64 и aarch64; нужен помощник вроде [yay](https://github.com/Jguer/yay) или [paru](https://github.com/Morganamilo/paru)):
 
 ```bash
-yay -S i2pchat-bin       # GUI — AppImage from release
-yay -S i2pchat-tui-bin   # TUI only
+# Готовые бинарники с GitHub Releases
+yay -S i2pchat-bin         # GUI → команда i2pchat
+yay -S i2pchat-tui-bin     # TUI → команда i2pchat-tui
+
+# Сборка из исходников этого репозитория
+yay -S i2pchat-ng-git      # GUI
+yay -S i2pchat-ng-tui-git  # TUI
 ```
 
-> **Not this repo:** [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) builds [**vituperative/i2pchat**](https://github.com/vituperative/i2pchat) — another I2P chat client (**Qt5**). For **this** project use **`i2pchat-bin`** / **`i2pchat-tui-bin`**, or build the C++ clients from [`cpp/`](cpp/).
+То же через `paru -S …`. Не берите [**`i2pchat-git`**](https://aur.archlinux.org/packages/i2pchat-git) — это другой клиент ([vituperative/i2pchat](https://github.com/vituperative/i2pchat), Qt5).
 
 <img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases)** (works without any mirror):
 
