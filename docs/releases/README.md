@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.6.2** | [RELEASE_1.6.2.md](RELEASE_1.6.2.md) — Avatars sync; TUI `//` and `/reply N text`; Android media/time/emoji/delete/SAM reconnect; Firejail; signed checksums |
 | **1.6.1** | [RELEASE_1.6.1.md](RELEASE_1.6.1.md) — Connect after hang-up; Android inbound after Disconnect; TOFU keeps inbound through Accept |
 | **1.6.0** | [RELEASE_1.6.0.md](RELEASE_1.6.0.md) — reconnect grace before BlindBox; Exit flush drafts; Android Status Exit; shared icon.png launcher |
 | **1.5.9** | [RELEASE_1.5.9.md](RELEASE_1.5.9.md) — I2P-tuned keepalive/liveness (20s/180s) and exponential auto-reconnect with jitter |
