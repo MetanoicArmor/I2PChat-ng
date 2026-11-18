@@ -10,7 +10,7 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o IdentitiesOnly=yes -i ${HOME}/
 
 # Existing -bin packages update in place. -git packages need a one-time
 # https://aur.archlinux.org/submit/ before the first successful clone.
-PACKAGES=(i2pchat-bin i2pchat-tui-bin i2pchat-gui-git i2pchat-tui-git)
+PACKAGES=(i2pchat-bin i2pchat-tui-bin i2pchat-ng-git i2pchat-ng-tui-git)
 
 echo "==> Monorepo: ${MONOREPO}"
 echo "==> Workdir:  ${WORKDIR}"

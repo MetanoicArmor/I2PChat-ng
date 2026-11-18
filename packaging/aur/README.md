@@ -6,8 +6,8 @@
 |---|---|---|
 | [`i2pchat-bin/`](i2pchat-bin/) | Binary GUI | Official AppImage zip (`I2PChat-linux-{x86_64,aarch64}-v*.zip`) |
 | [`i2pchat-tui-bin/`](i2pchat-tui-bin/) | Binary TUI | Official TUI zip → `/opt/i2pchat-tui`, command **`i2pchat-tui`** |
-| [`i2pchat-gui-git/`](i2pchat-gui-git/) | Source GUI | Builds Qt 6 client from git (`i2pchat-git` name is taken) |
-| [`i2pchat-tui-git/`](i2pchat-tui-git/) | Source TUI | Builds FTXUI client from git (FTXUI via FetchContent if missing) |
+| [`i2pchat-ng-git/`](i2pchat-ng-git/) | Source GUI | Builds Qt 6 client from git (`i2pchat-git` name is taken) |
+| [`i2pchat-ng-tui-git/`](i2pchat-ng-tui-git/) | Source TUI | Builds FTXUI client from git (FTXUI via FetchContent if missing) |
 
 `pkgdesc` style: *P2P (peer-to-peer) chat client over I2P network (GUI/TUI version)* — without repeating the package name.
 

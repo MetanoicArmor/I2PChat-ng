@@ -120,3 +120,10 @@ debian/tmp/
 debian/python3-i2pchat/
 debian/i2pchat/
 debian/i2pchat-tui/
+
+# AUR makepkg working trees / local packages (never commit)
+packaging/aur/*/pkg/
+packaging/aur/*/src/
+packaging/aur/*/icon.png
+packaging/aur/*/*.pkg.tar.zst
+packaging/aur/*/*.pkg.tar.xz

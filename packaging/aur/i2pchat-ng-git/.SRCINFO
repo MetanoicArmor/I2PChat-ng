@@ -1,5 +1,5 @@
-pkgbase = i2pchat-tui-git
-	pkgdesc = P2P (peer-to-peer) chat client over I2P network (TUI version)
+pkgbase = i2pchat-ng-git
+	pkgdesc = P2P (peer-to-peer) chat client over I2P network (GUI version)
 	pkgver = 1.6.1.r0.g0000000
 	pkgrel = 1
 	url = https://github.com/MetanoicArmor/I2PChat-ng
@@ -11,14 +11,15 @@ pkgbase = i2pchat-tui-git
 	makedepends = ninja
 	makedepends = boost
 	makedepends = nlohmann-json
+	depends = qt6-base
 	depends = libsodium
 	depends = hicolor-icon-theme
 	depends = zlib
-	provides = i2pchat-tui
-	conflicts = i2pchat-tui
-	conflicts = i2pchat-tui-bin
+	provides = i2pchat
+	conflicts = i2pchat
+	conflicts = i2pchat-bin
 	options = !lto
 	source = git+https://github.com/MetanoicArmor/I2PChat-ng.git
 	sha256sums = SKIP
 
-pkgname = i2pchat-tui-git
+pkgname = i2pchat-ng-git
