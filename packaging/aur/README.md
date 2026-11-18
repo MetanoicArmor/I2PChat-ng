@@ -1,50 +1,50 @@
-# AUR: i2pchat-bin / i2pchat-tui-bin
+# AUR: I2PChat-ng packages
 
-В AUR есть пакет **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat-ng** (C++ Qt 6 / FTXUI) используйте **`i2pchat-bin`** и **`i2pchat-tui-bin`** ниже (или сборку из [`cpp/`](../../cpp/)).
+В AUR уже есть **`i2pchat-git`** — это **другой** апстрим ([`vituperative/i2pchat`](https://github.com/vituperative/i2pchat), Qt5), не этот репозиторий. Для **MetanoicArmor/I2PChat-ng** (C++ Qt 6 / FTXUI) используйте пакеты ниже.
 
-- [`i2pchat-bin/`](i2pchat-bin/) — GUI: официальный **AppImage**. В одном PKGBUILD два контура: **`source_x86_64`** (`I2PChat-linux-x86_64-v*.zip`) и **`source_aarch64`** (`I2PChat-linux-aarch64-v*.zip`). На **ARM64** (Raspberry Pi, Asahi и т.д.) `makepkg`/`yay` берут aarch64-архив с GitHub Releases — **отдельного пакета на AUR не нужно**.
-- [`i2pchat-tui-bin/`](i2pchat-tui-bin/) — только TUI: **`I2PChat-linux-*-tui-v*.zip`** (x86_64 и aarch64), установка в `/opt/i2pchat-tui`, команда **`i2pchat-tui`**.
+| Package | Kind | Notes |
+|---|---|---|
+| [`i2pchat-bin/`](i2pchat-bin/) | Binary GUI | Official AppImage zip (`I2PChat-linux-{x86_64,aarch64}-v*.zip`) |
+| [`i2pchat-tui-bin/`](i2pchat-tui-bin/) | Binary TUI | Official TUI zip → `/opt/i2pchat-tui`, command **`i2pchat-tui`** |
+| [`i2pchat-gui-git/`](i2pchat-gui-git/) | Source GUI | Builds Qt 6 client from git (`i2pchat-git` name is taken) |
+| [`i2pchat-tui-git/`](i2pchat-tui-git/) | Source TUI | Builds FTXUI client from git (FTXUI via FetchContent if missing) |
+
+`pkgdesc` style: *P2P (peer-to-peer) chat client over I2P network (GUI/TUI version)* — without repeating the package name.
 
 ## Публикация на AUR
 
 1. Зарегистрируйтесь на [aur.archlinux.org](https://aur.archlinux.org/).
-2. Добавьте в профиль AUR **SSH public key** (Account → SSH Keys). Проверка: `ssh -T aur@aur.archlinux.org` → приветствие **Welcome to AUR, …**
-3. **Первый раз — зарегистрировать имена пакетов на сайте.** Пока пакета с таким именем нет в AUR, `git clone ssh://aur@aur.archlinux.org/i2pchat-bin.git` **не сработает**. Откройте [Submit (добавить пакет)](https://aur.archlinux.org/submit/) и создайте **`i2pchat-bin`**, затем снова **`i2pchat-tui-bin`**, подставив `PKGBUILD` и `.SRCINFO` из каталогов [`i2pchat-bin/`](i2pchat-bin/) и [`i2pchat-tui-bin/`](i2pchat-tui-bin/) этого репозитория (или минимальный черновик — см. [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)). После этого появятся пустые Git-репозитории на сервере AUR.
-4. **Один раз задайте автора git-коммитов** (в корне I2PChat или глобально), иначе `publish-to-aur.sh` остановится на `git commit`:
+2. Добавьте в профиль AUR **SSH public key** (Account → SSH Keys). Проверка: `ssh -T aur@aur.archlinux.org` → **Welcome to AUR, …**
+3. **Первый раз — зарегистрировать имена пакетов.** Пока пакета нет в AUR, `git clone ssh://aur@aur.archlinux.org/<name>.git` не сработает. Откройте [Submit](https://aur.archlinux.org/submit/) и создайте каждый новый пакет, подставив `PKGBUILD` и `.SRCINFO` из соответствующего каталога здесь. Уже существующие **`i2pchat-bin`** / **`i2pchat-tui-bin`** достаточно обновлять через скрипт.
+4. Автор git-коммитов (иначе `publish-to-aur.sh` остановится):
    ```bash
    git config user.email "you@example.com"
    git config user.name "Your Name"
    ```
-   Либо только для скрипта: `export AUR_GIT_EMAIL=… AUR_GIT_NAME=…`.
+   Или: `export AUR_GIT_EMAIL=… AUR_GIT_NAME=…`.
 
-5. **Дальнейшие обновления** — из корня клона I2PChat. Удобно поднять агент, чтобы не вводить passphrase дважды:
+5. Обновление из корня клона I2PChat:
    ```bash
    eval "$(ssh-agent -s)"
    ssh-add ~/.ssh/aur_ed25519
    ./packaging/aur/publish-to-aur.sh
    ```
-   Скрипт клонирует оба репозитория во временный каталог, копирует актуальные `PKGBUILD` и `.SRCINFO`, делает `commit` при изменениях и `git push` в ветку **`master`**.
+   Скрипт синхронизирует все четыре пакета в ветку **`master`**.
 
-   **Fish:** строка `eval "$(ssh-agent -s)"` — это синтаксис **bash/zsh**; в fish она не задаёт `SSH_AUTH_SOCK`, и `ssh-add` пишет *No such file or directory*. Варианты:
-   - один раз запустить публикацию из bash:  
-     `bash -lc 'eval "$(ssh-agent -s)"; ssh-add ~/.ssh/aur_ed25519; cd ~/GitHub/I2PChat && ./packaging/aur/publish-to-aur.sh'`
-   - или поднять агент по-рыбьи (например пакет **`openssh`** + **`fish_ssh_agent`** из contrib, либо уже запущенный агент из DE), затем **`ssh-add ~/.ssh/aur_ed25519`** и снова **`./packaging/aur/publish-to-aur.sh`**.
+   **Fish:** `eval "$(ssh-agent -s)"` — синтаксис bash/zsh. Удобнее:
+   `bash -lc 'eval "$(ssh-agent -s)"; ssh-add ~/.ssh/aur_ed25519; cd ~/GitHub/I2PChat && ./packaging/aur/publish-to-aur.sh'`
 
-Если по SSH с текущей машины зайти нельзя, используйте другой хост с настроенным ключом или только веб-интерфейс Submit, затем правки через `git` там, где `ssh aur@aur.archlinux.org` работает.
-
-После изменения `PKGBUILD` пересоберите метаданные:
+После правки `PKGBUILD`:
 
 ```bash
-cd i2pchat-bin
+cd packaging/aur/i2pchat-bin
 makepkg --printsrcinfo > .SRCINFO
 ```
 
-## Bump версии
+## Bump версии (-bin)
 
-0. Актуальные хеши с GitHub Releases: **`./packaging/refresh-checksums.sh vX.Y.Z`** — подставьте две строки для Linux zip в соответствующие `PKGBUILD` (и `pkgrel+1`, если `pkgver` не менялся, а zip перезалили).
+0. Хеши с GitHub Releases: **`./packaging/refresh-checksums.sh vX.Y.Z`**
+1. Обновите `pkgver` / `pkgrel` и `sha256sums` в обоих `-bin` PKGBUILD.
+2. `makepkg --printsrcinfo > .SRCINFO`, затем `./packaging/aur/publish-to-aur.sh`.
 
-1. Обновите `pkgver` (и при необходимости `pkgrel`) в `PKGBUILD`.
-2. Обновите `sha256sums` для zip и `icon.png` (иконка должна существовать в теге `v$pkgver`).
-3. Выполните `makepkg --printsrcinfo > .SRCINFO`, проверьте `makepkg -f` / `namcap`.
-
-Скрипт [`../refresh-checksums.sh`](../refresh-checksums.sh) печатает контрольные суммы zip-файлов релиза.
+`-git` пакеты сами берут `pkgver` из `git describe` при сборке у пользователя.

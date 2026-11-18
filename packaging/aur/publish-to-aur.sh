@@ -8,7 +8,9 @@ MONOREPO="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKDIR="${TMPDIR:-/tmp}/aur-i2pchat-publish-$$"
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o IdentitiesOnly=yes -i ${HOME}/.ssh/aur_ed25519}"
 
-PACKAGES=(i2pchat-bin i2pchat-tui-bin)
+# Existing -bin packages update in place. -git packages need a one-time
+# https://aur.archlinux.org/submit/ before the first successful clone.
+PACKAGES=(i2pchat-bin i2pchat-tui-bin i2pchat-gui-git i2pchat-tui-git)
 
 echo "==> Monorepo: ${MONOREPO}"
 echo "==> Workdir:  ${WORKDIR}"
@@ -42,6 +44,7 @@ if [ -z "${GIT_COMMIT_EMAIL}" ] || [ -z "${GIT_COMMIT_NAME}" ]; then
   exit 1
 fi
 
+FAILED=0
 for pkg in "${PACKAGES[@]}"; do
   src="${MONOREPO}/packaging/aur/${pkg}"
   if [ ! -f "${src}/PKGBUILD" ] || [ ! -f "${src}/.SRCINFO" ]; then
@@ -61,11 +64,18 @@ for pkg in "${PACKAGES[@]}"; do
     if grep -qi 'down due to maintenance' "${clone_err}"; then
       echo "" >&2
       echo "ERROR: AUR git/SSH в maintenance (веб при этом может открываться)." >&2
-      echo "  Это не «нет прав» — стандартный текст git при любой ошибке clone." >&2
-      echo "  Подождите и повторите, либо:" >&2
-      echo "    ./packaging/aur/wait-and-publish-to-aur.sh" >&2
+      echo "  Подождите и повторите, либо: ./packaging/aur/wait-and-publish-to-aur.sh" >&2
       rm -f "${clone_err}"
       exit 2
+    fi
+    if grep -qiE 'not found|does not appear|Repository not found|404' "${clone_err}"; then
+      echo "" >&2
+      echo "WARN: репозиторий AUR «${pkg}» ещё не создан." >&2
+      echo "  Один раз зарегистрируйте имя на https://aur.archlinux.org/submit/" >&2
+      echo "  (вставьте PKGBUILD/.SRCINFO из packaging/aur/${pkg}/), затем снова запустите этот скрипт." >&2
+      rm -f "${clone_err}"
+      FAILED=1
+      continue
     fi
     rm -f "${clone_err}"
     exit 1
@@ -94,4 +104,9 @@ for pkg in "${PACKAGES[@]}"; do
 done
 
 echo ""
+if [ "${FAILED}" -ne 0 ]; then
+  echo "Часть пакетов не опубликована (см. WARN выше). Уже существующие обновлены."
+  echo "Проверьте: https://aur.archlinux.org/packages?K=i2pchat"
+  exit 1
+fi
 echo "Готово. Проверьте: https://aur.archlinux.org/packages?K=i2pchat"
