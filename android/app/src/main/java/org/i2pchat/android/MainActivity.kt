@@ -12,8 +12,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -125,10 +125,16 @@ import org.i2pchat.android.ui.theme.I2PChatTheme
 import org.i2pchat.android.ui.theme.TerminalPalettes
 
 class MainActivity : ComponentActivity() {
-    private val bridge: ChatBridge by viewModels()
+    // Application-scoped: survives Activity destroy while the chat FGS holds
+    // the process (issue #46). Quit still clears via ChatBridge.stop().
+    private lateinit var bridge: ChatBridge
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        bridge = ViewModelProvider(
+            application as I2PChatApp,
+            ViewModelProvider.AndroidViewModelFactory.getInstance(application),
+        )[ChatBridge::class.java]
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -188,7 +194,11 @@ fun I2PChatRoot(bridge: ChatBridge) {
     }
     NavHost(
         navController = nav,
-        startDestination = if (state.running || state.quitting) "chats" else "profile",
+        startDestination = if (state.running || state.starting || state.resuming || state.quitting) {
+            "chats"
+        } else {
+            "profile"
+        },
     ) {
         composable("profile") { ProfileScreen(bridge, nav, switching = false) }
         composable("switchProfile") { ProfileScreen(bridge, nav, switching = true) }

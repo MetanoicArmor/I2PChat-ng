@@ -253,6 +253,8 @@ data class ChatUiState(
     val nativeLoaded: Boolean = true,
     /** Bumped when an avatar preview file changes so Compose reloads it. */
     val avatarEpoch: Long = 0,
+    /** Cold-start auto-resume of the last unlocked profile is in flight. */
+    val resuming: Boolean = false,
 ) {
     val conversations: List<ContactUi>
         get() = (groups + contacts).sortedByDescending { it.lastActivityTs }
@@ -311,6 +313,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             try {
                 NativeEngine.nativeSetListener(this)
                 refreshProfiles()
+                viewModelScope.launch(Dispatchers.IO) { rebindOrResumeSession() }
             } catch (error: Throwable) {
                 _state.update {
                     it.copy(
@@ -346,9 +349,74 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             add("random_address")
             addAll(saved)
         }.distinct()
+        val session = SessionPrefs.load(appRoot)
         _state.update {
-            it.copy(profiles = list, profileAddresses = addresses, lockedProfiles = locked)
+            it.copy(
+                profiles = list,
+                profileAddresses = addresses,
+                lockedProfiles = locked,
+                profile = it.profile.ifBlank { session.lastProfile },
+            )
         }
+    }
+
+    /**
+     * After a process kill the engine is gone; after an Activity-only destroy
+     * the engine may still be up under [ChatForegroundService]. Re-attach or
+     * auto-start the last unlocked profile marked for resume.
+     */
+    private fun rebindOrResumeSession() {
+        if (_state.value.running || _state.value.starting || _state.value.quitting) return
+        if (rebindRunningEngine()) return
+        val session = SessionPrefs.load(appRoot)
+        if (!session.resume || session.lastProfile.isBlank()) return
+        loadProfiles()
+        if (session.lastProfile in _state.value.lockedProfiles) {
+            // Password-protected: leave the chooser, but keep the name selected.
+            _state.update { it.copy(profile = session.lastProfile, resuming = false) }
+            return
+        }
+        _state.update { it.copy(resuming = true, profile = session.lastProfile) }
+        start(session.lastProfile)
+    }
+
+    private fun rebindRunningEngine(): Boolean {
+        val snap = runCatching { JSONObject(NativeEngine.nativeSnapshot()) }.getOrNull() ?: return false
+        if (!snap.optBoolean("running", false)) return false
+        val session = SessionPrefs.load(appRoot)
+        val profile = _state.value.profile.ifBlank { session.lastProfile }
+        if (profile.isBlank()) return false
+        ChatForegroundService.start(getApplication(), profile)
+        SessionPrefs(lastProfile = profile, resume = true).save(appRoot)
+        val drafts = runCatching {
+            val obj = JSONObject(NativeEngine.nativeComposeDrafts(false, "{}"))
+            buildMap {
+                obj.keys().forEach { key ->
+                    val text = obj.optString(key).trim()
+                    if (key.isNotBlank() && text.isNotEmpty()) put(key, text)
+                }
+            }
+        }.getOrDefault(emptyMap())
+        val addr = snap.optString("localAddr").ifBlank { snap.optString("local_addr") }
+        onMain {
+            _state.update {
+                it.copy(
+                    starting = false,
+                    resuming = false,
+                    running = true,
+                    profile = profile,
+                    localAddr = addr,
+                    drafts = drafts,
+                    status = str(R.string.status_warming),
+                    error = "",
+                    quitting = false,
+                )
+            }
+        }
+        refreshSnapshot()
+        startPolling()
+        startTunnelWatch(RouterPrefs.load(appRoot))
+        return true
     }
 
     fun profileAddress(name: String, password: String, done: (ProfileOp) -> Unit) {
@@ -675,15 +743,19 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 }
             }.getOrDefault(emptyMap())
             val addr = result.optString("localAddr")
+            SessionPrefs(lastProfile = profile, resume = true).save(appRoot)
+            ChatForegroundService.start(getApplication(), profile)
             refreshSnapshot()
             _state.update {
                 it.copy(
                     starting = false,
+                    resuming = false,
                     running = true,
                     localAddr = addr,
                     drafts = drafts,
                     status = str(R.string.status_warming),
                     error = "",
+                    quitting = false,
                 )
             }
             startPolling()
@@ -925,6 +997,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             MemoryImages.clear()
             SealedFiles.clear()
             clearIncomingCache()
+            val last = _state.value.profile
+            SessionPrefs(lastProfile = last, resume = false).save(appRoot)
+            ChatForegroundService.stop(getApplication())
             I2pdForegroundService.stop(getApplication())
             onMain {
                 // Close first. Flipping running=false rebuilds NavHost onto the
@@ -935,6 +1010,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                         quitting = true,
                         running = false,
                         starting = false,
+                        resuming = false,
                         samReady = false,
                         routerIssue = null,
                         transport = "stopped",
@@ -1657,10 +1733,15 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     private fun failStart(message: String, issue: RouterIssue?) {
         sessionPassword = ""
+        val last = _state.value.profile
+        // Keep the last profile name, but do not loop auto-resume on a hard fail.
+        SessionPrefs(lastProfile = last, resume = false).save(appRoot)
+        ChatForegroundService.stop(getApplication())
         onMain {
             _state.update {
                 it.copy(
                     starting = false,
+                    resuming = false,
                     running = false,
                     transport = "failed",
                     status = str(R.string.status_failed),
@@ -2134,8 +2215,15 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         clearIncomingCache()
         MemoryImages.clear()
         SealedFiles.clear()
-        NativeEngine.nativeSetListener(null)
-        runCatching { NativeEngine.nativeStop() }
+        // Application-scoped ViewModel: cleared on process death or explicit
+        // store clear. If the chat FGS still holds us, leave the engine up so
+        // a later Activity can rebind; otherwise tear down.
+        if (ChatForegroundService.isHeld()) {
+            NativeEngine.nativeSetListener(null)
+        } else {
+            NativeEngine.nativeSetListener(null)
+            runCatching { NativeEngine.nativeStop() }
+        }
         super.onCleared()
     }
 }

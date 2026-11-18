@@ -1,8 +1,10 @@
 <resources>
     <string name="app_name">I2PChat</string>
     <string name="router_channel">I2P router</string>
+    <string name="chat_channel">Chat session</string>
     <string name="messages_channel">Messages</string>
     <string name="router_notification">I2PChat is connected to I2P. This uses battery while tunnels stay up.</string>
+    <string name="chat_notification">Profile “%1$s” stays online to receive messages. Tap to open.</string>
 
     <!-- Common -->
     <string name="action_cancel">Cancel</string>

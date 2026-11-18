@@ -11,8 +11,10 @@ import androidx.core.app.NotificationManagerCompat
 
 object NotificationHelper {
     const val ROUTER_CHANNEL = "i2pchat_router"
+    const val CHAT_CHANNEL = "i2pchat_session"
     const val MESSAGE_CHANNEL = "i2pchat_messages"
     const val ROUTER_ID = 41
+    const val CHAT_ID = 42
 
     fun init(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -20,6 +22,13 @@ object NotificationHelper {
             NotificationChannel(
                 ROUTER_CHANNEL,
                 context.getString(R.string.router_channel),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHAT_CHANNEL,
+                context.getString(R.string.chat_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ),
         )
@@ -40,6 +49,22 @@ object NotificationHelper {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(context, ROUTER_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_notify)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(text)
+            .setOngoing(true)
+            .setContentIntent(open)
+            .build()
+    }
+
+    fun chatNotification(context: Context, text: String): Notification {
+        val open = PendingIntent.getActivity(
+            context,
+            1,
+            openApp(context),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return NotificationCompat.Builder(context, CHAT_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_notify)
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)

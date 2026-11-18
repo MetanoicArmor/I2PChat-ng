@@ -176,3 +176,39 @@ data class UiPrefs(
         )
     }
 }
+
+/**
+ * Last opened profile and whether the chat session should come back after the
+ * process was reclaimed. Password-protected profiles are never auto-resumed.
+ */
+data class SessionPrefs(
+    val lastProfile: String = "",
+    val resume: Boolean = false,
+) {
+    companion object {
+        fun file(appRoot: File) = File(appRoot, "session_prefs.json")
+
+        fun load(appRoot: File): SessionPrefs {
+            val path = file(appRoot)
+            if (!path.isFile) return SessionPrefs()
+            return try {
+                val raw = JSONObject(path.readText())
+                SessionPrefs(
+                    lastProfile = raw.optString("last_profile", ""),
+                    resume = raw.optBoolean("resume", false),
+                )
+            } catch (_: Exception) {
+                SessionPrefs()
+            }
+        }
+    }
+
+    fun save(appRoot: File) {
+        file(appRoot).writeText(
+            JSONObject()
+                .put("last_profile", lastProfile)
+                .put("resume", resume)
+                .toString(),
+        )
+    }
+}

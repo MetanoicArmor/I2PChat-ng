@@ -37,6 +37,11 @@
             android:foregroundServiceType="dataSync"
             android:process=":i2pd" />
 
+        <service
+            android:name=".ChatForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

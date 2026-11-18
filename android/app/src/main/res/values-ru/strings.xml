@@ -1,7 +1,9 @@
 <resources>
     <string name="router_channel">Роутер I2P</string>
+    <string name="chat_channel">Сессия чата</string>
     <string name="messages_channel">Сообщения</string>
     <string name="router_notification">I2PChat подключён к I2P. Пока туннели активны, расходуется батарея.</string>
+    <string name="chat_notification">Профиль «%1$s» остаётся онлайн, чтобы принимать сообщения. Нажмите, чтобы открыть.</string>
 
     <string name="action_cancel">Отмена</string>
     <string name="action_open">Открыть</string>
