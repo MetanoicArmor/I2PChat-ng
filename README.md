@@ -543,7 +543,7 @@ yay -S i2pchat-ng-tui-git  # TUI from git (python branch)
 <img src="docs/icons/icons8-debian-48.png" alt="Debian" width="28" height="28" align="middle" /> <img src="docs/icons/icons8-ubuntu-48.png" alt="Ubuntu" width="28" height="28" align="middle" /> **Debian / Ubuntu — `.deb` from [Releases](https://github.com/MetanoicArmor/I2PChat-ng/releases)** (works without any mirror):
 
 ```bash
-# after downloading e.g. i2pchat_1.6.1_amd64.deb
+# after downloading e.g. i2pchat_1.6.2_amd64.deb
 sudo apt install ./i2pchat_*_amd64.deb
 # optional TUI-only: sudo apt install ./i2pchat-tui_*_amd64.deb
 ```
