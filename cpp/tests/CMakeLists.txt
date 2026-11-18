@@ -26,6 +26,7 @@ add_executable(i2pchat_tests
   test_storage_sealed.cpp
   test_storage_stores.cpp
   test_storage_profile_dat.cpp
+  test_avatar_store.cpp
   test_profile_backup.cpp
   test_release_index.cpp
   test_signals.cpp
@@ -40,6 +41,7 @@ add_executable(i2pchat_tests
   test_groups_coordinator.cpp
   test_presentation_commands.cpp
   test_presentation_chat_view.cpp
+  test_reply_format.cpp
   test_tui_options.cpp
   test_sam_protocol.cpp
   test_sam_client.cpp

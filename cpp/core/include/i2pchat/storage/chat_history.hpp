@@ -47,6 +47,12 @@ struct RetentionPolicy {
     unsigned max_age_days = 0;
 };
 
+/// Combine the profile-wide policy with an optional per-peer age override.
+/// `max_messages` always comes from `global`. Absent peer override inherits
+/// `global.max_age_days`; `0` disables age pruning for that peer.
+[[nodiscard]] RetentionPolicy effective_retention(
+    const RetentionPolicy& global, const std::optional<unsigned>& peer_max_age_days);
+
 struct RetentionResult {
     std::vector<HistoryEntry> retained;
     /// Timestamp of the oldest dropped message, so the UI can show where the

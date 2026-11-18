@@ -411,6 +411,10 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
             g_engine.emit_2string("onImageText", peer, text);
         };
         events.on_contacts_changed = [] { g_engine.call_void("onContactsChanged", "()V"); };
+        events.on_avatar_changed =
+            [](const std::string& peer, const std::optional<std::filesystem::path>& view) {
+                g_engine.emit_2string("onAvatarChanged", peer, view ? view->string() : "");
+            };
         events.on_group_message = [](const std::string& group_id) {
             g_engine.emit_string("onGroupMessage", group_id);
         };
@@ -588,7 +592,11 @@ Java_org_i2pchat_android_NativeEngine_nativeSnapshot(JNIEnv* env, jclass) {
             auto& service = *g_engine.service;
             nlohmann::json contacts = nlohmann::json::array();
             for (const auto& record : service.contacts().contacts()) {
-                contacts.push_back({
+                std::string avatar_path;
+                if (const auto view = service.peer_avatar_view(record.addr)) {
+                    avatar_path = view->string();
+                }
+                nlohmann::json row = {
                     {"addr", record.addr},
                     {"displayName", record.display_name},
                     {"note", record.note},
@@ -596,11 +604,22 @@ Java_org_i2pchat_android_NativeEngine_nativeSnapshot(JNIEnv* env, jclass) {
                     {"lastActivityTs", record.last_activity_ts},
                     {"live", service.live(record.addr)},
                     {"offlineReady", service.peer_offline_ready(record.addr)},
-                });
+                    {"avatarPath", avatar_path},
+                };
+                if (record.history_max_age_days.has_value()) {
+                    row["historyMaxAgeDays"] = *record.history_max_age_days;
+                } else {
+                    row["historyMaxAgeDays"] = nullptr;
+                }
+                contacts.push_back(std::move(row));
             }
             nlohmann::json groups = nlohmann::json::array();
             for (const auto& group : service.list_groups()) {
                 groups.push_back(group_state_json(group));
+            }
+            std::string self_avatar;
+            if (const auto view = service.self_avatar_view()) {
+                self_avatar = view->string();
             }
             nlohmann::json snapshot = {
                 {"localAddr", service.local_addr()},
@@ -609,6 +628,7 @@ Java_org_i2pchat_android_NativeEngine_nativeSnapshot(JNIEnv* env, jclass) {
                 {"blindboxReady", service.blindbox_ready()},
                 {"blindboxEnabled", service.blindbox_enabled()},
                 {"replicaSource", std::string(service.replica_source())},
+                {"selfAvatarPath", self_avatar},
                 {"contacts", std::move(contacts)},
                 {"groups", std::move(groups)},
                 {"replicas", service.replica_settings().endpoints},
@@ -689,7 +709,7 @@ Java_org_i2pchat_android_NativeEngine_nativeRemovePeer(JNIEnv* env, jclass, jstr
     g_engine.on_core<void>([addr] {
         g_engine.service->contacts().remove_peer(addr);
         g_engine.service->save_contacts();
-        i2pchat::storage::delete_history(g_engine.service->paths(), addr);
+        g_engine.service->clear_peer_history(addr);
     });
 }
 
@@ -708,8 +728,26 @@ Java_org_i2pchat_android_NativeEngine_nativeClearHistory(JNIEnv* env, jclass, js
         return;
     }
     const std::string addr = jstring_to_utf8(env, j_addr);
-    g_engine.on_core<void>(
-        [addr] { i2pchat::storage::delete_history(g_engine.service->paths(), addr); });
+    g_engine.on_core<void>([addr] { g_engine.service->clear_peer_history(addr); });
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeDeleteHistoryMessage(JNIEnv* env, jclass,
+                                                                 jstring j_id,
+                                                                 jint index,
+                                                                 jboolean is_group) {
+    if (!g_engine.service || index < 0) {
+        return JNI_FALSE;
+    }
+    const std::string id = jstring_to_utf8(env, j_id);
+    const std::size_t at = static_cast<std::size_t>(index);
+    const bool ok = g_engine.on_core<bool>([id, at, is_group] {
+        if (is_group == JNI_TRUE) {
+            return g_engine.service->delete_group_history_message(id, at);
+        }
+        return g_engine.service->delete_history_message(id, at);
+    });
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -958,4 +996,63 @@ Java_org_i2pchat_android_NativeEngine_nativeSetRetention(JNIEnv*, jclass, jint m
     policy.max_messages = static_cast<std::size_t>(std::max(0, max_messages));
     policy.max_age_days = static_cast<unsigned>(std::max(0, max_age_days));
     g_engine.on_core<void>([policy] { g_engine.service->set_retention(policy); });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetHistoryEnabled(JNIEnv*, jclass, jboolean enabled) {
+    if (!g_engine.service) {
+        return;
+    }
+    g_engine.on_core<void>(
+        [enabled] { g_engine.service->set_history_enabled(enabled == JNI_TRUE); });
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetPeerHistoryMaxAge(JNIEnv* env, jclass,
+                                                                jstring j_addr, jint days) {
+    if (!g_engine.service) {
+        return JNI_FALSE;
+    }
+    const std::string addr = jstring_to_utf8(env, j_addr);
+    const bool changed = g_engine.on_core<bool>([addr, days] {
+        std::optional<unsigned> override_days;
+        if (days >= 0) {
+            override_days = static_cast<unsigned>(days);
+        }
+        return g_engine.service->set_peer_history_max_age_days(addr, override_days);
+    });
+    return changed ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetSelfAvatar(JNIEnv* env, jclass,
+                                                         jbyteArray j_bytes) {
+    if (!g_engine.service) {
+        return utf8_to_jstring(env, "Service not started");
+    }
+    if (j_bytes == nullptr) {
+        return utf8_to_jstring(env, "Empty avatar");
+    }
+    const jsize len = env->GetArrayLength(j_bytes);
+    if (len <= 0) {
+        return utf8_to_jstring(env, "Empty avatar");
+    }
+    i2pchat::Bytes data(static_cast<std::size_t>(len));
+    env->GetByteArrayRegion(j_bytes, 0, len, reinterpret_cast<jbyte*>(data.data()));
+    try {
+        g_engine.on_core<void>([data = std::move(data)] {
+            g_engine.service->set_self_avatar(data);
+        });
+        return utf8_to_jstring(env, "");
+    } catch (const std::exception& ex) {
+        return utf8_to_jstring(env, ex.what());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeClearSelfAvatar(JNIEnv*, jclass) {
+    if (!g_engine.service) {
+        return;
+    }
+    g_engine.on_core<void>([] { g_engine.service->clear_self_avatar(); });
 }

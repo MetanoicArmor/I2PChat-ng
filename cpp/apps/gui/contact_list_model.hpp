@@ -2,6 +2,8 @@
 
 #include <QAbstractListModel>
 #include <QVector>
+#include <functional>
+#include <string>
 
 #include "i2pchat/presentation/chat_view.hpp"
 
@@ -18,6 +20,7 @@ struct SidebarRow {
     QString title;
     QString subtitle;
     QString addr;
+    QString avatar_path;
     bool live = false;
     unsigned unread = 0;
     bool selected = false;
@@ -36,6 +39,7 @@ public:
         LiveRole,
         UnreadRole,
         SelectedRole,
+        AvatarPathRole,
     };
 
     explicit ContactListModel(QObject* parent = nullptr);
@@ -56,6 +60,7 @@ private:
 
 QVector<SidebarRow> sidebar_from_contacts(
     const std::vector<presentation::ContactRow>& peers,
-    const QVector<SidebarRow>& groups = {});
+    const QVector<SidebarRow>& groups = {},
+    const std::function<QString(const std::string&)>& avatar_for_peer = {});
 
 }  // namespace i2pchat::gui

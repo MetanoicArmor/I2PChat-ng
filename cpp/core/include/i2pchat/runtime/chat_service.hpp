@@ -20,6 +20,7 @@
 #include "i2pchat/sam/client.hpp"
 #include "i2pchat/session/manager.hpp"
 #include "i2pchat/session/trust_store.hpp"
+#include "i2pchat/storage/avatar_store.hpp"
 #include "i2pchat/storage/chat_history.hpp"
 #include "i2pchat/storage/contacts.hpp"
 #include "i2pchat/storage/profile_paths.hpp"
@@ -57,6 +58,9 @@ struct ChatServiceConfig {
     std::filesystem::path downloads_dir;
     std::filesystem::path images_dir;
     storage::RetentionPolicy retention;
+    /// When false, history stays in memory for the session but is not written
+    /// to sealed per-peer files (and existing files are not rewritten).
+    bool history_enabled = true;
     session::SessionManagerConfig sessions;
     protocol::PaddingProfile padding = protocol::PaddingProfile::Balanced;
     /// I2CP tunnel options passed to SESSION CREATE.
@@ -123,9 +127,9 @@ struct ChatEvents {
         on_image_received;
     /// A peer sent a text-rendered image, lines joined by newlines.
     std::function<void(const std::string& peer, const std::string& text)> on_image_text;
-    /// Whether to accept an offered file. Unset means accept.
-    std::function<bool(const std::string& peer, const std::string& name,
-                       std::uint64_t size)>
+    /// Whether to accept an offered file. Unset means accept into downloads.
+    std::function<transfer::IncomingTransfers::FileOfferDecision(
+        const std::string& peer, const std::string& name, std::uint64_t size)>
         accept_file;
     /// First sighting or key change. Unset means reject a changed key and
     /// accept a first sighting, which is what trust on first use means.
@@ -135,6 +139,11 @@ struct ChatEvents {
     std::function<void(const std::string& group_id)> on_group_message;
     /// The local address became known, once the SAM session is up.
     std::function<void(const std::string& local_addr)> on_local_address;
+    /// Self avatar changed when `peer` is empty; otherwise a peer avatar cache
+    /// entry changed. Paths are plaintext view files under `avatars/view/`.
+    std::function<void(const std::string& peer,
+                       const std::optional<std::filesystem::path>& view_path)>
+        on_avatar_changed;
 };
 
 class ChatService {
@@ -178,6 +187,16 @@ public:
     /// Send an image, inline when the peer can display it.
     asio::awaitable<bool> send_image(std::string peer, std::filesystem::path path);
 
+    /// Replace the profile avatar (PNG/JPEG/WebP, max 256 KiB). Marks delivery
+    /// pending for every trusted peer and announces to live ones.
+    void set_self_avatar(Bytes data);
+    void clear_self_avatar();
+    [[nodiscard]] std::optional<std::filesystem::path> self_avatar_view() const;
+    [[nodiscard]] std::optional<std::filesystem::path> peer_avatar_view(
+        std::string_view peer_addr) const;
+    [[nodiscard]] std::optional<Bytes> self_avatar_bytes() const;
+    [[nodiscard]] const storage::AvatarStore& avatars() const { return avatars_; }
+
     /// Collect whatever the replicas are holding for every known peer. Called
     /// on a timer while the service is running; exposed for the UI's manual
     /// "check now" and for tests.
@@ -194,6 +213,13 @@ public:
     void save_contacts();
 
     [[nodiscard]] std::vector<storage::HistoryEntry> history(std::string_view peer) const;
+    /// Remove one history row by index (as returned by `history()`), from memory
+    /// and from the sealed file. Returns false when the index is out of range.
+    bool delete_history_message(std::string_view peer, std::size_t index);
+    /// Drop the whole peer conversation from memory and delete its history file.
+    void clear_peer_history(std::string_view peer);
+    /// Same as `delete_history_message`, for a group conversation record.
+    bool delete_group_history_message(const std::string& group_id, std::size_t index);
     [[nodiscard]] bool live(std::string_view peer);
     [[nodiscard]] bool peer_offline_ready(std::string_view peer) const;
     [[nodiscard]] std::vector<std::string> connected_peers() const;
@@ -206,6 +232,19 @@ public:
     [[nodiscard]] std::string_view replica_source() const noexcept { return replica_source_; }
     void save_replica_settings(storage::ReplicaSettings settings);
     void set_retention(storage::RetentionPolicy policy) { config_.retention = policy; }
+    void set_history_enabled(bool enabled) { config_.history_enabled = enabled; }
+    [[nodiscard]] bool history_enabled() const noexcept { return config_.history_enabled; }
+    [[nodiscard]] const storage::RetentionPolicy& retention() const noexcept {
+        return config_.retention;
+    }
+    /// Per-peer age override. Empty = inherit global. Rewrites the peer history
+    /// file immediately when history is enabled so the new policy takes effect.
+    bool set_peer_history_max_age_days(std::string_view peer,
+                                       std::optional<unsigned> max_age_days);
+    [[nodiscard]] std::optional<unsigned> peer_history_max_age_days(
+        std::string_view peer) const;
+    [[nodiscard]] storage::RetentionPolicy effective_retention_for(
+        std::string_view peer) const;
     [[nodiscard]] bool running() const noexcept { return running_; }
 
     [[nodiscard]] std::vector<groups::GroupState> list_groups() const;
@@ -246,9 +285,27 @@ private:
     /// Offer the peer a BlindBox root if this side is the one that offers and
     /// the channel has none, or the current one is due for replacement.
     void offer_blindbox_root(const std::string& peer_addr);
+    void sync_avatars_with_peer(const std::string& peer_addr);
+    void announce_self_avatar(const std::string& peer_addr);
+    asio::awaitable<void> send_avatar_blob(std::string peer_addr);
+    [[nodiscard]] std::vector<std::string> trusted_peer_addrs() const;
+    [[nodiscard]] bool peer_trusted(std::string_view peer_addr) const;
+    void emit_avatar_changed(const std::string& peer,
+                             const std::optional<std::filesystem::path>& view) const;
+    [[nodiscard]] std::int64_t avatar_now() const;
 
     asio::awaitable<void> accept_loop();
     asio::awaitable<void> blindbox_loop();
+    /// Probe / recreate the SAM session when the external (or bundled) router
+    /// disappears and later comes back, without requiring a full stop/start.
+    asio::awaitable<void> sam_watchdog_loop();
+    [[nodiscard]] bool sam_session_healthy() const;
+    void drop_live_peer_links(const std::string& reason);
+    void ensure_accept_loop();
+    void ensure_blindbox_loop();
+    asio::awaitable<bool> open_sam_session();
+    asio::awaitable<void> warmup_tunnels();
+    asio::awaitable<void> watchdog_wait(std::chrono::steady_clock::duration delay);
     asio::awaitable<bool> send_offline(const std::string& peer_addr, std::string text,
                                        std::uint64_t msg_id);
     asio::awaitable<std::size_t> collect_from_peer(const std::string& peer_addr);
@@ -258,6 +315,8 @@ private:
     asio::awaitable<std::string> resolve_destination(const std::string& peer);
 
     void append_history(const std::string& peer_addr, storage::HistoryEntry entry);
+    void persist_peer_history(const std::string& peer_addr,
+                              const std::vector<storage::HistoryEntry>& entries);
     void update_delivery(const std::string& peer_addr, std::uint64_t msg_id,
                          DeliveryState state, const std::string& route,
                          const std::string& reason = {});
@@ -280,6 +339,7 @@ private:
     ProfileIdentity identity_;
     session::TrustStore trust_;
     storage::ContactBook contacts_;
+    storage::AvatarStore avatars_;
     session::SessionManager sessions_;
     std::shared_ptr<sam::SamSession> sam_;
     std::shared_ptr<blindbox::ReplicaClient> replicas_;
@@ -294,8 +354,13 @@ private:
     std::uint64_t next_msg_id_ = 1;
     bool running_ = false;
     bool stopping_ = false;
+    bool accept_loop_active_ = false;
+    bool blindbox_loop_active_ = false;
+    bool sam_watchdog_active_ = false;
     /// Cancelled by stop() so start()'s tunnel-warmup wait does not outlive us.
     std::unique_ptr<asio::steady_timer> warmup_timer_;
+    /// Shared by the SAM watchdog's backoff / health poll sleeps.
+    std::unique_ptr<asio::steady_timer> sam_watchdog_timer_;
     std::unique_ptr<groups::GroupCoordinator> group_coordinator_;
     std::string last_group_bb_msg_id_;
 };

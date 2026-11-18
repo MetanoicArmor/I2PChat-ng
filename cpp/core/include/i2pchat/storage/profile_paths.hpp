@@ -54,6 +54,17 @@ public:
         std::string_view peer_addr) const;
     [[nodiscard]] std::filesystem::path group_store(std::string_view group_id) const;
 
+    /// Sealed self avatar blob (`I2AV`).
+    [[nodiscard]] std::filesystem::path self_avatar() const;
+    /// Sealed avatar metadata + delivery map (`I2AS`).
+    [[nodiscard]] std::filesystem::path avatar_state() const;
+    /// Directory for sealed peer avatar blobs.
+    [[nodiscard]] std::filesystem::path avatars_dir() const;
+    /// Sealed peer avatar blob for `peer_addr`.
+    [[nodiscard]] std::filesystem::path peer_avatar(std::string_view peer_addr) const;
+    /// Plaintext view cache for UI thumbnails (not exported).
+    [[nodiscard]] std::filesystem::path avatar_view_dir() const;
+
 private:
     std::filesystem::path data_dir_;
     std::string profile_;

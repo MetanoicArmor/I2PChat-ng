@@ -28,6 +28,10 @@ public:
         downloads_dir_ = std::move(downloads);
     }
 
+signals:
+    /// Fired when the user clicks the quoted block inside a reply-shaped message.
+    void quoteActivated(const QString& quotedPlain);
+
 private:
     [[nodiscard]] QPixmap cached_thumb(const QString& path, int max_w) const;
 

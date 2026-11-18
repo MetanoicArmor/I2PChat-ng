@@ -40,6 +40,9 @@ struct ContactRecord {
     std::string note;
     std::string last_preview;
     std::string last_activity_ts;
+    /// Absent = inherit the profile-wide history age limit. `0` = never age-prune
+    /// this peer. `N > 0` = drop messages older than N days for this peer.
+    std::optional<unsigned> history_max_age_days;
 };
 
 class ContactBook {
@@ -66,6 +69,9 @@ public:
     bool set_last_active_peer(std::optional<std::string_view> addr);
     bool set_peer_profile(std::string_view addr, std::string_view display_name,
                           std::string_view note);
+    /// Set or clear the per-peer history age override. Empty optional = inherit.
+    bool set_peer_history_max_age_days(std::string_view addr,
+                                       std::optional<unsigned> max_age_days);
     bool touch_peer_message_meta(std::string_view addr, std::string_view preview,
                                  std::string_view ts_iso);
     bool remove_peer(std::string_view addr);

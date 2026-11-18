@@ -5,6 +5,7 @@
 #include <boost/asio/executor_work_guard.hpp>
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <sstream>
 
 #include "i2pchat/bytes.hpp"
@@ -13,18 +14,64 @@
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <nlohmann/json.hpp>
 
 #include "i2pchat/groups/store.hpp"
 #include "i2pchat/presentation/commands.hpp"
+#include "i2pchat/presentation/reply_format.hpp"
 #include "i2pchat/protocol/signals.hpp"
 #include "i2pchat/router/i2pd.hpp"
 #include "i2pchat/sam/destination.hpp"
+#include "i2pchat/storage/atomic_write.hpp"
 #include "i2pchat/storage/chat_history.hpp"
 
 namespace i2pchat::tui {
 namespace asio = boost::asio;
 using namespace ftxui;
 namespace {
+
+nlohmann::json load_ui_prefs(const std::filesystem::path& app_root) {
+    std::ifstream stream(app_root / "ui_prefs.json");
+    if (!stream) {
+        return nlohmann::json::object();
+    }
+    try {
+        nlohmann::json data;
+        stream >> data;
+        return data.is_object() ? data : nlohmann::json::object();
+    } catch (const std::exception&) {
+        return nlohmann::json::object();
+    }
+}
+
+void save_ui_prefs(const std::filesystem::path& app_root, const nlohmann::json& data) {
+    storage::atomic_write_json(app_root / "ui_prefs.json", data);
+}
+
+storage::RetentionPolicy retention_from_prefs(const nlohmann::json& data) {
+    storage::RetentionPolicy policy;
+    if (data.contains("history_max_messages") && data["history_max_messages"].is_number_integer()) {
+        const int value = data["history_max_messages"].get<int>();
+        if (value >= 0) {
+            policy.max_messages = static_cast<std::size_t>(value);
+        }
+    }
+    if (data.contains("history_retention_days") &&
+        data["history_retention_days"].is_number_integer()) {
+        const int value = data["history_retention_days"].get<int>();
+        if (value >= 0) {
+            policy.max_age_days = static_cast<unsigned>(value);
+        }
+    }
+    return policy;
+}
+
+bool history_enabled_from_prefs(const nlohmann::json& data) {
+    if (data.contains("history_enabled") && data["history_enabled"].is_boolean()) {
+        return data["history_enabled"].get<bool>();
+    }
+    return true;
+}
 
 std::string help_text() {
     std::ostringstream out;
@@ -53,6 +100,45 @@ Color color_for(presentation::LineKind kind) {
             return Color::Yellow;
     }
     return Color::White;
+}
+
+/// Terminal clients must not paint image pixels/art — only a short notice + path.
+presentation::ChatLine tui_media_notice(presentation::ChatLine line) {
+    constexpr std::string_view kImage = "[image] ";
+    constexpr std::string_view kFile = "[file] ";
+    const bool incoming = line.kind == presentation::LineKind::Incoming;
+    const bool outgoing = line.kind == presentation::LineKind::Outgoing;
+    if (!incoming && !outgoing) {
+        return line;
+    }
+    std::string_view text = line.text;
+    std::string_view path;
+    const char* label = nullptr;
+    if (text.size() > kImage.size() && text.substr(0, kImage.size()) == kImage) {
+        path = text.substr(kImage.size());
+        label = incoming ? "Image received: " : "Image sent: ";
+    } else if (text.size() > kFile.size() && text.substr(0, kFile.size()) == kFile) {
+        path = text.substr(kFile.size());
+        label = incoming ? "File received: " : "File sent: ";
+    } else {
+        return line;
+    }
+    presentation::ChatLine notice;
+    notice.kind = presentation::LineKind::System;
+    notice.time = std::move(line.time);
+    notice.text = std::string(label) + std::string(path);
+    return notice;
+}
+
+std::vector<presentation::ChatLine> tui_lines_from_history(
+    const std::vector<storage::HistoryEntry>& entries, const storage::ContactBook& contacts,
+    std::string_view peer) {
+    std::vector<presentation::ChatLine> lines =
+        presentation::lines_from_history(entries, contacts, peer);
+    for (presentation::ChatLine& line : lines) {
+        line = tui_media_notice(std::move(line));
+    }
+    return lines;
 }
 
 }  // namespace
@@ -127,12 +213,37 @@ session::TrustDecision TuiApp::on_trust_prompt(session::TrustPrompt prompt,
     return decision;
 }
 
+transfer::IncomingTransfers::FileOfferDecision TuiApp::on_file_offer(
+    const std::string& peer_addr, const std::string& name, std::uint64_t size) {
+    {
+        std::lock_guard lock(file_offer_mutex_);
+        file_offer_decision_.reset();
+        file_offer_peer_ = peer_addr;
+        file_offer_name_ = name;
+        file_offer_size_ = size;
+        file_offer_path_mode_ = false;
+        const std::filesystem::path downloads =
+            service_ ? service_->paths().data_dir() / "downloads"
+                     : options_.app_root / "downloads";
+        file_offer_path_ = (downloads / name).string();
+        file_offer_path_cursor_ = static_cast<int>(file_offer_path_.size());
+        file_offer_open_ = true;
+    }
+    post_ui([] {});
+    std::unique_lock lock(file_offer_mutex_);
+    file_offer_cv_.wait(lock, [this] { return file_offer_decision_.has_value(); });
+    const auto decision = *file_offer_decision_;
+    file_offer_open_ = false;
+    file_offer_path_mode_ = false;
+    return decision;
+}
+
 void TuiApp::select_peer(std::string addr) {
     selected_ = std::move(addr);
     unread_.erase(selected_);
     if (service_) {
-        lines_ = presentation::lines_from_history(service_->history(selected_),
-                                                  service_->contacts(), selected_);
+        lines_ = tui_lines_from_history(service_->history(selected_), service_->contacts(),
+                                        selected_);
         service_->contacts().set_last_active_peer(selected_);
         service_->save_contacts();
     }
@@ -176,6 +287,11 @@ void TuiApp::start_core() {
     config.sam.port = options_.sam_port;
     config.blindbox_over_sam = options_.blindbox_over_sam;
     config.blindbox_poll_interval = options_.blindbox_poll;
+    {
+        const nlohmann::json prefs = load_ui_prefs(options_.app_root);
+        config.retention = retention_from_prefs(prefs);
+        config.history_enabled = history_enabled_from_prefs(prefs);
+    }
     if (!options_.replicas.empty()) {
         storage::ReplicaSettings replicas;
         replicas.endpoints = options_.replicas;
@@ -218,7 +334,8 @@ void TuiApp::start_core() {
             {
                 std::lock_guard lock(mutex_);
                 if (peer == selected_) {
-                    lines_.push_back(presentation::line_from_history(entry, contacts, peer));
+                    lines_.push_back(tui_media_notice(
+                        presentation::line_from_history(entry, contacts, peer)));
                 } else if (entry.kind == "in") {
                     unread_[peer] += 1;
                 }
@@ -227,13 +344,31 @@ void TuiApp::start_core() {
             screen_.RequestAnimationFrame();
         });
     };
+    events.on_image_text = [this](const std::string& peer, const std::string& text) {
+        std::size_t lines = 1;
+        for (char ch : text) {
+            if (ch == '\n') {
+                ++lines;
+            }
+        }
+        post_ui([this, peer, lines] {
+            if (peer == selected_) {
+                append_local(presentation::LineKind::System,
+                             "Received text-rendered image (" + std::to_string(lines) +
+                                 " lines); not shown in the terminal.");
+            } else {
+                unread_[peer] += 1;
+            }
+            screen_.RequestAnimationFrame();
+        });
+    };
     events.on_delivery = [this](const runtime::DeliveryReport& report) {
         post_ui([this, report] {
             if (report.peer != selected_ || !service_) {
                 return;
             }
-            lines_ = presentation::lines_from_history(service_->history(selected_),
-                                                      service_->contacts(), selected_);
+            lines_ = tui_lines_from_history(service_->history(selected_),
+                                            service_->contacts(), selected_);
             screen_.RequestAnimationFrame();
         });
     };
@@ -270,6 +405,10 @@ void TuiApp::start_core() {
     events.on_trust_prompt = [this](session::TrustPrompt prompt, const std::string& peer,
                                     const std::string& neu, const std::string& old) {
         return on_trust_prompt(prompt, peer, neu, old);
+    };
+    events.accept_file = [this](const std::string& peer, const std::string& name,
+                                std::uint64_t size) {
+        return on_file_offer(peer, name, size);
     };
 
     service_ = std::make_unique<runtime::ChatService>(core_.get_executor(), std::move(config),
@@ -310,6 +449,13 @@ void TuiApp::stop_core() {
             trust_decision_ = session::TrustDecision::Reject;
         }
         trust_cv_.notify_all();
+    }
+    {
+        std::lock_guard lock(file_offer_mutex_);
+        if (!file_offer_decision_) {
+            file_offer_decision_ = {/*accept=*/false, {}};
+        }
+        file_offer_cv_.notify_all();
     }
     asio::co_spawn(
         core_,
@@ -352,7 +498,9 @@ void TuiApp::handle_command(const presentation::Command& command) {
     switch (command.kind) {
         case Kind::Unknown:
             append_local(presentation::LineKind::Error,
-                         "Unknown command /" + command.name + ". Try /help.");
+                         "Unknown command /" + command.name +
+                             ". Type /help. To send a message starting with /, "
+                             "prefix it with //.");
             return;
         case Kind::Help:
             screen_kind_ = Screen::Help;
@@ -398,14 +546,65 @@ void TuiApp::handle_command(const presentation::Command& command) {
         case Kind::Reply: {
             if (command.args.size() < 2) {
                 append_local(presentation::LineKind::Error,
-                             "Usage: /reply <address> <text>");
+                             "Usage: /reply <number> <text>");
                 return;
             }
-            const std::string peer = resolve_peer(command.arg(0));
-            const std::string text = command.rest.substr(command.arg(0).size());
-            const auto begin = text.find_first_not_of(" \t");
+            if (selected_.empty()) {
+                append_local(presentation::LineKind::Error,
+                             "Select a peer first, then /reply <number> <text>.");
+                return;
+            }
+            std::size_t number = 0;
+            try {
+                number = static_cast<std::size_t>(std::stoul(command.arg(0)));
+            } catch (const std::exception&) {
+                append_local(presentation::LineKind::Error,
+                             "Usage: /reply <number> <text>");
+                return;
+            }
+            if (number == 0) {
+                append_local(presentation::LineKind::Error,
+                             "Message numbers start at 1.");
+                return;
+            }
+            const presentation::ChatLine* target = nullptr;
+            std::size_t seen = 0;
+            for (const presentation::ChatLine& line : lines_) {
+                if (line.kind != presentation::LineKind::Incoming &&
+                    line.kind != presentation::LineKind::Outgoing) {
+                    continue;
+                }
+                ++seen;
+                if (seen == number) {
+                    target = &line;
+                    break;
+                }
+            }
+            if (target == nullptr) {
+                append_local(presentation::LineKind::Error,
+                             "No chat message #" + std::to_string(number) +
+                                 ". Numbers are shown as #N in the chat.");
+                return;
+            }
+            const std::string sender =
+                target->kind == presentation::LineKind::Outgoing
+                    ? std::string("me")
+                    : (target->author.empty() ? std::string("message") : target->author);
+            const std::string after_number =
+                command.rest.size() > command.arg(0).size()
+                    ? command.rest.substr(command.arg(0).size())
+                    : std::string{};
+            const auto begin = after_number.find_first_not_of(" \t");
+            const std::string reply_body =
+                begin == std::string::npos ? std::string{} : after_number.substr(begin);
+            if (reply_body.empty()) {
+                append_local(presentation::LineKind::Error,
+                             "Usage: /reply <number> <text>");
+                return;
+            }
             const std::string body =
-                begin == std::string::npos ? std::string{} : text.substr(begin);
+                presentation::format_reply_message(sender, target->text, reply_body);
+            const std::string peer = selected_;
             post_core([this, peer, body]() -> asio::awaitable<void> {
                 co_await service_->send_text(peer, body);
             });
@@ -478,9 +677,24 @@ void TuiApp::handle_command(const presentation::Command& command) {
                 append_local(presentation::LineKind::Error, "No such contact.");
                 return;
             }
+            const storage::RetentionPolicy effective =
+                service_->effective_retention_for(record->addr);
+            std::string age_label;
+            if (!record->history_max_age_days.has_value()) {
+                age_label = "inherit global (" +
+                            std::to_string(service_->retention().max_age_days) + "d)";
+            } else if (*record->history_max_age_days == 0) {
+                age_label = "no age prune";
+            } else {
+                age_label = std::to_string(*record->history_max_age_days) + "d";
+            }
             append_local(presentation::LineKind::System,
                          record->addr + "  name=" + record->display_name +
                              "  note=" + record->note);
+            append_local(presentation::LineKind::System,
+                         "auto-delete: " + age_label + "  effective=" +
+                             std::to_string(effective.max_age_days) + "d  max_messages=" +
+                             std::to_string(effective.max_messages));
             return;
         }
         case Kind::Recent:
@@ -510,6 +724,20 @@ void TuiApp::handle_command(const presentation::Command& command) {
             screen_kind_ = Screen::Diagnostics;
             return;
         case Kind::History: {
+            if (command.has_arg(0)) {
+                const std::string flag = command.arg(0);
+                if (flag == "on" || flag == "off") {
+                    const bool enabled = flag == "on";
+                    service_->set_history_enabled(enabled);
+                    nlohmann::json prefs = load_ui_prefs(options_.app_root);
+                    prefs["history_enabled"] = enabled;
+                    save_ui_prefs(options_.app_root, prefs);
+                    append_local(presentation::LineKind::System,
+                                 enabled ? "History saving enabled."
+                                         : "History saving disabled.");
+                    return;
+                }
+            }
             if (selected_.empty()) {
                 append_local(presentation::LineKind::Error, "No peer selected.");
                 return;
@@ -532,10 +760,93 @@ void TuiApp::handle_command(const presentation::Command& command) {
             append_local(presentation::LineKind::System, "History cleared.");
             return;
         }
-        case Kind::HistoryRetention:
+        case Kind::HistoryRetention: {
+            if (!command.has_arg(0)) {
+                const auto& policy = service_->retention();
+                append_local(presentation::LineKind::System,
+                             "Global retention: max_messages=" +
+                                 std::to_string(policy.max_messages) + "  days=" +
+                                 std::to_string(policy.max_age_days) +
+                                 (service_->history_enabled() ? "  history=on"
+                                                              : "  history=off"));
+                return;
+            }
+            unsigned long messages = 0;
+            unsigned long days = service_->retention().max_age_days;
+            try {
+                messages = std::stoul(command.arg(0));
+                if (command.has_arg(1)) {
+                    days = std::stoul(command.arg(1));
+                }
+            } catch (const std::exception&) {
+                append_local(presentation::LineKind::Error,
+                             "Usage: /history-retention <max_messages> [days]");
+                return;
+            }
+            storage::RetentionPolicy policy;
+            policy.max_messages = static_cast<std::size_t>(messages);
+            policy.max_age_days = static_cast<unsigned>(days);
+            service_->set_retention(policy);
+            nlohmann::json prefs = load_ui_prefs(options_.app_root);
+            prefs["history_max_messages"] = static_cast<std::int64_t>(policy.max_messages);
+            prefs["history_retention_days"] = static_cast<std::int64_t>(policy.max_age_days);
+            save_ui_prefs(options_.app_root, prefs);
             append_local(presentation::LineKind::System,
-                         "Retention is applied on save. Current default: 1000 messages.");
+                         "Global retention set to " + std::to_string(policy.max_messages) +
+                             " messages, " + std::to_string(policy.max_age_days) + " day(s).");
             return;
+        }
+        case Kind::PeerRetention: {
+            if (!command.has_arg(0)) {
+                append_local(presentation::LineKind::Error,
+                             "Usage: /peer-retention <addr|#> [days|default]");
+                return;
+            }
+            if (!service_->history_enabled()) {
+                append_local(presentation::LineKind::Error,
+                             "Enable history first (/history on). Per-peer auto-delete "
+                             "only applies when history is saved to disk.");
+                return;
+            }
+            const std::string addr = resolve_peer(command.arg(0));
+            if (addr.empty()) {
+                append_local(presentation::LineKind::Error, "Unknown peer.");
+                return;
+            }
+            if (!command.has_arg(1)) {
+                const auto override_days = service_->peer_history_max_age_days(addr);
+                const auto effective = service_->effective_retention_for(addr);
+                std::string label = "inherit global";
+                if (override_days.has_value()) {
+                    label = *override_days == 0 ? "no age prune"
+                                                : (std::to_string(*override_days) + "d");
+                }
+                append_local(presentation::LineKind::System,
+                             addr + "  override=" + label + "  effective=" +
+                                 std::to_string(effective.max_age_days) + "d");
+                return;
+            }
+            const std::string value = command.arg(1);
+            std::optional<unsigned> days;
+            if (value == "default" || value == "inherit" || value == "global") {
+                days = std::nullopt;
+            } else {
+                try {
+                    days = static_cast<unsigned>(std::stoul(value));
+                } catch (const std::exception&) {
+                    append_local(presentation::LineKind::Error,
+                                 "Usage: /peer-retention <addr|#> [days|default]");
+                    return;
+                }
+            }
+            service_->contacts().remember_peer(addr);
+            service_->set_peer_history_max_age_days(addr, days);
+            const auto effective = service_->effective_retention_for(addr);
+            append_local(presentation::LineKind::System,
+                         "Peer retention for " + addr + " → effective " +
+                             std::to_string(effective.max_age_days) + " day(s).");
+            return;
+        }
         case Kind::BlindBox:
             append_local(presentation::LineKind::System,
                          service_ && service_->blindbox_ready()
@@ -890,10 +1201,17 @@ private:
 Elements TuiApp::chat_rows() const {
     Elements body;
     body.reserve(lines_.size());
+    std::size_t message_number = 0;
     for (const presentation::ChatLine& line : lines_) {
         Elements parts;
+        const bool numbered = line.kind == presentation::LineKind::Incoming ||
+                              line.kind == presentation::LineKind::Outgoing;
+        if (numbered) {
+            ++message_number;
+            parts.push_back(text("#" + std::to_string(message_number)) | dim);
+        }
         if (!line.time.empty()) {
-            parts.push_back(text(line.time) | dim);
+            parts.push_back(text((numbered ? " " : "") + line.time) | dim);
         }
         if (!line.author.empty()) {
             parts.push_back(text(" " + line.author) | bold | color(color_for(line.kind)));
@@ -1001,7 +1319,7 @@ Elements TuiApp::info_rows() const {
             }
             break;
         }
-        case Screen::Settings:
+        case Screen::Settings: {
             add_heading("Settings");
             rows.push_back(text("profile: " + options_.profile));
             rows.push_back(text("app-root: " + options_.app_root.string()));
@@ -1014,7 +1332,19 @@ Elements TuiApp::info_rows() const {
                            dim);
             rows.push_back(text(std::string("replicas: ") +
                                 (options_.blindbox_over_sam ? "over I2P" : "direct TCP")));
+            if (service_) {
+                const auto& policy = service_->retention();
+                rows.push_back(text(std::string("history: ") +
+                                    (service_->history_enabled() ? "on" : "off") +
+                                    "  (/history on|off)"));
+                rows.push_back(text("retention: " + std::to_string(policy.max_messages) +
+                                    " messages, " + std::to_string(policy.max_age_days) +
+                                    " day(s)  (/history-retention)"));
+                rows.push_back(text("per-peer age: /peer-retention <addr|#> [days|default]") |
+                               dim);
+            }
             break;
+        }
         case Screen::Help: {
             add_heading("Help");
             const std::string help = help_text();
@@ -1053,6 +1383,29 @@ Element TuiApp::render_trust_modal() const {
     return vbox(std::move(body)) | border | size(WIDTH, LESS_THAN, 80) | center;
 }
 
+Element TuiApp::render_file_offer_modal() const {
+    const std::string peer_label =
+        service_ ? presentation::author_label(service_->contacts(), file_offer_peer_)
+                 : presentation::short_address(file_offer_peer_);
+    Elements body = {
+        text("Incoming file") | bold | color(Color::Yellow),
+        separator(),
+        text("A peer wants to send you a file."),
+        text("From: " + peer_label) | color(Color::Cyan),
+        text("Name: " + file_offer_name_),
+        text("Size: " + presentation::format_bytes(file_offer_size_)),
+        separator(),
+    };
+    if (file_offer_path_mode_) {
+        body.push_back(text("Save as path:") | bold);
+        body.push_back(text(file_offer_path_ + "▌") | color(Color::GreenLight));
+        body.push_back(text("Enter confirm   Esc cancel") | dim);
+    } else {
+        body.push_back(text("a accept   s save as   n reject") | bold);
+    }
+    return vbox(std::move(body)) | border | size(WIDTH, LESS_THAN, 80) | center;
+}
+
 int TuiApp::run() {
     start_core();
 
@@ -1088,6 +1441,8 @@ int TuiApp::run() {
         });
         if (trust_open_) {
             page = dbox({page, render_trust_modal() | clear_under});
+        } else if (file_offer_open_) {
+            page = dbox({page, render_file_offer_modal() | clear_under});
         }
         return page;
     });
@@ -1104,6 +1459,60 @@ int TuiApp::run() {
                 std::lock_guard lock(trust_mutex_);
                 trust_decision_ = session::TrustDecision::Reject;
                 trust_cv_.notify_all();
+                return true;
+            }
+            return true;
+        }
+        if (file_offer_open_) {
+            if (file_offer_path_mode_) {
+                if (event == Event::Return) {
+                    std::lock_guard lock(file_offer_mutex_);
+                    std::filesystem::path chosen(file_offer_path_);
+                    file_offer_decision_ = {/*accept=*/true, std::move(chosen)};
+                    file_offer_cv_.notify_all();
+                    return true;
+                }
+                if (event == Event::Escape) {
+                    file_offer_path_mode_ = false;
+                    screen_.RequestAnimationFrame();
+                    return true;
+                }
+                if (event == Event::Backspace) {
+                    if (file_offer_path_cursor_ > 0 &&
+                        file_offer_path_cursor_ <= static_cast<int>(file_offer_path_.size())) {
+                        file_offer_path_.erase(
+                            static_cast<std::size_t>(file_offer_path_cursor_ - 1), 1);
+                        --file_offer_path_cursor_;
+                    }
+                    return true;
+                }
+                if (event.is_character()) {
+                    const std::string ch = event.character();
+                    if (!ch.empty() && ch[0] >= 32) {
+                        file_offer_path_.insert(
+                            static_cast<std::size_t>(file_offer_path_cursor_), ch);
+                        file_offer_path_cursor_ += static_cast<int>(ch.size());
+                    }
+                    return true;
+                }
+                return true;
+            }
+            if (event == Event::a || event == Event::A || event == Event::Return) {
+                std::lock_guard lock(file_offer_mutex_);
+                file_offer_decision_ = {/*accept=*/true, {}};
+                file_offer_cv_.notify_all();
+                return true;
+            }
+            if (event == Event::s || event == Event::S) {
+                file_offer_path_mode_ = true;
+                file_offer_path_cursor_ = static_cast<int>(file_offer_path_.size());
+                screen_.RequestAnimationFrame();
+                return true;
+            }
+            if (event == Event::n || event == Event::N || event == Event::Escape) {
+                std::lock_guard lock(file_offer_mutex_);
+                file_offer_decision_ = {/*accept=*/false, {}};
+                file_offer_cv_.notify_all();
                 return true;
             }
             return true;

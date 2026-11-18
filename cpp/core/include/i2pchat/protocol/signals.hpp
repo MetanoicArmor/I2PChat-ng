@@ -43,6 +43,12 @@ enum class SignalKind {
     GroupBlindBoxRoot,
     /// `GROUP_BLINDBOX_ROOT_ACK|<group_id>|<group_epoch>|<root_epoch>`.
     GroupBlindBoxRootAck,
+    /// Announce self avatar: `AVATAR_META|<sha256>|<bytes>|<fmt>|<msg_id>`.
+    AvatarMeta,
+    /// Request avatar bytes: `AVATAR_GET|<sha256>|<msg_id>` (sha may be empty).
+    AvatarGet,
+    /// Peer has / stored the avatar: `AVATAR_ACK|<sha256>|<msg_id>`.
+    AvatarAck,
 };
 
 struct Signal {
@@ -58,6 +64,12 @@ struct Signal {
     std::string name;
     /// Group id for the group BlindBox signals.
     std::string group_id;
+    /// Avatar sha256 hex (or empty for AVATAR_GET meaning "current").
+    std::string avatar_sha;
+    /// Avatar byte size from AVATAR_META.
+    std::uint64_t avatar_bytes = 0;
+    /// Avatar format from AVATAR_META (png/jpeg/webp).
+    std::string avatar_fmt;
     /// The message id an ACK refers to.
     std::uint64_t message_id = 0;
     /// Root epoch for the pairwise signals, group epoch for the group ones.
@@ -99,5 +111,9 @@ struct Signal {
 [[nodiscard]] std::string build_group_blindbox_root_ack(std::string_view group_id,
                                                         std::uint64_t group_epoch,
                                                         std::uint64_t root_epoch);
+[[nodiscard]] std::string build_avatar_meta(std::string_view sha256, std::uint64_t bytes,
+                                            std::string_view fmt, std::uint64_t message_id);
+[[nodiscard]] std::string build_avatar_get(std::string_view sha256, std::uint64_t message_id);
+[[nodiscard]] std::string build_avatar_ack(std::string_view sha256, std::uint64_t message_id);
 
 }  // namespace i2pchat::protocol

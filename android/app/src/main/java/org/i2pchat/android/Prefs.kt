@@ -85,6 +85,7 @@ data class RouterPrefs(
 
 data class UiPrefs(
     val theme: String = "dark",
+    val historyEnabled: Boolean = true,
     val historyMaxMessages: Int = 1000,
     val historyRetentionDays: Int = 0,
 ) {
@@ -98,6 +99,7 @@ data class UiPrefs(
                 val raw = JSONObject(path.readText())
                 UiPrefs(
                     theme = raw.optString("theme", "dark"),
+                    historyEnabled = raw.optBoolean("history_enabled", true),
                     historyMaxMessages = raw.optInt("history_max_messages", 1000),
                     historyRetentionDays = raw.optInt("history_retention_days", 0),
                 )
@@ -111,6 +113,7 @@ data class UiPrefs(
         file(appRoot).writeText(
             JSONObject()
                 .put("theme", theme)
+                .put("history_enabled", historyEnabled)
                 .put("history_max_messages", historyMaxMessages)
                 .put("history_retention_days", historyRetentionDays)
                 .toString(),

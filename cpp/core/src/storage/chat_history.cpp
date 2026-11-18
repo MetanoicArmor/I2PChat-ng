@@ -186,6 +186,15 @@ std::string now_iso8601_utc() {
     return format_iso8601_utc(std::chrono::system_clock::now());
 }
 
+RetentionPolicy effective_retention(const RetentionPolicy& global,
+                                    const std::optional<unsigned>& peer_max_age_days) {
+    RetentionPolicy out = global;
+    if (peer_max_age_days.has_value()) {
+        out.max_age_days = *peer_max_age_days;
+    }
+    return out;
+}
+
 RetentionResult apply_history_retention(
     const std::vector<HistoryEntry>& entries, const RetentionPolicy& policy,
     std::optional<std::chrono::system_clock::time_point> now) {

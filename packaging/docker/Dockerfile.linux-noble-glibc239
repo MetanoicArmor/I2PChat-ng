@@ -56,6 +56,7 @@ RUN apt-get update -qq \
         libxcb-xinput0 \
         libxcb-cursor0 \
         libboost-program-options1.83.0 \
+        libminiupnpc17 \
         libcrypt1 \
     && rm -rf /var/lib/apt/lists/*
 

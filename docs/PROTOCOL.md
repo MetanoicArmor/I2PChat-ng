@@ -211,9 +211,30 @@ The protocol intentionally keeps message types compact.
 | `E` | end-of-file marker |
 | `I` | image-line / image-text transport path |
 | `G` | inline binary image transport path |
+| `A` | profile avatar blob (not chat history) |
 
 Exact semantics are context-sensitive in `i2pchat/core/i2p_chat_core.py`, so the
 code should be consulted for branch-specific handling.
+
+### Profile avatars
+
+Avatars are separate from chat images. After handshake, a peer may announce and
+transfer a small square image (PNG/JPEG/WebP, max 256 KiB) that is never written
+into chat history.
+
+Wire flow:
+
+1. `AVATAR_META|<sha256>|<bytes>|<fmt>|<msg_id>` announces the sender's current
+   avatar.
+2. If the receiver lacks that hash, it sends
+   `AVATAR_GET|<sha256>|<msg_id>` (empty sha means "current").
+3. The sender streams `A "<sha>|<size>"` then base64 `A` chunks and
+   `A "__AVATAR_END__"`.
+4. The receiver replies with `AVATAR_ACK|<sha256>|<msg_id>` after storing the
+   blob (or immediately if it already has the hash).
+
+Receivers must accept avatar blobs only from peers that have a Trust pin.
+Older clients that do not recognise these signals ignore them.
 
 ### Signals carried as payload text
 
@@ -225,6 +246,7 @@ Examples include:
 - `MSG_ACK|...`
 - `FILE_ACK|...`
 - `IMG_ACK|...`
+- `AVATAR_META|...` / `AVATAR_GET|...` / `AVATAR_ACK|...`
 - `ABORT_FILE`
 - `REJECT_FILE`
 - BlindBox root synchronization signals
@@ -249,6 +271,7 @@ The main ACK families are:
 - text message ACK (`MSG_ACK`)
 - file ACK (`FILE_ACK`)
 - image ACK (`IMG_ACK`)
+- avatar ACK (`AVATAR_ACK`) — confirms a profile avatar hash, not a chat image
 
 They are correlated against:
 

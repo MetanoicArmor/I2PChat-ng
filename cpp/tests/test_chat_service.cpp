@@ -5,6 +5,7 @@
 #include <boost/asio/io_context.hpp>
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -449,4 +450,200 @@ TEST_CASE("a profile written by one run is reopened by the next") {
     // so the address a user has published keeps working.
     CHECK(second_addr == first_addr);
     CHECK(service.identity().signing_seed.size() == 32);
+}
+
+TEST_CASE("history_enabled false skips disk writes") {
+    FakeSamRouter router;
+    asio::io_context context;
+    Client alice(context, router.port(), "alice");
+    Client bob(context, router.port(), "bob");
+    alice.service->set_history_enabled(false);
+    start_both(context, alice, bob);
+
+    bool connected = false;
+    asio::co_spawn(context, alice.service->connect_peer(bob.local_addr),
+                   [&](std::exception_ptr error, bool) {
+                       REQUIRE_FALSE(error);
+                       connected = true;
+                   });
+    REQUIRE(run_until(context, [&] { return connected; }));
+
+    bool sent = false;
+    asio::co_spawn(context, alice.service->send_text(bob.local_addr, "ephemeral"),
+                   [&](std::exception_ptr, std::vector<std::uint64_t>) { sent = true; });
+    REQUIRE(run_until(context, [&] { return sent; }));
+    REQUIRE(run_until(context, [&] {
+        return !alice.service->history(bob.local_addr).empty();
+    }));
+
+    const auto path = alice.service->paths().chat_history(bob.local_addr);
+    CHECK_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("deleting one history message updates memory and disk") {
+    FakeSamRouter router;
+    asio::io_context context;
+    Client alice(context, router.port(), "alice");
+    Client bob(context, router.port(), "bob");
+    start_both(context, alice, bob);
+
+    bool connected = false;
+    asio::co_spawn(context, alice.service->connect_peer(bob.local_addr),
+                   [&](std::exception_ptr error, bool) {
+                       REQUIRE_FALSE(error);
+                       connected = true;
+                   });
+    REQUIRE(run_until(context, [&] { return connected; }));
+
+    bool sent = false;
+    asio::co_spawn(context, alice.service->send_text(bob.local_addr, "keep"),
+                   [&](std::exception_ptr, std::vector<std::uint64_t>) { sent = true; });
+    REQUIRE(run_until(context, [&] { return sent; }));
+    sent = false;
+    asio::co_spawn(context, alice.service->send_text(bob.local_addr, "drop"),
+                   [&](std::exception_ptr, std::vector<std::uint64_t>) { sent = true; });
+    REQUIRE(run_until(context, [&] { return sent; }));
+
+    REQUIRE(run_until(context, [&] {
+        return alice.service->history(bob.local_addr).size() >= 2;
+    }));
+    const auto before = alice.service->history(bob.local_addr);
+    REQUIRE(before.size() >= 2);
+    CHECK(alice.service->delete_history_message(bob.local_addr, before.size() - 1));
+    const auto after = alice.service->history(bob.local_addr);
+    REQUIRE(after.size() == before.size() - 1);
+    CHECK(after.back().text == "keep");
+    CHECK(alice.service->delete_history_message(bob.local_addr, 0));
+    CHECK(alice.service->history(bob.local_addr).empty());
+}
+
+TEST_CASE("service reconnects when the SAM router returns") {
+    NoKeyring no_keyring;
+    TempDir root;
+
+    std::uint16_t port = 0;
+    {
+        FakeSamRouter bootstrap;
+        port = bootstrap.port();
+    }
+
+    asio::io_context context;
+    runtime::ChatServiceConfig config;
+    config.app_root = root.path();
+    config.profile = "reconnect";
+    config.sam.port = port;
+    config.blindbox_enabled = false;
+
+    std::vector<std::string> systems;
+    std::vector<session::TransportState> transports;
+    runtime::ChatEvents events;
+    events.on_system = [&](const std::string& message) { systems.push_back(message); };
+    events.on_transport_state = [&](session::TransportState state, const std::string&) {
+        transports.push_back(state);
+    };
+
+    runtime::ChatService service(context.get_executor(), std::move(config), std::move(events));
+    bool start_finished = false;
+    asio::co_spawn(
+        context,
+        [&]() -> asio::awaitable<void> {
+            co_await service.start();
+            start_finished = true;
+        },
+        asio::detached);
+
+    REQUIRE(run_until(
+        context,
+        [&] {
+            return std::find(transports.begin(), transports.end(),
+                             session::TransportState::Failed) != transports.end() ||
+                   std::find(transports.begin(), transports.end(),
+                             session::TransportState::Reconnecting) != transports.end();
+        },
+        std::chrono::seconds(15)));
+
+    FakeSamRouter router(port);
+    REQUIRE(run_until(
+        context,
+        [&] {
+            return std::any_of(systems.begin(), systems.end(), [](const std::string& text) {
+                return text.find("Online! My Address:") != std::string::npos;
+            });
+        },
+        std::chrono::seconds(45)));
+    CHECK(service.running());
+    CHECK_FALSE(service.local_addr().empty());
+
+    bool stopped = false;
+    asio::co_spawn(context, service.stop(),
+                   [&](std::exception_ptr) { stopped = true; });
+    REQUIRE(run_until(context, [&] { return stopped && start_finished; },
+                      std::chrono::seconds(15)));
+}
+
+TEST_CASE("service recovers after the SAM router restarts mid-session") {
+    NoKeyring no_keyring;
+    TempDir root;
+    auto first = std::make_unique<FakeSamRouter>();
+    const std::uint16_t port = first->port();
+
+    asio::io_context context;
+    runtime::ChatServiceConfig config;
+    config.app_root = root.path();
+    config.profile = "mid-session";
+    config.sam.port = port;
+    config.blindbox_enabled = false;
+
+    std::vector<std::string> systems;
+    runtime::ChatEvents events;
+    events.on_system = [&](const std::string& message) { systems.push_back(message); };
+
+    runtime::ChatService service(context.get_executor(), std::move(config), std::move(events));
+    bool start_finished = false;
+    asio::co_spawn(
+        context,
+        [&]() -> asio::awaitable<void> {
+            co_await service.start();
+            start_finished = true;
+        },
+        asio::detached);
+
+    REQUIRE(run_until(context, [&] {
+        return std::any_of(systems.begin(), systems.end(), [](const std::string& text) {
+            return text.find("Online! My Address:") != std::string::npos;
+        });
+    }));
+    const std::string addr = service.local_addr();
+    REQUIRE_FALSE(addr.empty());
+
+    first.reset();
+    systems.clear();
+
+    // Retry bind: the OS may hold the port briefly after the previous listen socket.
+    std::unique_ptr<FakeSamRouter> second;
+    const auto bind_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!second && std::chrono::steady_clock::now() < bind_deadline) {
+        try {
+            second = std::make_unique<FakeSamRouter>(port);
+        } catch (const std::exception&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(second);
+
+    REQUIRE(run_until(
+        context,
+        [&] {
+            return std::any_of(systems.begin(), systems.end(), [](const std::string& text) {
+                return text.find("Online! My Address:") != std::string::npos;
+            });
+        },
+        std::chrono::seconds(45)));
+    CHECK(service.local_addr() == addr);
+
+    bool stopped = false;
+    asio::co_spawn(context, service.stop(),
+                   [&](std::exception_ptr) { stopped = true; });
+    REQUIRE(run_until(context, [&] { return stopped && start_finished; },
+                      std::chrono::seconds(15)));
 }

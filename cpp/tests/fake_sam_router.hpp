@@ -42,9 +42,16 @@ using asio::ip::tcp;
 
 class FakeSamRouter {
 public:
-    FakeSamRouter()
-        : acceptor_(context_, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)) {
+    FakeSamRouter() : FakeSamRouter(0) {}
+
+    /// Bind a specific loopback port (`0` = ephemeral). Used by reconnect tests
+    /// that tear the router down and bring it back on the same port.
+    explicit FakeSamRouter(std::uint16_t port)
+        : acceptor_(context_) {
         crypto::init();
+        acceptor_.open(tcp::v4());
+        acceptor_.set_option(tcp::acceptor::reuse_address(true));
+        acceptor_.bind(tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
         acceptor_.listen();
         port_ = acceptor_.local_endpoint().port();
         asio::co_spawn(context_, accept_loop(), asio::detached);
@@ -74,14 +81,16 @@ public:
             return;
         }
         stopped_ = true;
-        asio::post(context_, [this] {
-            boost::system::error_code ignored;
-            acceptor_.close(ignored);
-        });
+        // Close the listen socket before joining so a later FakeSamRouter can
+        // rebind the same port (reuse_address alone is not enough while we
+        // still hold the fd).
+        boost::system::error_code ignored;
+        acceptor_.close(ignored);
         context_.stop();
         if (thread_.joinable()) {
             thread_.join();
         }
+        sessions_.clear();
     }
 
     /// A destination with private key material, shaped like the real thing.

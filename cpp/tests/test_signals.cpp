@@ -62,6 +62,31 @@ TEST_CASE("an acknowledgement without an id is not acted on", "[signals]") {
     CHECK_FALSE(message.well_formed);
 }
 
+TEST_CASE("avatar signals round trip", "[signals]") {
+    const protocol::Signal meta = protocol::parse_signal(protocol::signal_body(
+        protocol::build_avatar_meta("abc", 12, "png", 3)));
+    CHECK(meta.kind == SignalKind::AvatarMeta);
+    CHECK(meta.well_formed);
+    CHECK(meta.avatar_sha == "abc");
+    CHECK(meta.avatar_bytes == 12);
+    CHECK(meta.avatar_fmt == "png");
+    CHECK(meta.message_id == 3);
+
+    const protocol::Signal get = protocol::parse_signal(
+        protocol::signal_body(protocol::build_avatar_get("abc", 4)));
+    CHECK(get.kind == SignalKind::AvatarGet);
+    CHECK(get.well_formed);
+    CHECK(get.avatar_sha == "abc");
+    CHECK(get.message_id == 4);
+
+    const protocol::Signal ack = protocol::parse_signal(
+        protocol::signal_body(protocol::build_avatar_ack("abc", 5)));
+    CHECK(ack.kind == SignalKind::AvatarAck);
+    CHECK(ack.well_formed);
+    CHECK(ack.avatar_sha == "abc");
+    CHECK(ack.message_id == 5);
+}
+
 TEST_CASE("transfer control signals round trip", "[signals]") {
     const protocol::Signal reject = protocol::parse_signal(
         protocol::signal_body(protocol::build_reject_file("report.pdf")));

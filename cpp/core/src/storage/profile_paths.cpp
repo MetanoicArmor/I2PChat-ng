@@ -80,6 +80,26 @@ std::filesystem::path ProfilePaths::group_store(std::string_view group_id) const
     return data_dir_ / (profile_ + ".group." + group_token(group_id) + ".json");
 }
 
+std::filesystem::path ProfilePaths::self_avatar() const {
+    return data_dir_ / (profile_ + ".avatar.enc");
+}
+
+std::filesystem::path ProfilePaths::avatar_state() const {
+    return data_dir_ / (profile_ + ".avatar_state.enc");
+}
+
+std::filesystem::path ProfilePaths::avatars_dir() const {
+    return data_dir_ / "avatars";
+}
+
+std::filesystem::path ProfilePaths::peer_avatar(std::string_view peer_addr) const {
+    return avatars_dir() / (peer_file_id(peer_addr) + ".enc");
+}
+
+std::filesystem::path ProfilePaths::avatar_view_dir() const {
+    return avatars_dir() / "view";
+}
+
 SealedJsonFormat chat_history_format(std::string_view peer_addr) {
     // The scope is the address itself, not its digest: the digest names the file,
     // the address keys it.

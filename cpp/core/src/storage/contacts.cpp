@@ -78,6 +78,13 @@ std::optional<ContactRecord> record_from_json(const nlohmann::json& entry) {
     record.last_preview =
         truncate_code_points(field_text(entry, "last_preview"), kPreviewMaxLength);
     record.last_activity_ts = field_text(entry, "last_activity_ts");
+    if (const auto it = entry.find("history_max_age_days");
+        it != entry.end() && it->is_number_unsigned()) {
+        record.history_max_age_days = it->get<unsigned>();
+    } else if (const auto it = entry.find("history_max_age_days");
+               it != entry.end() && it->is_number_integer() && it->get<std::int64_t>() >= 0) {
+        record.history_max_age_days = static_cast<unsigned>(it->get<std::int64_t>());
+    }
     return record;
 }
 
@@ -88,6 +95,9 @@ nlohmann::json record_to_json(const ContactRecord& record) {
     out["note"] = record.note;
     out["last_preview"] = record.last_preview;
     out["last_activity_ts"] = record.last_activity_ts;
+    if (record.history_max_age_days.has_value()) {
+        out["history_max_age_days"] = *record.history_max_age_days;
+    }
     return out;
 }
 
@@ -208,6 +218,27 @@ bool ContactBook::set_peer_profile(std::string_view addr, std::string_view displ
     }
     record->display_name = name;
     record->note = trimmed_note;
+    return true;
+}
+
+bool ContactBook::set_peer_history_max_age_days(std::string_view addr,
+                                                std::optional<unsigned> max_age_days) {
+    const std::string normalized = normalize_contact_address(addr);
+    if (normalized.empty()) {
+        return false;
+    }
+    ContactRecord* record = get(normalized);
+    if (record == nullptr) {
+        remember_peer(normalized);
+        record = get(normalized);
+    }
+    if (record == nullptr) {
+        return false;
+    }
+    if (record->history_max_age_days == max_age_days) {
+        return false;
+    }
+    record->history_max_age_days = max_age_days;
     return true;
 }
 

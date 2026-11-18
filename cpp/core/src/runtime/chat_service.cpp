@@ -177,6 +177,8 @@ asio::awaitable<void> ChatService::start() {
         identity_ = identity_from(config_.profile, *existing, ByteView(signing_seed));
         contacts_ = storage::load_contact_book(paths_.contacts(),
                                               ByteView(identity_.identity_key));
+        avatars_ = storage::AvatarStore(paths_, identity_.identity_key);
+        avatars_.load();
         if (events_.on_local_address) {
             events_.on_local_address(identity_.local_addr);
         }
@@ -190,40 +192,14 @@ asio::awaitable<void> ChatService::start() {
     }
 
     emit_system("Starting I2P session, please wait…");
-    sam_ = std::make_shared<sam::SamSession>(executor_, config_.sam);
-    try {
-        if (identity_.destination_base64.empty()) {
-            identity_ = co_await load_identity(*sam_, paths_);
-            contacts_ = storage::load_contact_book(paths_.contacts(),
-                                                  ByteView(identity_.identity_key));
-            if (events_.on_local_address) {
-                events_.on_local_address(identity_.local_addr);
-            }
-            if (events_.on_contacts_changed) {
-                events_.on_contacts_changed();
-            }
-        }
-        sam::SessionOptions options;
-        options.session_id = session_nickname(config_.profile);
-        options.destination = identity_.destination_base64;
-        options.options = config_.sam_options;
-        co_await sam_->open(options);
-    } catch (const std::exception& error) {
-        sessions_.set_transport_state(session::TransportState::Failed, error.what());
-        emit_error("Cannot reach I2P SAM at " + config_.sam.host + ":" +
-                   std::to_string(config_.sam.port) +
-                   ". Start i2pd or choose a router.");
-        running_ = true;
-        stopping_ = false;
-        co_return;
-    }
-
-    sessions_.set_transport_state(session::TransportState::SamConnected,
-                                  "sam-session-created");
     running_ = true;
     stopping_ = false;
 
-    if (config_.blindbox_enabled) {
+    const bool opened = co_await open_sam_session();
+
+    // BlindBox needs the profile signing key; that is available either from a
+    // destination already on disk or after open_sam_session() generated one.
+    if (config_.blindbox_enabled && !identity_.identity_key.empty()) {
         const bool replicas_from_config = config_.replicas.has_value();
         if (!replicas_from_config) {
             config_.replicas = storage::load_replica_settings(
@@ -250,53 +226,23 @@ asio::awaitable<void> ChatService::start() {
         }
     }
 
+    asio::co_spawn(executor_, [this] { return sam_watchdog_loop(); }, asio::detached);
+
+    if (!opened) {
+        sessions_.set_transport_state(session::TransportState::Failed, "sam-unreachable");
+        emit_error("Cannot reach I2P SAM at " + config_.sam.host + ":" +
+                   std::to_string(config_.sam.port) +
+                   ". Start i2pd or choose a router — will keep trying.");
+        co_return;
+    }
+
     if (events_.on_local_address) {
         events_.on_local_address(identity_.local_addr);
     }
-    emit_system("Building I2P tunnels (may take 1–2 min)...");
-    sessions_.set_transport_state(session::TransportState::WarmingTunnels, "tunnel-warmup");
 
-    asio::co_spawn(executor_, [this] { return accept_loop(); }, asio::detached);
-    if (config_.blindbox_enabled) {
-        asio::co_spawn(executor_, [this] { return blindbox_loop(); }, asio::detached);
-    }
-
-    bool tunnels_ready = false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
-    warmup_timer_ = std::make_unique<asio::steady_timer>(executor_);
-    while (!stopping_ && std::chrono::steady_clock::now() < deadline) {
-        // Hold a local ref: stop() may reset sam_ while this coroutine is still
-        // running, and a bare member dereference would then segfault.
-        const std::shared_ptr<sam::SamSession> sam = sam_;
-        if (!sam) {
-            break;
-        }
-        try {
-            (void)co_await sam->naming_lookup(identity_.local_addr + ".b32.i2p");
-            tunnels_ready = true;
-            break;
-        } catch (const std::exception&) {
-        }
-        if (stopping_ || !warmup_timer_) {
-            break;
-        }
-        warmup_timer_->expires_after(std::chrono::seconds(3));
-        boost::system::error_code wait_error;
-        co_await warmup_timer_->async_wait(
-            asio::redirect_error(asio::use_awaitable, wait_error));
-    }
-    warmup_timer_.reset();
-    if (stopping_) {
-        co_return;
-    }
-    emit_system("Online! My Address: " + identity_.local_addr);
-    if (tunnels_ready) {
-        emit_system("Tunnels ready. Waiting for incoming connections...");
-        sessions_.set_transport_state(session::TransportState::Ready, "tunnels-ready");
-    } else {
-        emit_system("Tunnels may still be building. Wait 1–2 min before connecting.");
-        sessions_.set_transport_state(session::TransportState::Degraded, "tunnels-pending");
-    }
+    ensure_accept_loop();
+    ensure_blindbox_loop();
+    co_await warmup_tunnels();
 }
 
 asio::awaitable<void> ChatService::stop() {
@@ -307,6 +253,9 @@ asio::awaitable<void> ChatService::stop() {
     running_ = false;
     if (warmup_timer_) {
         warmup_timer_->cancel();
+    }
+    if (sam_watchdog_timer_) {
+        sam_watchdog_timer_->cancel();
     }
     sessions_.set_transport_state(session::TransportState::ShuttingDown, "stop");
 
@@ -373,6 +322,8 @@ void ChatService::wire_transfers(Peer& peer) {
     transfer::IncomingTransfers::Config config;
     config.downloads_dir = config_.downloads_dir;
     config.images_dir = config_.images_dir;
+    config.max_avatar_size = storage::kMaxAvatarBytes;
+    config.accept_avatars = peer_trusted(peer.addr);
 
     const std::string addr = peer.addr;
     transfer::IncomingTransfers::Callbacks callbacks;
@@ -381,8 +332,12 @@ void ChatService::wire_transfers(Peer& peer) {
             target->link->send_text(frame.type, frame.body, next_msg_id());
         }
     };
-    callbacks.accept_file = [this, addr](const std::string& name, std::uint64_t size) {
-        return events_.accept_file ? events_.accept_file(addr, name, size) : true;
+    callbacks.accept_file = [this, addr](const std::string& name,
+                                         std::uint64_t size) -> transfer::IncomingTransfers::FileOfferDecision {
+        if (events_.accept_file) {
+            return events_.accept_file(addr, name, size);
+        }
+        return {/*accept=*/true, {}};
     };
     callbacks.on_progress = [this, addr](const transfer::Progress& progress) {
         if (events_.on_transfer) {
@@ -416,6 +371,19 @@ void ChatService::wire_transfers(Peer& peer) {
             events_.on_image_text(addr, text);
         }
     };
+    callbacks.on_avatar_received = [this, addr](const std::string& sha, Bytes data,
+                                                std::uint64_t message_id) {
+        if (!peer_trusted(addr)) {
+            return;
+        }
+        if (avatars_.store_peer_avatar(addr, ByteView(data), avatar_now())) {
+            emit_avatar_changed(addr, avatars_.materialize_peer_view(addr));
+        }
+        if (Peer* target = find_peer(addr); target != nullptr && target->link) {
+            target->link->send_signal(protocol::build_avatar_ack(sha, message_id),
+                                      next_msg_id());
+        }
+    };
     peer.incoming =
         std::make_unique<transfer::IncomingTransfers>(std::move(config), std::move(callbacks));
 }
@@ -435,10 +403,216 @@ void ChatService::attach_link(Peer& peer, std::shared_ptr<PeerLink> link) {
     wire_transfers(peer);
 }
 
-asio::awaitable<void> ChatService::accept_loop() {
-    while (running_) {
+bool ChatService::sam_session_healthy() const {
+    return sam_ != nullptr && sam_->is_open();
+}
+
+void ChatService::drop_live_peer_links(const std::string& reason) {
+    for (auto& [addr, peer] : peers_) {
+        if (peer->link && !peer->link->closed()) {
+            peer->link->close(reason);
+        }
+        peer->link.reset();
+    }
+}
+
+void ChatService::ensure_accept_loop() {
+    if (accept_loop_active_ || !running_ || stopping_) {
+        return;
+    }
+    asio::co_spawn(executor_, [this] { return accept_loop(); }, asio::detached);
+}
+
+void ChatService::ensure_blindbox_loop() {
+    if (!config_.blindbox_enabled || blindbox_loop_active_ || !running_ || stopping_) {
+        return;
+    }
+    asio::co_spawn(executor_, [this] { return blindbox_loop(); }, asio::detached);
+}
+
+asio::awaitable<void> ChatService::watchdog_wait(std::chrono::steady_clock::duration delay) {
+    if (stopping_ || !running_) {
+        co_return;
+    }
+    sam_watchdog_timer_ = std::make_unique<asio::steady_timer>(executor_);
+    sam_watchdog_timer_->expires_after(delay);
+    boost::system::error_code wait_error;
+    co_await sam_watchdog_timer_->async_wait(
+        asio::redirect_error(asio::use_awaitable, wait_error));
+    sam_watchdog_timer_.reset();
+}
+
+asio::awaitable<bool> ChatService::open_sam_session() {
+    if (stopping_) {
+        co_return false;
+    }
+    if (sam_) {
+        sam_->close();
+        sam_.reset();
+    }
+    sam_ = std::make_shared<sam::SamSession>(executor_, config_.sam);
+    try {
+        if (identity_.destination_base64.empty()) {
+            identity_ = co_await load_identity(*sam_, paths_);
+            contacts_ = storage::load_contact_book(paths_.contacts(),
+                                                  ByteView(identity_.identity_key));
+            avatars_ = storage::AvatarStore(paths_, identity_.identity_key);
+            avatars_.load();
+            if (events_.on_local_address) {
+                events_.on_local_address(identity_.local_addr);
+            }
+            if (events_.on_contacts_changed) {
+                events_.on_contacts_changed();
+            }
+        }
+        sam::SessionOptions options;
+        options.session_id = session_nickname(config_.profile);
+        options.destination = identity_.destination_base64;
+        options.options = config_.sam_options;
+        co_await sam_->open(options);
+    } catch (const std::exception&) {
+        if (sam_) {
+            sam_->close();
+            sam_.reset();
+        }
+        co_return false;
+    }
+    sessions_.set_transport_state(session::TransportState::SamConnected,
+                                  "sam-session-created");
+    co_return true;
+}
+
+asio::awaitable<void> ChatService::warmup_tunnels() {
+    if (stopping_ || !running_ || !sam_session_healthy()) {
+        co_return;
+    }
+    emit_system("Building I2P tunnels (may take 1–2 min)...");
+    sessions_.set_transport_state(session::TransportState::WarmingTunnels, "tunnel-warmup");
+
+    bool tunnels_ready = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    warmup_timer_ = std::make_unique<asio::steady_timer>(executor_);
+    while (!stopping_ && running_ && std::chrono::steady_clock::now() < deadline) {
+        // Hold a local ref: stop() may reset sam_ while this coroutine is still
+        // running, and a bare member dereference would then segfault.
         const std::shared_ptr<sam::SamSession> sam = sam_;
-        if (!sam) {
+        if (!sam || !sam->is_open()) {
+            break;
+        }
+        try {
+            (void)co_await sam->naming_lookup(identity_.local_addr + ".b32.i2p");
+            tunnels_ready = true;
+            break;
+        } catch (const std::exception&) {
+        }
+        if (stopping_ || !warmup_timer_) {
+            break;
+        }
+        warmup_timer_->expires_after(std::chrono::seconds(3));
+        boost::system::error_code wait_error;
+        co_await warmup_timer_->async_wait(
+            asio::redirect_error(asio::use_awaitable, wait_error));
+    }
+    warmup_timer_.reset();
+    if (stopping_ || !running_) {
+        co_return;
+    }
+    if (!sam_session_healthy()) {
+        co_return;
+    }
+    emit_system("Online! My Address: " + identity_.local_addr);
+    if (tunnels_ready) {
+        emit_system("Tunnels ready. Waiting for incoming connections...");
+        sessions_.set_transport_state(session::TransportState::Ready, "tunnels-ready");
+    } else {
+        emit_system("Tunnels may still be building. Wait 1–2 min before connecting.");
+        sessions_.set_transport_state(session::TransportState::Degraded, "tunnels-pending");
+    }
+}
+
+asio::awaitable<void> ChatService::sam_watchdog_loop() {
+    if (sam_watchdog_active_) {
+        co_return;
+    }
+    sam_watchdog_active_ = true;
+    struct ClearFlag {
+        bool& flag;
+        ~ClearFlag() { flag = false; }
+    } clear{sam_watchdog_active_};
+
+    constexpr auto kHealthyPoll = std::chrono::seconds(5);
+    constexpr auto kProbeTimeout = std::chrono::seconds(2);
+    auto backoff = std::chrono::seconds(2);
+    constexpr auto kMaxBackoff = std::chrono::seconds(30);
+
+    while (running_ && !stopping_) {
+        if (sam_session_healthy()) {
+            backoff = std::chrono::seconds(2);
+            co_await watchdog_wait(kHealthyPoll);
+            continue;
+        }
+
+        sessions_.set_transport_state(session::TransportState::Reconnecting, "sam-lost");
+        emit_system("I2P router unreachable — waiting to reconnect…");
+        drop_live_peer_links("sam reconnect");
+        if (sam_) {
+            sam_->close();
+            sam_.reset();
+        }
+        if (warmup_timer_) {
+            warmup_timer_->cancel();
+        }
+
+        while (running_ && !stopping_) {
+            const bool up =
+                co_await sam::probe_sam(executor_, config_.sam, kProbeTimeout);
+            if (up) {
+                break;
+            }
+            sessions_.set_transport_state(session::TransportState::Reconnecting,
+                                          "waiting-for-router");
+            co_await watchdog_wait(backoff);
+            backoff = std::min(backoff * 2, kMaxBackoff);
+        }
+        if (!running_ || stopping_) {
+            co_return;
+        }
+
+        emit_system("I2P router is back — recreating SAM session…");
+        if (!co_await open_sam_session()) {
+            sessions_.set_transport_state(session::TransportState::Failed,
+                                          "sam-reopen-failed");
+            emit_error("Could not recreate the I2P SAM session; will retry.");
+            co_await watchdog_wait(backoff);
+            backoff = std::min(backoff * 2, kMaxBackoff);
+            continue;
+        }
+
+        if (events_.on_local_address && !identity_.local_addr.empty()) {
+            events_.on_local_address(identity_.local_addr);
+        }
+        ensure_accept_loop();
+        ensure_blindbox_loop();
+        co_await warmup_tunnels();
+        backoff = std::chrono::seconds(2);
+    }
+}
+
+asio::awaitable<void> ChatService::accept_loop() {
+    if (accept_loop_active_) {
+        co_return;
+    }
+    accept_loop_active_ = true;
+    struct ClearFlag {
+        bool& flag;
+        ~ClearFlag() { flag = false; }
+    } clear{accept_loop_active_};
+
+    int consecutive_failures = 0;
+    while (running_ && !stopping_) {
+        const std::shared_ptr<sam::SamSession> sam = sam_;
+        if (!sam || !sam->is_open()) {
+            // Watchdog owns recreation of the session and will spawn us again.
             co_return;
         }
         sam::SamStream stream{asio::ip::tcp::socket(executor_), {}, {}};
@@ -447,12 +621,21 @@ asio::awaitable<void> ChatService::accept_loop() {
             stream = co_await sam->accept_stream();
             accepted = true;
         } catch (const std::exception& error) {
-            if (running_) {
+            if (running_ && !stopping_) {
                 emit_error(std::string("accepting a peer failed: ") + error.what());
             }
         }
         if (!accepted) {
-            if (!running_) {
+            if (!running_ || stopping_) {
+                co_return;
+            }
+            ++consecutive_failures;
+            // Control socket still "open" but ACCEPT cannot dial the router —
+            // treat that as a dead session so the watchdog reopens it.
+            if (!sam->is_open() || consecutive_failures >= 3) {
+                if (sam->is_open()) {
+                    sam->close();
+                }
                 co_return;
             }
             // A failed ACCEPT usually means the session is gone; without a
@@ -463,6 +646,7 @@ asio::awaitable<void> ChatService::accept_loop() {
             co_await pause.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
             continue;
         }
+        consecutive_failures = 0;
 
         // An inbound session must learn who is calling from the identity
         // preface rather than from the router: the address SAM reports is not
@@ -633,6 +817,146 @@ void ChatService::on_established(PeerLink& link) {
     remember_contact(addr, {});
     emit_system("Secure channel with " + addr.substr(0, 16) + "… established");
     offer_blindbox_root(addr);
+    // Re-wire so accept_avatars reflects Trust after the handshake pin.
+    if (peer.incoming) {
+        wire_transfers(peer);
+    }
+    sync_avatars_with_peer(addr);
+}
+
+bool ChatService::peer_trusted(std::string_view peer_addr) const {
+    return trust_.pin_for(std::string(peer_addr)).has_value();
+}
+
+std::vector<std::string> ChatService::trusted_peer_addrs() const {
+    std::vector<std::string> out;
+    for (const auto& [addr, pin] : trust_.pins()) {
+        (void)pin;
+        out.push_back(addr);
+    }
+    return out;
+}
+
+std::int64_t ChatService::avatar_now() const { return unix_now(); }
+
+void ChatService::emit_avatar_changed(
+    const std::string& peer, const std::optional<std::filesystem::path>& view) const {
+    if (events_.on_avatar_changed) {
+        events_.on_avatar_changed(peer, view);
+    }
+}
+
+void ChatService::announce_self_avatar(const std::string& peer_addr) {
+    if (!avatars_.state().self || !peer_trusted(peer_addr)) {
+        return;
+    }
+    Peer* peer = find_peer(peer_addr);
+    if (peer == nullptr || peer->link == nullptr || !peer->link->secure()) {
+        return;
+    }
+    const auto& meta = *avatars_.state().self;
+    const std::uint64_t msg_id = next_msg_id();
+    peer->link->send_signal(
+        protocol::build_avatar_meta(meta.sha256, meta.bytes, meta.fmt, msg_id), msg_id);
+    avatars_.mark_delivery_sent(peer_addr, meta.sha256, avatar_now());
+}
+
+void ChatService::sync_avatars_with_peer(const std::string& peer_addr) {
+    if (!peer_trusted(peer_addr)) {
+        return;
+    }
+    Peer* peer = find_peer(peer_addr);
+    if (peer == nullptr || peer->link == nullptr || !peer->link->secure()) {
+        return;
+    }
+    // After import the peer cache is empty — request the current avatar.
+    if (avatars_.needs_peer_fetch(peer_addr, {})) {
+        peer->link->send_signal(protocol::build_avatar_get("", next_msg_id()), next_msg_id());
+    }
+    if (avatars_.needs_push(peer_addr)) {
+        announce_self_avatar(peer_addr);
+    }
+}
+
+asio::awaitable<void> ChatService::send_avatar_blob(std::string peer_addr) {
+    Peer* target = find_peer(peer_addr);
+    if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+        co_return;
+    }
+    const auto data = avatars_.self_bytes();
+    if (!data || !avatars_.state().self) {
+        co_return;
+    }
+    std::optional<transfer::OutgoingAvatarTransfer> outgoing;
+    try {
+        outgoing.emplace(*data, avatars_.state().self->sha256);
+    } catch (const std::exception& error) {
+        emit_error(std::string("cannot send avatar: ") + error.what());
+        co_return;
+    }
+    const std::uint64_t msg_id = next_msg_id();
+    const transfer::Frame header = outgoing->header();
+    target->link->send_text(header.type, header.body, msg_id);
+    avatars_.mark_delivery_sent(peer_addr, avatars_.state().self->sha256, avatar_now());
+    while (std::optional<transfer::Frame> next = outgoing->next()) {
+        Peer* still = find_peer(peer_addr);
+        if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            co_return;
+        }
+        still->link->send_text(next->type, next->body, next_msg_id());
+        asio::steady_timer breath(executor_);
+        breath.expires_after(std::chrono::milliseconds(0));
+        boost::system::error_code ignored;
+        co_await breath.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+    }
+}
+
+void ChatService::set_self_avatar(Bytes data) {
+    if (identity_.identity_key.empty()) {
+        emit_error("Avatar requires an open profile identity.");
+        return;
+    }
+    if (avatars_.paths().profile().empty()) {
+        avatars_ = storage::AvatarStore(paths_, identity_.identity_key);
+        avatars_.load();
+    }
+    try {
+        avatars_.set_self_avatar(ByteView(data), trusted_peer_addrs(), avatar_now());
+    } catch (const std::exception& error) {
+        emit_error(std::string("Cannot set avatar: ") + error.what());
+        return;
+    }
+    emit_avatar_changed("", avatars_.materialize_self_view());
+    for (const std::string& peer : connected_peers()) {
+        if (peer_trusted(peer)) {
+            announce_self_avatar(peer);
+        }
+    }
+}
+
+void ChatService::clear_self_avatar() {
+    if (identity_.identity_key.empty()) {
+        return;
+    }
+    if (avatars_.paths().profile().empty()) {
+        avatars_ = storage::AvatarStore(paths_, identity_.identity_key);
+        avatars_.load();
+    }
+    avatars_.clear_self_avatar();
+    emit_avatar_changed("", std::nullopt);
+}
+
+std::optional<std::filesystem::path> ChatService::self_avatar_view() const {
+    return avatars_.materialize_self_view();
+}
+
+std::optional<std::filesystem::path> ChatService::peer_avatar_view(
+    std::string_view peer_addr) const {
+    return avatars_.materialize_peer_view(peer_addr);
+}
+
+std::optional<Bytes> ChatService::self_avatar_bytes() const {
+    return avatars_.self_bytes();
 }
 
 void ChatService::offer_blindbox_root(const std::string& peer_addr) {
@@ -707,6 +1031,7 @@ void ChatService::on_frame(const std::string& peer_addr, const PeerFrame& frame)
         case 'D':
         case 'E':
         case 'G':
+        case 'A':
         case 'I':
             if (Peer* peer = find_peer(peer_addr); peer != nullptr && peer->incoming) {
                 peer->incoming->on_frame(frame.msg_type, frame.text(), frame.msg_id);
@@ -774,6 +1099,41 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
         case protocol::SignalKind::Quit:
             if (peer != nullptr && peer->link) {
                 peer->link->close("peer sent QUIT");
+            }
+            return;
+        case protocol::SignalKind::AvatarMeta: {
+            if (!peer_trusted(peer_addr) || peer == nullptr || peer->link == nullptr) {
+                return;
+            }
+            if (!avatars_.needs_peer_fetch(peer_addr, signal.avatar_sha)) {
+                peer->link->send_signal(
+                    protocol::build_avatar_ack(signal.avatar_sha, signal.message_id),
+                    next_msg_id());
+                return;
+            }
+            peer->link->send_signal(
+                protocol::build_avatar_get(signal.avatar_sha, next_msg_id()), next_msg_id());
+            return;
+        }
+        case protocol::SignalKind::AvatarGet: {
+            if (!peer_trusted(peer_addr) || !avatars_.state().self) {
+                return;
+            }
+            if (!signal.avatar_sha.empty() &&
+                signal.avatar_sha != avatars_.state().self->sha256) {
+                return;
+            }
+            asio::co_spawn(
+                executor_,
+                [this, peer_addr]() -> asio::awaitable<void> {
+                    co_await send_avatar_blob(peer_addr);
+                },
+                asio::detached);
+            return;
+        }
+        case protocol::SignalKind::AvatarAck:
+            if (!signal.avatar_sha.empty()) {
+                avatars_.mark_delivery_acked(peer_addr, signal.avatar_sha, avatar_now());
             }
             return;
         case protocol::SignalKind::BlindBoxRoot: {
@@ -1042,12 +1402,21 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
 }
 
 asio::awaitable<void> ChatService::blindbox_loop() {
+    if (blindbox_loop_active_) {
+        co_return;
+    }
+    blindbox_loop_active_ = true;
+    struct ClearFlag {
+        bool& flag;
+        ~ClearFlag() { flag = false; }
+    } clear{blindbox_loop_active_};
+
     asio::steady_timer timer(executor_);
-    while (running_) {
+    while (running_ && !stopping_) {
         timer.expires_after(config_.blindbox_poll_interval);
         boost::system::error_code error;
         co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
-        if (error || !running_) {
+        if (error || !running_ || stopping_) {
             co_return;
         }
         try {
@@ -1215,20 +1584,70 @@ void ChatService::save_blindbox_snapshot(const std::string& peer_addr) {
     }
 }
 
+storage::RetentionPolicy ChatService::effective_retention_for(
+    std::string_view peer) const {
+    std::optional<unsigned> override_days;
+    if (const storage::ContactRecord* rec = contacts_.get(peer)) {
+        override_days = rec->history_max_age_days;
+    }
+    return storage::effective_retention(config_.retention, override_days);
+}
+
+std::optional<unsigned> ChatService::peer_history_max_age_days(
+    std::string_view peer) const {
+    if (const storage::ContactRecord* rec = contacts_.get(peer)) {
+        return rec->history_max_age_days;
+    }
+    return std::nullopt;
+}
+
+void ChatService::persist_peer_history(
+    const std::string& peer_addr, const std::vector<storage::HistoryEntry>& entries) {
+    if (config_.profile == kTransientProfile || !config_.history_enabled) {
+        return;
+    }
+    try {
+        if (entries.empty()) {
+            storage::delete_history(paths_, peer_addr);
+        } else {
+            storage::save_history(paths_, peer_addr, entries, ByteView(identity_.identity_key),
+                                  effective_retention_for(peer_addr));
+        }
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not save history: ") + error.what());
+    }
+}
+
+bool ChatService::set_peer_history_max_age_days(std::string_view peer,
+                                                std::optional<unsigned> max_age_days) {
+    const std::string addr(peer);
+    if (!contacts_.set_peer_history_max_age_days(addr, max_age_days)) {
+        return false;
+    }
+    save_contacts();
+    if (events_.on_contacts_changed) {
+        events_.on_contacts_changed();
+    }
+    if (config_.profile == kTransientProfile || !config_.history_enabled) {
+        return true;
+    }
+    std::vector<storage::HistoryEntry>& entries = history_[addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+    }
+    persist_peer_history(addr, entries);
+    // Reload pruned view into RAM so UI matches disk.
+    entries = storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+    return true;
+}
+
 void ChatService::append_history(const std::string& peer_addr, storage::HistoryEntry entry) {
     std::vector<storage::HistoryEntry>& entries = history_[peer_addr];
     if (entries.empty()) {
         entries = storage::load_history(paths_, peer_addr, ByteView(identity_.identity_key));
     }
     entries.push_back(entry);
-    if (config_.profile != kTransientProfile) {
-        try {
-            storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
-        } catch (const std::exception& error) {
-            emit_error(std::string("could not save history: ") + error.what());
-        }
-    }
+    persist_peer_history(peer_addr, entries);
     if (events_.on_history) {
         events_.on_history(peer_addr, entry);
     }
@@ -1250,10 +1669,9 @@ void ChatService::update_delivery(const std::string& peer_addr, std::uint64_t ms
             break;
         }
     }
-    if (config_.profile != kTransientProfile && !entries.empty()) {
+    if (!entries.empty()) {
         try {
-            storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
+            persist_peer_history(peer_addr, entries);
         } catch (const std::exception&) {
             // A delivery marker is not worth failing a send over.
         }
@@ -1301,12 +1719,8 @@ void ChatService::update_delivery_by_media_name(const std::string& peer_addr,
         }
         break;
     }
-    if (config_.profile != kTransientProfile && !entries.empty()) {
-        try {
-            storage::save_history(paths_, peer_addr, entries,
-                                  ByteView(identity_.identity_key), config_.retention);
-        } catch (const std::exception&) {
-        }
+    if (!entries.empty()) {
+        persist_peer_history(peer_addr, entries);
     }
     if (events_.on_delivery) {
         events_.on_delivery(DeliveryReport{peer_addr, matched_id, state, route, reason});
@@ -1349,6 +1763,59 @@ std::vector<storage::HistoryEntry> ChatService::history(std::string_view peer) c
         return found->second;
     }
     return storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+}
+
+bool ChatService::delete_history_message(std::string_view peer, std::size_t index) {
+    const std::string addr(peer);
+    std::vector<storage::HistoryEntry>& entries = history_[addr];
+    if (entries.empty()) {
+        entries = storage::load_history(paths_, addr, ByteView(identity_.identity_key));
+    }
+    if (index >= entries.size()) {
+        return false;
+    }
+    entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(index));
+    if (config_.profile == kTransientProfile) {
+        return true;
+    }
+    if (!config_.history_enabled) {
+        return true;
+    }
+    try {
+        persist_peer_history(addr, entries);
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not update history: ") + error.what());
+        return false;
+    }
+    return true;
+}
+
+void ChatService::clear_peer_history(std::string_view peer) {
+    const std::string addr(peer);
+    history_[addr].clear();
+    if (config_.profile == kTransientProfile) {
+        return;
+    }
+    storage::delete_history(paths_, addr);
+}
+
+bool ChatService::delete_group_history_message(const std::string& group_id,
+                                              std::size_t index) {
+    std::optional<groups::StoredConversation> existing = load_group(group_id);
+    if (!existing.has_value() || index >= existing->history.size()) {
+        return false;
+    }
+    existing->history.erase(existing->history.begin() +
+                            static_cast<std::ptrdiff_t>(index));
+    try {
+        groups::save_conversation(paths_, *existing, ByteView(identity_.identity_key),
+                                  ByteView(identity_.signing_seed));
+    } catch (const std::exception& error) {
+        emit_error(std::string("could not update group history: ") + error.what());
+        return false;
+    }
+    emit_group_message(group_id);
+    return true;
 }
 
 bool ChatService::live(std::string_view peer) {

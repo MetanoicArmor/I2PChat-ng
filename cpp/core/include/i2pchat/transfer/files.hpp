@@ -19,6 +19,8 @@ inline constexpr std::uint64_t kMaxFileSize = 2ull * 1024 * 1024 * 1024;
 /// The largest inline image, which is much smaller because it is held in
 /// memory until it can be validated.
 inline constexpr std::uint64_t kMaxImageSize = 5ull * 1024 * 1024;
+/// Profile avatars stay small so they can be buffered and sealed cheaply.
+inline constexpr std::uint64_t kMaxAvatarSize = 256ull * 1024;
 /// Lines accepted for a text-rendered image before it is truncated.
 inline constexpr std::size_t kMaxImageLines = 500;
 

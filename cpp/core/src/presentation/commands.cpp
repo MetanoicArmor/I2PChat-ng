@@ -17,7 +17,7 @@ struct Entry {
 
 /// The command table. Order is the order `/help` prints, which is grouped by
 /// what a user is doing rather than alphabetically.
-const std::array<Entry, 31> kCommands{{
+const std::array<Entry, 32> kCommands{{
     {CommandKind::Help, "help", "/help", "List every command"},
     {CommandKind::Status, "status", "/status", "Transport, peers and offline queue"},
     {CommandKind::Quit, "quit", "/quit", "Close the client"},
@@ -26,8 +26,8 @@ const std::array<Entry, 31> kCommands{{
      "Dial a peer by b32 address or destination"},
     {CommandKind::Disconnect, "disconnect", "/disconnect [address]",
      "Hang up on a peer, or the selected one"},
-    {CommandKind::Reply, "reply", "/reply <address> <text>",
-     "Send to a peer without selecting it"},
+    {CommandKind::Reply, "reply", "/reply <number> <text>",
+     "Reply to chat message #<number> with <text> (quoted)"},
 
     {CommandKind::Contacts, "contacts", "/contacts", "Show the contact list"},
     {CommandKind::ContactAdd, "contact-add",
@@ -47,12 +47,15 @@ const std::array<Entry, 31> kCommands{{
     {CommandKind::SendPicture, "sendpic", "/sendpic <path>", "Send an inline image"},
     {CommandKind::Transfers, "transfers", "/transfers", "Transfers in flight"},
 
-    {CommandKind::History, "history", "/history [count]",
-     "Replay the conversation from disk"},
+    {CommandKind::History, "history", "/history [on|off|count]",
+     "Replay history, or enable/disable saving to disk"},
     {CommandKind::HistoryClear, "history-clear", "/history-clear [address]",
      "Delete a conversation"},
     {CommandKind::HistoryRetention, "history-retention",
-     "/history-retention <messages> [days]", "Set how much history is kept"},
+     "/history-retention <messages> [days]", "Set global history retention"},
+    {CommandKind::PeerRetention, "peer-retention",
+     "/peer-retention <addr|#> [days|default]",
+     "Per-peer auto-delete age (default = inherit global)"},
 
     {CommandKind::BlindBox, "blindbox", "/blindbox", "Offline delivery status"},
     {CommandKind::BlindBoxPoll, "blindbox-poll", "/blindbox-poll",
@@ -151,6 +154,12 @@ Command parse_command(std::string_view line) {
     if (body.empty() || body.front() != '/' || line.find('\n') != std::string_view::npos) {
         command.kind = CommandKind::Text;
         command.rest = std::string(line);
+        return command;
+    }
+    // `//text` sends `/text` as chat, so a message can start with a slash.
+    if (body.size() >= 2 && body[1] == '/') {
+        command.kind = CommandKind::Text;
+        command.rest = std::string(body.substr(1));
         return command;
     }
 

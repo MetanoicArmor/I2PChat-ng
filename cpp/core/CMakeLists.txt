@@ -29,9 +29,12 @@ add_library(i2pchat_core
   src/groups/coordinator.cpp
   src/presentation/commands.cpp
   src/presentation/chat_view.cpp
+  src/presentation/reply_format.cpp
   src/storage/atomic_write.cpp
   src/storage/replica_settings.cpp
   src/storage/sealed_json.cpp
+  src/storage/sealed_blob.cpp
+  src/storage/avatar_store.cpp
   src/storage/contacts.cpp
   src/storage/compose_drafts.cpp
   src/storage/chat_history.cpp

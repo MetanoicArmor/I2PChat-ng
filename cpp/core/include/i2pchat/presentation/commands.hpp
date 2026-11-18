@@ -44,6 +44,8 @@ enum class CommandKind {
     History,
     HistoryClear,
     HistoryRetention,
+    /// Per-peer age override: inherit global, 0 = never by age, N = days.
+    PeerRetention,
 
     BlindBox,
     /// Force a collection now rather than waiting for the poll.
@@ -85,10 +87,10 @@ struct Command {
 
 /// Parse one input line.
 ///
-/// A line is a command only when it starts with `/` and holds no newline: a
-/// multi-line paste that happens to begin with a slash is chat text, which is
-/// how the reference implementation behaves and what users expect when pasting
-/// code.
+/// A line is a command only when it starts with a single `/` and holds no
+/// newline. A multi-line paste that happens to begin with a slash is chat text.
+/// Prefix `//` escapes a leading slash so `/hello` can be sent as chat by
+/// typing `//hello`.
 [[nodiscard]] Command parse_command(std::string_view line);
 
 /// The command word for a kind, without the slash. Empty for `Text` and

@@ -23,6 +23,8 @@
 ///          the receiver answers with the FILE_ACK signal
 ///   image: G "<name>|<size>"  then G "<base64 chunk>"…  then G "__IMG_END__"
 ///          the receiver answers with the IMG_ACK signal
+///   avatar: A "<sha>|<size>" then A "<base64 chunk>"… then A "__AVATAR_END__"
+///          the receiver answers with the AVATAR_ACK signal (not chat history)
 ///   text-rendered image: I "<line>"… then I "__END__"
 ///
 /// Both directions are expressed as plain state machines over frames rather
@@ -57,6 +59,7 @@ struct Progress {
     Direction direction = Direction::Incoming;
     bool inline_image = false;
     Outcome outcome = Outcome::Active;
+    bool avatar = false;
 };
 
 /// Streams one local file out as frames.
@@ -106,6 +109,30 @@ private:
     std::shared_ptr<std::ifstream> stream_;
 };
 
+/// Streams an in-memory avatar blob as `A` frames.
+class OutgoingAvatarTransfer {
+public:
+    OutgoingAvatarTransfer(Bytes data, std::string sha256_hex, std::size_t chunk_bytes = 4096);
+
+    [[nodiscard]] Frame header() const;
+    [[nodiscard]] std::optional<Frame> next();
+    void cancel();
+
+    [[nodiscard]] const std::string& sha256() const noexcept { return sha256_; }
+    [[nodiscard]] std::uint64_t size() const noexcept { return data_.size(); }
+    [[nodiscard]] std::uint64_t sent() const noexcept { return sent_; }
+    [[nodiscard]] bool finished() const noexcept { return finished_; }
+
+private:
+    Bytes data_;
+    std::string sha256_;
+    std::size_t chunk_bytes_ = 4096;
+    std::uint64_t sent_ = 0;
+    bool finished_ = false;
+    bool cancelled_ = false;
+    bool terminator_sent_ = false;
+};
+
 /// Receives the file, image and rendered-image flows for one peer.
 class IncomingTransfers {
 public:
@@ -114,16 +141,29 @@ public:
         std::filesystem::path images_dir;
         std::uint64_t max_file_size = kMaxFileSize;
         std::uint64_t max_image_size = kMaxImageSize;
+        std::uint64_t max_avatar_size = kMaxAvatarSize;
         std::size_t max_image_lines = kMaxImageLines;
         /// Injectable so generated image names are reproducible in tests.
         std::function<std::int64_t()> now_seconds;
+        /// When false, incoming `A` frames are ignored (untrusted peer).
+        bool accept_avatars = true;
+    };
+
+    /// Result of asking the UI whether to take an incoming file offer.
+    struct FileOfferDecision {
+        bool accept = false;
+        /// Empty keeps the default `downloads_dir` allocation. A directory
+        /// receives `allocate_unique_filename`; a file path is used as-is
+        /// (with collision avoidance in that parent).
+        std::filesystem::path save_path;
     };
 
     struct Callbacks {
-        /// Decides whether to accept an offered file. `name` is the name it
-        /// would be saved under, after sanitising and collision resolution.
-        /// Declining sends REJECT_FILE. Unset means accept.
-        std::function<bool(const std::string& name, std::uint64_t size)> accept_file;
+        /// Decides whether to accept an offered file. `name` is the sanitised
+        /// offered basename (before unique allocation). Declining sends
+        /// REJECT_FILE. Unset means accept into `downloads_dir`.
+        std::function<FileOfferDecision(const std::string& name, std::uint64_t size)>
+            accept_file;
         std::function<void(const Frame&)> send;
         std::function<void(const Progress&)> on_progress;
         std::function<void(const std::string& message)> on_system;
@@ -132,6 +172,9 @@ public:
         std::function<void(const std::filesystem::path& path)> on_image_received;
         /// A text-rendered image, lines already joined by newlines.
         std::function<void(const std::string& text)> on_image_lines_received;
+        /// Completed avatar blob (validated image magic). Not written to chat history.
+        std::function<void(const std::string& sha256, Bytes data, std::uint64_t message_id)>
+            on_avatar_received;
     };
 
     IncomingTransfers(Config config, Callbacks callbacks);
@@ -152,6 +195,7 @@ public:
 
     [[nodiscard]] bool receiving_file() const noexcept { return file_.has_value(); }
     [[nodiscard]] bool receiving_image() const noexcept { return image_.has_value(); }
+    [[nodiscard]] bool receiving_avatar() const noexcept { return avatar_.has_value(); }
 
 private:
     struct IncomingFile {
@@ -171,6 +215,13 @@ private:
         std::uint64_t last_reported = 0;
     };
 
+    struct IncomingAvatar {
+        std::string sha256;
+        std::uint64_t size = 0;
+        std::uint64_t message_id = 0;
+        Bytes buffer;
+    };
+
     void begin_file(std::string_view body, std::uint64_t message_id);
     void append_file_chunk(std::string_view body);
     void finish_file();
@@ -180,6 +231,11 @@ private:
     void append_image_chunk(std::string_view body);
     void finish_image();
     void fail_image(const std::string& message);
+
+    void begin_avatar(std::string_view body, std::uint64_t message_id);
+    void append_avatar_chunk(std::string_view body);
+    void finish_avatar();
+    void fail_avatar(const std::string& message);
 
     void append_image_line(std::string_view body);
     void finish_image_lines();
@@ -194,6 +250,7 @@ private:
     Callbacks callbacks_;
     std::optional<IncomingFile> file_;
     std::optional<IncomingImage> image_;
+    std::optional<IncomingAvatar> avatar_;
     std::vector<std::string> image_lines_;
     bool image_lines_truncated_ = false;
 };

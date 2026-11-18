@@ -27,7 +27,7 @@ inline constexpr std::size_t kDefaultResyncLimit = 64 * 1024;
 
 /// The frame types accepted on the live channel. Anything else is a violation.
 inline const std::set<char>& default_allowed_types() {
-    static const std::set<char> types{'U', 'S', 'P', 'O', 'F', 'D', 'E', 'I', 'H', 'G'};
+    static const std::set<char> types{'U', 'S', 'P', 'O', 'F', 'D', 'E', 'I', 'H', 'G', 'A'};
     return types;
 }
 

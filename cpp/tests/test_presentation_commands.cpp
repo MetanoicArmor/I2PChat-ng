@@ -25,6 +25,21 @@ TEST_CASE("plain text is not mistaken for a command") {
     CHECK(command.name.empty());
 }
 
+TEST_CASE("a doubled slash escapes a leading slash as chat text") {
+    const Command command = parse_command("//help me");
+    CHECK(command.kind == CommandKind::Text);
+    CHECK(command.rest == "/help me");
+    CHECK(command.name.empty());
+
+    const Command only = parse_command("//");
+    CHECK(only.kind == CommandKind::Text);
+    CHECK(only.rest == "/");
+
+    const Command nested = parse_command("///path");
+    CHECK(nested.kind == CommandKind::Text);
+    CHECK(nested.rest == "//path");
+}
+
 TEST_CASE("a multi-line paste starting with a slash is text") {
     const Command command = parse_command("/usr/bin/env\nsecond line");
     CHECK(command.kind == CommandKind::Text);
@@ -57,10 +72,22 @@ TEST_CASE("commands are parsed with their arguments") {
     }
 
     SECTION("free-form text after the command word") {
-        const Command command = parse_command("/reply abc  hello  world");
+        const Command command = parse_command("/reply 3  hello  world");
         CHECK(command.kind == CommandKind::Reply);
-        CHECK(command.rest == "abc  hello  world");
-        CHECK(command.arg(0) == "abc");
+        CHECK(command.rest == "3  hello  world");
+        CHECK(command.arg(0) == "3");
+        CHECK(command.arg(1) == "hello");
+    }
+
+    SECTION("peer-retention and history-retention parse") {
+        const Command peer = parse_command("/peer-retention 2 default");
+        CHECK(peer.kind == CommandKind::PeerRetention);
+        CHECK(peer.arg(0) == "2");
+        CHECK(peer.arg(1) == "default");
+        const Command global = parse_command("/history-retention 500 14");
+        CHECK(global.kind == CommandKind::HistoryRetention);
+        CHECK(global.arg(0) == "500");
+        CHECK(global.arg(1) == "14");
     }
 
     SECTION("a path with spaces survives") {

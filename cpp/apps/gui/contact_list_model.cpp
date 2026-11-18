@@ -29,6 +29,8 @@ QVariant ContactListModel::data(const QModelIndex& index, int role) const {
             return row.unread;
         case SelectedRole:
             return row.selected;
+        case AvatarPathRole:
+            return row.avatar_path;
         default:
             return {};
     }
@@ -69,8 +71,9 @@ bool ContactListModel::is_conversation(int row) const {
     return is_peer(row) || is_group(row);
 }
 
-QVector<SidebarRow> sidebar_from_contacts(const std::vector<presentation::ContactRow>& peers,
-                                          const QVector<SidebarRow>& groups) {
+QVector<SidebarRow> sidebar_from_contacts(
+    const std::vector<presentation::ContactRow>& peers, const QVector<SidebarRow>& groups,
+    const std::function<QString(const std::string&)>& avatar_for_peer) {
     QVector<SidebarRow> rows;
     if (groups.isEmpty()) {
         SidebarRow empty_groups;
@@ -98,6 +101,9 @@ QVector<SidebarRow> sidebar_from_contacts(const std::vector<presentation::Contac
             row.subtitle = QString::fromStdString(presentation::short_address(peer.addr));
         }
         row.addr = QString::fromStdString(peer.addr);
+        if (avatar_for_peer) {
+            row.avatar_path = avatar_for_peer(peer.addr);
+        }
         row.live = peer.live;
         row.unread = peer.unread;
         row.selected = peer.selected;

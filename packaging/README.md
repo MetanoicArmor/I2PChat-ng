@@ -11,6 +11,7 @@
 | **Homebrew tap** | [MetanoicArmor/homebrew-i2pchat](https://github.com/MetanoicArmor/homebrew-i2pchat): `brew tap MetanoicArmor/i2pchat`. Casks в [`homebrew/Casks/`](homebrew/Casks/). |
 | **AUR** | [i2pchat-bin](https://aur.archlinux.org/packages/i2pchat-bin), [i2pchat-tui-bin](https://aur.archlinux.org/packages/i2pchat-tui-bin), [i2pchat-ng-git](https://aur.archlinux.org/packages/i2pchat-ng-git), [i2pchat-ng-tui-git](https://aur.archlinux.org/packages/i2pchat-ng-tui-git). PKGBUILD: [`aur/`](aur/). |
 | **Flatpak / COPR** | Шаблоны: [flatpak/README.md](flatpak/README.md), [fedora/](fedora/). |
+| **Firejail** | Черновики профилей GUI/TUI: [`firejail/`](firejail/) (для теста и PR в upstream). |
 | **`.deb` / `.rpm` на Release** | Workflow [release-linux-pkgs.yml](../.github/workflows/release-linux-pkgs.yml). См. [debian/README.md](debian/README.md), [fedora/README.md](fedora/README.md). |
 | **apt + GitHub Pages** | [metanoicarmor.github.io/I2PChat-ng](https://metanoicarmor.github.io/I2PChat-ng/). Старый URL `…/I2PChat/` — **404**. См. [`apt/README.md`](apt/README.md). |
 

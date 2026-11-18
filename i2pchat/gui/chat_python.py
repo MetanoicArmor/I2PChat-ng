@@ -72,6 +72,7 @@ from i2pchat.storage.chat_history import (
     normalize_peer_addr,
     save_history,
 )
+from i2pchat.util.timefmt import local_hms, local_hms_now
 from i2pchat.storage.compose_drafts_store import (
     COMPOSE_DRAFTS_MAGIC,
     load_compose_drafts,
@@ -347,7 +348,10 @@ class I2PChat(App):
         stripped = text.strip()
         if not stripped:
             return
-        if "\n" not in stripped and stripped.startswith("/"):
+        if "\n" not in stripped and stripped.startswith("//"):
+            # Escape: send a chat line that begins with a single slash.
+            text = stripped[1:]
+        elif "\n" not in stripped and stripped.startswith("/"):
             await self._execute_command(stripped)
             return
         if self._active_group_id:
@@ -900,7 +904,7 @@ class I2PChat(App):
         suffix = " · ".join(suffix_parts)
         panel = Panel(
             f"[white]{escape(text)}[/]",
-            title=f"[#5f5f5f][{timestamp} UTC][/] [bold {border_color}]{escape(sender_label)}[/] [dim]{escape(suffix)}[/]",
+            title=f"[#5f5f5f][{timestamp}][/] [bold {border_color}]{escape(sender_label)}[/] [dim]{escape(suffix)}[/]",
             title_align="left",
             border_style=border_color,
             box=box.ROUNDED,
@@ -909,26 +913,15 @@ class I2PChat(App):
         self.chat_log.write(Align(panel, align=align), expand=True)
 
     def _render_inline_image(self, path: str, *, is_from_me: bool, label: str) -> None:
-        try:
-            art = "\n".join(render_bw(path))
-        except Exception:
-            art = f"Saved image: {path}"
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        border = "green" if is_from_me else "cyan"
-        align = "left" if is_from_me else "right"
-        panel = Panel(
-            art,
-            title=(
-                f"[#5f5f5f][{now_utc} UTC][/] [bold {border}]{escape(label)}[/] "
-                f"[dim]{escape(os.path.basename(path))}[/]"
-            ),
-            title_align="left",
-            border_style=border,
-            box=box.ROUNDED,
-            expand=False,
-        )
-        self.chat_log.write(Align(panel, align=align), expand=True)
-        self.post("system", f"Image saved at {path}")
+        # TUI must not paint the image in the terminal — only a path notice.
+        _ = label
+        note = f"Image sent: {path}" if is_from_me else f"Image received: {path}"
+        if not is_from_me:
+            from i2pchat.storage.media_prefs import load_media_prefs
+
+            if load_media_prefs()[2]:
+                note += " (temporary: deleted on exit; /savefile <path> keeps a copy)"
+        self.post("system", note)
 
     def _set_compose_text(self, text: str) -> None:
         box = self._safe_compose_box()
@@ -1160,11 +1153,7 @@ class I2PChat(App):
         if len(entries) > len(tail):
             self.post("system", f"Showing the latest {len(tail)} history message(s). Use /history show for more.")
         for entry in tail:
-            ts_display = entry.ts
-            try:
-                ts_display = datetime.fromisoformat(entry.ts.replace("Z", "+00:00")).strftime("%H:%M:%S")
-            except Exception:
-                ts_display = entry.ts[:8]
+            ts_display = local_hms(entry.ts, fallback=entry.ts[:8] if entry.ts else "")
             sender = "Me" if entry.kind == "me" else self._peer_display_name(normalized_peer)
             ref_id = self._record_recent_message(
                 sender,
@@ -1281,9 +1270,7 @@ class I2PChat(App):
         self._loaded_group_history_id = group_id
 
     def _append_group_history_entry(self, entry: GroupHistoryEntry) -> None:
-        ts_display = ""
-        if isinstance(entry.created_at, datetime):
-            ts_display = entry.created_at.strftime("%H:%M:%S")
+        ts_display = local_hms(entry.created_at if isinstance(entry.created_at, datetime) else None)
         if entry.content_type.value == "GROUP_CONTROL":
             actor = "You" if entry.kind == "me" else self._group_member_label(entry.sender_id)
             payload = entry.payload if isinstance(entry.payload, dict) else None
@@ -1320,7 +1307,7 @@ class I2PChat(App):
             self._refresh_status_bar()
             return
         if msg.kind in {"me", "peer"}:
-            timestamp = msg.timestamp.astimezone(timezone.utc).strftime("%H:%M:%S")
+            timestamp = local_hms(msg.timestamp)
             peer = msg.source_peer if msg.kind == "peer" else self._current_target_peer()
             sender = "Me" if msg.kind == "me" else self._peer_display_name(peer)
             ref_id = self._record_recent_message(
@@ -1398,16 +1385,11 @@ class I2PChat(App):
 
     def handle_image_received(self, art: str) -> None:
         self._record_transfer_event("image", "inline-image", "received")
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        panel = Panel(
-            art,
-            title=f"[#5f5f5f][{now_utc} UTC][/] [bold cyan]{escape(self._peer_display_name(self._current_target_peer()))}[/] [dim]ASCII image[/]",
-            title_align="left",
-            border_style="cyan",
-            box=box.ROUNDED,
-            expand=False,
+        lines = art.count("\n") + 1 if art else 0
+        self.post(
+            "system",
+            f"Received text-rendered image ({lines} lines); not shown in the terminal.",
         )
-        self.chat_log.write(Align(panel, align="right"), expand=True)
 
     def handle_inline_image_received(
         self, path: str, is_from_me: bool, sent_filename: Optional[str] = None
@@ -1621,10 +1603,7 @@ class I2PChat(App):
         table.add_column("State", width=10)
         table.add_column("Text")
         for entry in entries:
-            try:
-                ts = datetime.fromisoformat(entry.ts.replace("Z", "+00:00")).strftime("%H:%M:%S")
-            except Exception:
-                ts = entry.ts[:8]
+            ts = local_hms(entry.ts, fallback=entry.ts[:8] if entry.ts else "")
             sender = "Me" if entry.kind == "me" else self._peer_display_name(peer)
             table.add_row(ts, sender, delivery_state_label(normalize_loaded_delivery_state(entry.delivery_state)) or "—", entry.text.replace("\n", " ⏎ "))
         self.post_panel(f"History for {peer}", table, border_style="green")
@@ -1903,7 +1882,7 @@ class I2PChat(App):
                 kind=kind,
                 filename=os.path.basename(filename),
                 detail=detail,
-                timestamp=datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                timestamp=local_hms_now(),
             )
         )
 
@@ -2645,7 +2624,11 @@ class I2PChat(App):
             self.show_help()
 
         else:
-            self.post("error", f"Unknown command: /{cmd}. Type /help.")
+            self.post(
+                "error",
+                f"Unknown command: /{cmd}. Type /help. "
+                "To send a message starting with /, prefix it with //.",
+            )
 
         if cmd != "reply":
             self._set_compose_text("")
@@ -2867,17 +2850,10 @@ class I2PChat(App):
         return None
 
     async def _send_image_me(self, lines: list[str]) -> None:
-        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        img_text = "\n".join(lines)
-        panel = Panel(
-            img_text,
-            title=f"[#5f5f5f][{now_utc} UTC][/] [bold green]Me[/] [dim]ASCII image[/]",
-            title_align="left",
-            border_style="green",
-            box=box.ROUNDED,
-            expand=False,
+        self.post(
+            "system",
+            f"Sent text-rendered image ({len(lines)} lines); not shown in the terminal.",
         )
-        self.chat_log.write(Align(panel, align="left"), expand=True)
 
     def show_help(self) -> None:
         self.post("help", "Compose: Enter = newline, Ctrl+S / Ctrl+Enter = send current compose buffer.")
@@ -4397,10 +4373,7 @@ class TuiHistoryScreen(ModalScreen[None]):
             return
         table.disabled = False
         for entry in entries:
-            try:
-                ts = datetime.fromisoformat(entry.ts.replace("Z", "+00:00")).strftime("%H:%M:%S")
-            except Exception:
-                ts = entry.ts[:8]
+            ts = local_hms(entry.ts, fallback=entry.ts[:8] if entry.ts else "")
             sender = "Me" if entry.kind == "me" else self.host._peer_display_name(peer)
             table.add_row(
                 ts,

@@ -80,7 +80,7 @@ The **Saved peers** strip on the **left** is your local **contact book** for the
 - **Click** a row — sets the peer address field to that contact (same as typing the address) and syncs compose drafts; if the profile is **locked** to another peer, switching may be blocked (see status messages).
 - **◀ / ▶** — collapse or expand the sidebar; when the profile is **locked to a peer**, the strip may start **collapsed** to give more space to the chat.
 - **Drag** the narrow grip between the list and the chat to resize the strip (within min/max limits).
-- **Right‑click** a contact — **Edit name & note…** (local labels only), **Contact details…** (address, TOFU fingerprint, optional **Remove pin**), **Remove from saved peers…** (with options to also delete encrypted history, TOFU pin, profile lock, and BlindBox state file for that peer, where applicable).
+- **Right‑click** a contact — **Edit name & note…** (local labels only; includes per-peer **Auto-delete after N days** when history saving is on), **Contact details…** (address, TOFU fingerprint, optional **Remove pin**), **Remove from saved peers…** (with options to also delete encrypted history, TOFU pin, profile lock, and BlindBox state file for that peer, where applicable).
 
 ### 4. Actions bar (connection and profiles)
 
@@ -119,7 +119,8 @@ Click the **`⋯`** button or press **Ctrl+.** (Windows/Linux) / **⌘+.** (macO
 - **Send picture** — send an image file to the connected peer.
 - **Send file** — send any file to the connected peer.
 - **BlindBox diagnostics** — opens a textual summary of BlindBox/offline routing and replica health (complements the status row and section 4.9).
-- **Export profile backup…** / **Import profile backup…** — password-protected bundles of the current profile (`.dat` and supported sidecar data); import avoids name collisions by choosing a free profile name when needed.
+- **Set my avatar…** / **Clear my avatar** — store a small square profile picture (PNG/JPEG/WebP, up to 256 KiB). Trusted peers receive updates automatically over a live channel; peer avatars are cached per profile and are **not** included in profile backups (they are re-fetched after import).
+- **Export profile backup…** / **Import profile backup…** — password-protected bundles of the current profile (`.dat`, self avatar, and supported sidecar data); import avoids name collisions by choosing a free profile name when needed.
 - **Export history backup…** / **Import history backup…** — export or restore encrypted per-peer history files only; the import flow asks whether to overwrite matching files or add only missing ones.
 - **Check for updates…** — compare the running build with release ZIP names from the project release page (see section 4.12).
 - **Open App dir** — open the application data directory in the system file manager.
@@ -398,7 +399,12 @@ Control from the `⋯` menu:
 - **Clear history**:
   - removes the history file for the current peer.
 - **History retention…**:
-  - opens a dialog to cap how many messages per peer are kept and how old they may be (days); `0` days means “limit by count only”.
+  - opens a dialog to cap how many messages per peer are kept and how old they may be (days); `0` days means “limit by count only”. This is the **global default**.
+- **Per-peer auto-delete** (edit contact / Android Edit contact; TUI `/peer-retention`):
+  - unset → inherit the global max age;
+  - `0` → no age-based pruning for that chat (count limit still applies);
+  - `N > 0` → drop messages older than N days for that peer.
+  - Only available when **Chat history** saving is ON; with history OFF, nothing is written to disk.
 
 Runtime behavior:
 
@@ -409,7 +415,7 @@ Runtime behavior:
 Size limit:
 
 - by default, the latest `1000` messages per peer are stored;
-- you can override this in `ui_prefs.json` via `history_max_messages`.
+- you can override this in `ui_prefs.json` via `history_max_messages` (and `history_retention_days` for the global age default).
 
 #### 4.12. Check for updates and verifying downloads
 

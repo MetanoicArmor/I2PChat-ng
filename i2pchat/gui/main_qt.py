@@ -60,6 +60,8 @@ from i2pchat.protocol.message_delivery import (
     normalize_loaded_delivery_state,
 )
 from i2pchat.presentation.reply_format import format_reply_quote
+from i2pchat.util.timefmt import local_hms as _local_hms
+from i2pchat.util.timefmt import local_hms_now as _local_hms_now
 from i2pchat.core.live_peer_session import max_concurrent_live_sessions
 from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _should_start_auto_connect_retry
 from i2pchat.presentation.status_presentation import build_status_presentation
@@ -281,11 +283,6 @@ def _resolve_local_asset(filename: str) -> Optional[str]:
         if os.path.isfile(path):
             return path
     return None
-
-
-def _utc_hms_now() -> str:
-    """Compact UTC time label for GUI timestamps."""
-    return datetime.now(timezone.utc).strftime("%H:%M:%S")
 
 
 def _default_notify_sound_path() -> Optional[str]:
@@ -9103,7 +9100,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._append_item(
             ChatItem(
                 kind="me",
-                timestamp=_utc_hms_now(),
+                timestamp=_local_hms_now(),
                 sender="Me",
                 text=text,
                 delivery_state=DELIVERY_STATE_FAILED,
@@ -9669,7 +9666,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                 )
             )
         )
-        ts = msg.timestamp.strftime("%H:%M:%S")
+        ts = _local_hms(msg.timestamp)
         text = msg.text
         if kind == "peer":
             sender = self.profile if self.profile != TRANSIENT_PROFILE_NAME else "Peer"
@@ -10073,7 +10070,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                     self._transfer_row,
                     ChatItem(
                         kind="me" if info.is_sending else "error",
-                        timestamp=_utc_hms_now() if info.is_sending else "",
+                        timestamp=_local_hms_now() if info.is_sending else "",
                         sender="Me" if info.is_sending else ("IMAGE" if self._transfer_is_image else "FILE"),
                         text=err_text,
                         delivery_state=DELIVERY_STATE_FAILED,
@@ -10138,7 +10135,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                             self._transfer_row,
                             ChatItem(
                                 kind="success",
-                                timestamp=_utc_hms_now(),
+                                timestamp=_local_hms_now(),
                                 sender="FILE",
                                 text=(
                                     f"✔ File received: {disp_name} ({info.size:,} bytes). "
@@ -10153,7 +10150,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                             self._transfer_row,
                             ChatItem(
                                 kind="success",
-                                timestamp=_utc_hms_now(),
+                                timestamp=_local_hms_now(),
                                 sender="FILE",
                                 text=f"File sent: {info.filename} ({info.size:,} bytes)",
                                 file_name=info.filename,
@@ -10215,7 +10212,7 @@ class ChatWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(str, bool)
     def handle_inline_image_received(self, path: str, is_from_me: bool, sent_filename: Optional[str] = None) -> None:
         """Обработчик для inline-изображений (PNG/JPEG/WebP). sent_filename — для галочки доставки."""
-        ts = _utc_hms_now()
+        ts = _local_hms_now()
         if is_from_me:
             sender = "Me"
         else:
@@ -11798,9 +11795,7 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _append_group_history_entry_to_chat(self, entry: object) -> None:
         content_type = getattr(entry, "content_type", None)
         timestamp = getattr(entry, "created_at", None)
-        ts_display = ""
-        if isinstance(timestamp, datetime):
-            ts_display = timestamp.strftime("%H:%M:%S")
+        ts_display = _local_hms(timestamp if isinstance(timestamp, datetime) else None)
 
         if str(content_type) == "GROUP_CONTROL":
             actor_label = "You" if getattr(entry, "kind", "") == "me" else self._group_member_label(
@@ -12013,14 +12008,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                         sender = self.profile if self.profile != TRANSIENT_PROFILE_NAME else "Peer"
                     else:
                         continue
-                    ts_display = ""
-                    if e.ts:
-                        try:
-                            from datetime import datetime
-                            dt = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))
-                            ts_display = dt.strftime("%H:%M:%S")
-                        except Exception:
-                            ts_display = e.ts[:8]
+                    ts_display = _local_hms(e.ts, fallback=e.ts[:8] if e.ts else "")
                     loaded_state = normalize_loaded_delivery_state(e.delivery_state)
                     can_retry = bool(
                         e.kind == "me"

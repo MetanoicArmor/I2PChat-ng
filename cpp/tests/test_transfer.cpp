@@ -158,7 +158,10 @@ TEST_CASE("a declined offer is answered and nothing is written", "[transfer]") {
 
     Recorder recorder;
     auto callbacks = recorder.callbacks();
-    callbacks.accept_file = [](const std::string&, std::uint64_t) { return false; };
+    callbacks.accept_file = [](const std::string&,
+                               std::uint64_t) -> transfer::IncomingTransfers::FileOfferDecision {
+        return {/*accept=*/false, {}};
+    };
     transfer::IncomingTransfers receiver(config_for(dir), std::move(callbacks));
     transfer::OutgoingTransfer sender(source);
 

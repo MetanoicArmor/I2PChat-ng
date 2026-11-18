@@ -48,6 +48,8 @@ RUN apt-get update -qq \
     libxcb-xinput0 \
     libxcb-cursor0 \
     libcrypt1 \
+    libboost-program-options1.83.0 \
+    libminiupnpc17 \
     build-essential \
     zlib1g \
   && rm -rf /var/lib/apt/lists/*

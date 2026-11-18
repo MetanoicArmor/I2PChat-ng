@@ -14,6 +14,7 @@ namespace {
 
 constexpr std::string_view kFileEndBody = "";
 constexpr std::string_view kImageEndBody = "__IMG_END__";
+constexpr std::string_view kAvatarEndBody = "__AVATAR_END__";
 constexpr std::string_view kImageLinesEndBody = "__END__";
 constexpr std::uint64_t kImageProgressStep = 65536;
 
@@ -130,6 +131,48 @@ Progress OutgoingTransfer::progress(Outcome outcome) const {
     return progress;
 }
 
+OutgoingAvatarTransfer::OutgoingAvatarTransfer(Bytes data, std::string sha256_hex,
+                                               std::size_t chunk_bytes)
+    : data_(std::move(data)),
+      sha256_(std::move(sha256_hex)),
+      chunk_bytes_(std::clamp<std::size_t>(chunk_bytes, 1024, 64 * 1024)) {
+    if (data_.size() > kMaxAvatarSize) {
+        throw std::length_error("Avatar exceeds the maximum allowed size");
+    }
+    if (sha256_.empty()) {
+        throw std::invalid_argument("Avatar transfer requires a sha256");
+    }
+}
+
+Frame OutgoingAvatarTransfer::header() const {
+    return Frame{'A', sha256_ + "|" + std::to_string(data_.size())};
+}
+
+std::optional<Frame> OutgoingAvatarTransfer::next() {
+    if (finished_) {
+        return std::nullopt;
+    }
+    if (cancelled_) {
+        finished_ = true;
+        return std::nullopt;
+    }
+    if (!terminator_sent_) {
+        if (sent_ < data_.size()) {
+            const std::size_t remaining = data_.size() - static_cast<std::size_t>(sent_);
+            const std::size_t take = std::min(chunk_bytes_, remaining);
+            const ByteView chunk(data_.data() + sent_, take);
+            sent_ += take;
+            return Frame{'A', encoding::base64_encode(chunk)};
+        }
+        terminator_sent_ = true;
+        return Frame{'A', std::string(kAvatarEndBody)};
+    }
+    finished_ = true;
+    return std::nullopt;
+}
+
+void OutgoingAvatarTransfer::cancel() { cancelled_ = true; }
+
 IncomingTransfers::IncomingTransfers(Config config, Callbacks callbacks)
     : config_(std::move(config)), callbacks_(std::move(callbacks)) {}
 
@@ -152,6 +195,18 @@ void IncomingTransfers::on_frame(char type, std::string_view body,
                 begin_image(body, message_id);
             } else {
                 append_image_chunk(body);
+            }
+            return;
+        case 'A':
+            if (!config_.accept_avatars) {
+                return;
+            }
+            if (body == kAvatarEndBody) {
+                finish_avatar();
+            } else if (!avatar_) {
+                begin_avatar(body, message_id);
+            } else {
+                append_avatar_chunk(body);
             }
             return;
         case 'I':
@@ -184,6 +239,7 @@ void IncomingTransfers::reset() {
         file_.reset();
     }
     image_.reset();
+    avatar_.reset();
     image_lines_.clear();
     image_lines_truncated_ = false;
 }
@@ -208,22 +264,41 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
     }
 
     const std::string safe_name = sanitize_filename(raw_name, now());
+    FileOfferDecision decision{/*accept=*/true, {}};
+    if (callbacks_.accept_file) {
+        decision = callbacks_.accept_file(safe_name, size);
+    }
+    if (!decision.accept) {
+        send(Frame{'S', protocol::signal_body(protocol::build_reject_file(safe_name))});
+        emit_system("Incoming file rejected by user: " + safe_name);
+        return;
+    }
+
     std::filesystem::path target;
     try {
         std::error_code ignored;
-        std::filesystem::create_directories(config_.downloads_dir, ignored);
-        target = allocate_unique_filename(config_.downloads_dir, safe_name);
+        if (decision.save_path.empty()) {
+            std::filesystem::create_directories(config_.downloads_dir, ignored);
+            target = allocate_unique_filename(config_.downloads_dir, safe_name);
+        } else if (std::filesystem::is_directory(decision.save_path) ||
+                   decision.save_path.filename().empty()) {
+            std::filesystem::create_directories(decision.save_path, ignored);
+            target = allocate_unique_filename(decision.save_path, safe_name);
+        } else {
+            const std::filesystem::path parent = decision.save_path.parent_path();
+            if (!parent.empty()) {
+                std::filesystem::create_directories(parent, ignored);
+            }
+            const std::string wanted = decision.save_path.filename().string();
+            target = allocate_unique_filename(parent.empty() ? std::filesystem::path(".")
+                                                            : parent,
+                                             wanted.empty() ? safe_name : wanted);
+        }
     } catch (const std::exception& exc) {
         emit_error(std::string("Cannot save the incoming file: ") + exc.what());
         return;
     }
     const std::string final_name = target.filename().string();
-
-    if (callbacks_.accept_file && !callbacks_.accept_file(final_name, size)) {
-        send(Frame{'S', protocol::signal_body(protocol::build_reject_file(final_name))});
-        emit_system("Incoming file rejected by user: " + final_name);
-        return;
-    }
 
     IncomingFile incoming;
     incoming.path = target;
@@ -465,6 +540,114 @@ void IncomingTransfers::fail_image(const std::string& message) {
                           image_->buffer.size(), Direction::Incoming,
                           true,                  Outcome::Failed};
     image_.reset();
+    emit_error(message);
+    report(failed);
+}
+
+void IncomingTransfers::begin_avatar(std::string_view body, std::uint64_t message_id) {
+    const auto offer = parse_offer(body);
+    if (!offer) {
+        emit_error("Invalid avatar header");
+        return;
+    }
+    const auto& [sha, size] = *offer;
+    if (size > config_.max_avatar_size) {
+        emit_error("Incoming avatar too large: " + std::to_string(size) + " bytes");
+        return;
+    }
+    if (sha.empty()) {
+        emit_error("Incoming avatar missing sha256");
+        return;
+    }
+    IncomingAvatar incoming;
+    incoming.sha256 = sha;
+    incoming.size = size;
+    incoming.message_id = message_id;
+    avatar_ = std::move(incoming);
+    Progress progress;
+    progress.name = sha;
+    progress.size = size;
+    progress.direction = Direction::Incoming;
+    progress.outcome = Outcome::Active;
+    progress.avatar = true;
+    report(progress);
+}
+
+void IncomingTransfers::append_avatar_chunk(std::string_view body) {
+    if (!avatar_) {
+        return;
+    }
+    const std::uint64_t remaining = avatar_->size - avatar_->buffer.size();
+    if (remaining == 0) {
+        fail_avatar("Avatar chunk exceeds declared size");
+        return;
+    }
+    if (body.size() > max_base64_chars_for_bytes(remaining)) {
+        fail_avatar("Avatar chunk is too large for the remaining size");
+        return;
+    }
+    const std::optional<Bytes> chunk = encoding::base64_decode(body);
+    if (!chunk) {
+        fail_avatar("Avatar chunk is not valid base64");
+        return;
+    }
+    if (chunk->size() > remaining) {
+        fail_avatar("Decoded avatar chunk exceeds the remaining size");
+        return;
+    }
+    append(avatar_->buffer, ByteView(*chunk));
+}
+
+void IncomingTransfers::finish_avatar() {
+    if (!avatar_) {
+        return;
+    }
+    if (avatar_->buffer.size() != avatar_->size) {
+        fail_avatar("Avatar transfer incomplete");
+        return;
+    }
+    if (!detect_inline_image_format(ByteView(avatar_->buffer))) {
+        fail_avatar("Received avatar has an invalid format");
+        return;
+    }
+    crypto::init();
+    const std::string digest =
+        encoding::hex_encode(ByteView(crypto::sha256(ByteView(avatar_->buffer))));
+    if (digest != avatar_->sha256) {
+        fail_avatar("Avatar sha256 mismatch");
+        return;
+    }
+    const std::string sha = avatar_->sha256;
+    Bytes data = std::move(avatar_->buffer);
+    const std::uint64_t message_id = avatar_->message_id;
+    const std::uint64_t size = avatar_->size;
+    avatar_.reset();
+
+    Progress progress;
+    progress.name = sha;
+    progress.size = size;
+    progress.transferred = size;
+    progress.direction = Direction::Incoming;
+    progress.outcome = Outcome::Completed;
+    progress.avatar = true;
+    report(progress);
+    if (callbacks_.on_avatar_received) {
+        callbacks_.on_avatar_received(sha, std::move(data), message_id);
+    }
+}
+
+void IncomingTransfers::fail_avatar(const std::string& message) {
+    if (!avatar_) {
+        return;
+    }
+    Progress failed;
+    failed.name = avatar_->sha256;
+    failed.size = avatar_->size;
+    failed.transferred = avatar_->buffer.size();
+    failed.direction = Direction::Incoming;
+    failed.outcome = Outcome::Failed;
+    failed.avatar = true;
+    avatar_.reset();
     emit_error(message);
     report(failed);
 }

@@ -77,6 +77,8 @@ private slots:
     void disconnect_selected();
     void poll_offline();
     void copy_address();
+    void set_self_avatar();
+    void clear_self_avatar();
     void toggle_theme();
     void toggle_sidebar();
     void balance_sidebar_splitter();
@@ -134,6 +136,7 @@ private:
     void rebuild_search_console();
     void update_search_hit_highlight();
     void layout_search_status_overlay();
+    void scroll_to_quoted_message(const QString& quotedPlain);
     [[nodiscard]] QString search_hit_label(int row) const;
     void notify_incoming(const std::string& peer, const QString& preview);
     void sync_media_dirs();

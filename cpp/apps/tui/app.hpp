@@ -68,11 +68,14 @@ private:
     [[nodiscard]] ftxui::Elements chat_rows() const;
     [[nodiscard]] ftxui::Elements info_rows() const;
     [[nodiscard]] ftxui::Element render_trust_modal() const;
+    [[nodiscard]] ftxui::Element render_file_offer_modal() const;
 
     session::TrustDecision on_trust_prompt(session::TrustPrompt prompt,
                                            const std::string& peer_addr,
                                            const std::string& new_key_hex,
                                            const std::string& old_key_hex);
+    transfer::IncomingTransfers::FileOfferDecision on_file_offer(
+        const std::string& peer_addr, const std::string& name, std::uint64_t size);
 
     Options options_;
     ftxui::ScreenInteractive screen_ = ftxui::ScreenInteractive::Fullscreen();
@@ -101,6 +104,17 @@ private:
     std::mutex trust_mutex_;
     std::condition_variable trust_cv_;
     std::optional<session::TrustDecision> trust_decision_;
+
+    bool file_offer_open_ = false;
+    bool file_offer_path_mode_ = false;
+    std::string file_offer_peer_;
+    std::string file_offer_name_;
+    std::uint64_t file_offer_size_ = 0;
+    std::string file_offer_path_;
+    int file_offer_path_cursor_ = 0;
+    std::mutex file_offer_mutex_;
+    std::condition_variable file_offer_cv_;
+    std::optional<transfer::IncomingTransfers::FileOfferDecision> file_offer_decision_;
 };
 
 }  // namespace i2pchat::tui

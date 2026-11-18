@@ -24,6 +24,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFile>
+#include <QBuffer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -93,6 +94,7 @@
 #include "i2pchat/groups/store.hpp"
 #include "i2pchat/groups/wire.hpp"
 #include "i2pchat/presentation/chat_view.hpp"
+#include "i2pchat/presentation/reply_format.hpp"
 #include "i2pchat/router/i2pd.hpp"
 #include "i2pchat/runtime/identity.hpp"
 #include "i2pchat/sam/destination.hpp"
@@ -553,6 +555,8 @@ void ChatWindow::build_ui() {
 
     chat_ = new ChatModel(this);
     chat_delegate_ = new ChatItemDelegate(this);
+    connect(chat_delegate_, &ChatItemDelegate::quoteActivated, this,
+            &ChatWindow::scroll_to_quoted_message);
     auto* chat_surface = new QWidget(this);
     chat_surface->setObjectName("ChatSurface");
     auto* chat_layout = new QVBoxLayout(chat_surface);
@@ -1064,17 +1068,23 @@ void ChatWindow::show_chat_context_menu(const QPoint& pos) {
         }
     }
     chat_popup_->add_separator();
+    const auto kind = static_cast<presentation::LineKind>(index.data(ChatModel::KindRole).toInt());
     chat_popup_->add_action(
         tr("Reply"), {},
-        [this, text] {
+        [this, text, kind, author] {
+            const std::string who =
+                kind == presentation::LineKind::Outgoing
+                    ? "me"
+                    : (author.trimmed().isEmpty() ? std::string("message")
+                                                  : author.toStdString());
+            const QString quote = QString::fromStdString(
+                presentation::format_reply_quote(who, text.toStdString()));
             const QString cur = composer_->toPlainText();
-            const QString quote = QStringLiteral("> ") + text;
-            composer_->setPlainText(cur.trimmed().isEmpty() ? quote
-                                                            : cur + QStringLiteral("\n\n") + quote);
+            composer_->setPlainText(cur.trimmed().isEmpty() ? quote : (cur + quote));
+            composer_->moveCursor(QTextCursor::End);
             composer_->setFocus();
         },
         tr("Insert a quoted copy of this message into the compose field."));
-    const auto kind = static_cast<presentation::LineKind>(index.data(ChatModel::KindRole).toInt());
     const QString marker = index.data(ChatModel::MarkerRole).toString();
     if (kind == presentation::LineKind::Outgoing && marker == QStringLiteral("✗")) {
         chat_popup_->add_action(
@@ -1304,10 +1314,16 @@ void ChatWindow::show_more_menu() {
     more_popup_->add_action(tr("Forget pinned peer key"), {}, [this] { forget_pin(); });
     more_popup_->add_action(tr("Copy my address"), native_shortcut(QStringLiteral("Ctrl+Shift+C")),
                             [this] { copy_address(); });
+    more_popup_->add_action(tr("Set my avatar…"), {}, [this] { set_self_avatar(); },
+                            tr("Choose a square image (PNG/JPEG/WebP, up to 256 KiB)."));
+    more_popup_->add_action(tr("Clear my avatar"), {}, [this] { clear_self_avatar(); });
     more_popup_->add_separator();
     more_popup_->add_action(history_enabled_ ? tr("History: on") : tr("History: off"), {}, [this] {
         history_enabled_ = !history_enabled_;
         QSettings().setValue(QStringLiteral("historyEnabled"), history_enabled_);
+        if (service_) {
+            service_->set_history_enabled(history_enabled_);
+        }
         if (!history_enabled_) {
             chat_->clear();
             apply_empty_state();
@@ -1528,6 +1544,7 @@ void ChatWindow::start_core_session() {
     config.sam.host = options_.sam_host;
     config.sam.port = options_.sam_port;
     config.retention = load_retention_policy(options_.app_root);
+    config.history_enabled = history_enabled_;
 
     runtime::ChatEvents events;
     events.on_system = [this](const std::string& message) {
@@ -1594,6 +1611,10 @@ void ChatWindow::start_core_session() {
         });
     };
     events.on_contacts_changed = [this] {
+        QMetaObject::invokeMethod(this, [this] { schedule_refresh_contacts(); });
+    };
+    events.on_avatar_changed = [this](const std::string&,
+                                      const std::optional<std::filesystem::path>&) {
         QMetaObject::invokeMethod(this, [this] { schedule_refresh_contacts(); });
     };
     events.on_group_message = [this](const std::string& group_id) {
@@ -1754,7 +1775,16 @@ void ChatWindow::rebuild_contacts_sidebar() {
     contacts_model_->set_rows(sidebar_from_contacts(
         presentation::contact_rows(service_->contacts(), service_->connected_peers(), selected_,
                                    unread_pairs),
-        groups_sidebar_cache_));
+        groups_sidebar_cache_,
+        [this](const std::string& addr) -> QString {
+            if (!service_) {
+                return {};
+            }
+            if (const auto path = service_->peer_avatar_view(addr)) {
+                return QString::fromStdString(path->string());
+            }
+            return {};
+        }));
 }
 
 void ChatWindow::refresh_status() {
@@ -1840,7 +1870,8 @@ void ChatWindow::reload_selected() {
                     line.kind = presentation::LineKind::System;
                 } else {
                     line.kind = presentation::LineKind::Incoming;
-                    line.author = presentation::short_address(entry.sender_id);
+                    line.author =
+                        presentation::author_label(service_->contacts(), entry.sender_id);
                 }
                 if (!line.text.empty() || line.kind == presentation::LineKind::System) {
                     lines.push_back(std::move(line));
@@ -1991,6 +2022,68 @@ void ChatWindow::copy_address() {
     status_label_->setText(tr("Address copied."));
 }
 
+void ChatWindow::set_self_avatar() {
+    if (!service_) {
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Choose avatar"), QString(),
+        tr("Images (*.png *.jpg *.jpeg *.webp)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QImage image(path);
+    if (image.isNull()) {
+        status_label_->setText(tr("Could not read that image."));
+        return;
+    }
+    const int side = std::min(image.width(), image.height());
+    const QRect crop((image.width() - side) / 2, (image.height() - side) / 2, side, side);
+    QImage square = image.copy(crop).scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    QByteArray encoded;
+    QBuffer buffer(&encoded);
+    buffer.open(QIODevice::WriteOnly);
+    if (!square.save(&buffer, "PNG") || encoded.isEmpty()) {
+        status_label_->setText(tr("Could not encode avatar."));
+        return;
+    }
+    if (static_cast<std::size_t>(encoded.size()) > storage::kMaxAvatarBytes) {
+        // Fall back to JPEG for size.
+        encoded.clear();
+        buffer.close();
+        buffer.setBuffer(&encoded);
+        buffer.open(QIODevice::WriteOnly);
+        if (!square.save(&buffer, "JPEG", 85) ||
+            static_cast<std::size_t>(encoded.size()) > storage::kMaxAvatarBytes) {
+            status_label_->setText(tr("Avatar is too large after compression."));
+            return;
+        }
+    }
+    Bytes bytes(encoded.begin(), encoded.end());
+    post_core([this, data = std::move(bytes)]() -> asio::awaitable<void> {
+        service_->set_self_avatar(data);
+        QMetaObject::invokeMethod(this, [this] {
+            schedule_refresh_contacts();
+            status_label_->setText(tr("Avatar updated."));
+        });
+        co_return;
+    });
+}
+
+void ChatWindow::clear_self_avatar() {
+    if (!service_) {
+        return;
+    }
+    post_core([this]() -> asio::awaitable<void> {
+        service_->clear_self_avatar();
+        QMetaObject::invokeMethod(this, [this] {
+            schedule_refresh_contacts();
+            status_label_->setText(tr("Avatar cleared."));
+        });
+        co_return;
+    });
+}
+
 void ChatWindow::copy_group_invite() { copy_group_invite_of(active_group_id_); }
 
 void ChatWindow::copy_group_invite_of(const std::string& group_id) {
@@ -2065,10 +2158,11 @@ void ChatWindow::edit_saved_peer(const std::string& addr) {
         return;
     }
     const storage::ContactRecord* rec = service_->contacts().get(addr);
+    const storage::RetentionPolicy global = service_->retention();
     QDialog dialog(this);
     apply_dialog_theme(&dialog);
-    dialog.setWindowTitle(tr("Edit name & note"));
-    dialog.setMinimumWidth(380);
+    dialog.setWindowTitle(tr("Edit contact"));
+    dialog.setMinimumWidth(420);
     auto* form = new QFormLayout(&dialog);
     auto* name = new QLineEdit(&dialog);
     auto* note = new QLineEdit(&dialog);
@@ -2078,6 +2172,32 @@ void ChatWindow::edit_saved_peer(const std::string& addr) {
     note->setPlaceholderText(tr("Short note (shown under title when no preview)"));
     form->addRow(tr("Display name"), name);
     form->addRow(tr("Note"), note);
+
+    auto* use_global = new QCheckBox(
+        tr("Use global auto-delete (%1 day(s); 0 = no age limit)").arg(global.max_age_days),
+        &dialog);
+    auto* days = new QSpinBox(&dialog);
+    days->setRange(0, 3650);
+    days->setSingleStep(1);
+    days->setSuffix(tr(" day(s)"));
+    days->setToolTip(tr("0 = never auto-delete by age for this peer. "
+                        "Requires History: on."));
+    const bool has_override = rec && rec->history_max_age_days.has_value();
+    use_global->setChecked(!has_override);
+    days->setValue(has_override ? static_cast<int>(*rec->history_max_age_days)
+                                : static_cast<int>(global.max_age_days));
+    days->setEnabled(history_enabled_ && !use_global->isChecked());
+    use_global->setEnabled(history_enabled_);
+    if (!history_enabled_) {
+        use_global->setToolTip(tr("Enable History: on first."));
+        days->setToolTip(tr("Enable History: on first."));
+    }
+    QObject::connect(use_global, &QCheckBox::toggled, days, [days, use_global](bool checked) {
+        days->setEnabled(!checked && use_global->isEnabled());
+    });
+    form->addRow(tr("Auto-delete"), use_global);
+    form->addRow(tr("After"), days);
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -2088,6 +2208,16 @@ void ChatWindow::edit_saved_peer(const std::string& addr) {
     service_->contacts().remember_peer(addr);
     service_->contacts().set_peer_profile(addr, name->text().toStdString(), note->text().toStdString());
     service_->save_contacts();
+    if (history_enabled_) {
+        std::optional<unsigned> override_days;
+        if (!use_global->isChecked()) {
+            override_days = static_cast<unsigned>(days->value());
+        }
+        service_->set_peer_history_max_age_days(addr, override_days);
+    }
+    if (addr == selected_) {
+        reload_selected();
+    }
     refresh_contacts();
 }
 
@@ -3517,6 +3647,38 @@ void ChatWindow::layout_search_status_overlay() {
     const int y = eg.y() + std::max(0, (eg.height() - search_status_->height()) / 2);
     search_status_->move(x, y);
     search_status_->raise();
+}
+
+void ChatWindow::scroll_to_quoted_message(const QString& quotedPlain) {
+    if (chat_ == nullptr || chat_view_ == nullptr || quotedPlain.isEmpty()) {
+        return;
+    }
+    const QString needle = quotedPlain.trimmed();
+    int found = -1;
+    for (int row = 0; row < chat_->rowCount(); ++row) {
+        const QString text =
+            chat_->index(row, 0).data(ChatModel::TextRole).toString().trimmed();
+        if (text == needle) {
+            found = row;
+            break;
+        }
+    }
+    if (found < 0) {
+        // Nested replies: quoted body may match an earlier reply's body or plain text.
+        for (int row = 0; row < chat_->rowCount(); ++row) {
+            const QString text = chat_->index(row, 0).data(ChatModel::TextRole).toString();
+            if (text.contains(needle)) {
+                found = row;
+                break;
+            }
+        }
+    }
+    if (found < 0) {
+        return;
+    }
+    const QModelIndex index = chat_->index(found, 0);
+    chat_view_->scrollTo(index, QAbstractItemView::PositionAtCenter);
+    chat_view_->setCurrentIndex(index);
 }
 
 void ChatWindow::highlight_search() {

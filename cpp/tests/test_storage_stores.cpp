@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <optional>
 
 #include "i2pchat/crypto.hpp"
 #include "i2pchat/encoding.hpp"
@@ -468,6 +470,81 @@ TEST_CASE("retention with no limits changes nothing", "[stores]") {
     const storage::RetentionResult result = storage::apply_history_retention(entries, {0, 0});
     CHECK(result.retained.size() == 2);
     CHECK_FALSE(result.truncated_at.has_value());
+}
+
+TEST_CASE("effective_retention inherits or overrides peer age", "[stores]") {
+    const storage::RetentionPolicy global{/*max_messages=*/500, /*max_age_days=*/30};
+
+    const auto inherit = storage::effective_retention(global, std::nullopt);
+    CHECK(inherit.max_messages == 500);
+    CHECK(inherit.max_age_days == 30);
+
+    const auto never = storage::effective_retention(global, 0u);
+    CHECK(never.max_messages == 500);
+    CHECK(never.max_age_days == 0);
+
+    const auto custom = storage::effective_retention(global, 7u);
+    CHECK(custom.max_messages == 500);
+    CHECK(custom.max_age_days == 7);
+}
+
+TEST_CASE("contact history_max_age_days round-trips", "[stores]") {
+    crypto::init();
+    const Bytes identity = crypto::random_bytes(32);
+    TempDir dir;
+    const auto path = dir.file("profile.contacts.json");
+
+    storage::ContactBook book;
+    REQUIRE(book.remember_peer(kAlice));
+    REQUIRE(book.set_peer_history_max_age_days(kAlice, 14u));
+    REQUIRE(book.remember_peer(kBob));
+    // Bob inherits global: field absent.
+    CHECK_FALSE(book.get(kBob)->history_max_age_days.has_value());
+
+    storage::save_contact_book(path, book, ByteView(identity));
+    const storage::ContactBook loaded = storage::load_contact_book(path, ByteView(identity));
+    REQUIRE(loaded.get(kAlice) != nullptr);
+    REQUIRE(loaded.get(kAlice)->history_max_age_days.has_value());
+    CHECK(*loaded.get(kAlice)->history_max_age_days == 14u);
+    REQUIRE(loaded.get(kBob) != nullptr);
+    CHECK_FALSE(loaded.get(kBob)->history_max_age_days.has_value());
+
+    REQUIRE(book.set_peer_history_max_age_days(kAlice, 0u));
+    CHECK(*book.get(kAlice)->history_max_age_days == 0u);
+    REQUIRE(book.set_peer_history_max_age_days(kAlice, std::nullopt));
+    CHECK_FALSE(book.get(kAlice)->history_max_age_days.has_value());
+}
+
+TEST_CASE("save_history applies peer age override", "[stores]") {
+    crypto::init();
+    const Bytes identity = crypto::random_bytes(32);
+    TempDir dir;
+    const storage::ProfilePaths paths(dir.path(), "profile");
+    const auto now = std::chrono::system_clock::now();
+    const std::string ancient_ts =
+        storage::format_iso8601_utc(now - std::chrono::hours(24 * 40));
+    const std::string fresh_ts =
+        storage::format_iso8601_utc(now - std::chrono::hours(24 * 2));
+
+    const std::vector<storage::HistoryEntry> entries{
+        entry("in", "ancient", ancient_ts),
+        entry("in", "fresh", fresh_ts),
+    };
+
+    const storage::RetentionPolicy global{0, /*max_age_days=*/30};
+    const storage::RetentionPolicy peer_seven =
+        storage::effective_retention(global, 7u);
+    storage::save_history(paths, kBob, entries, ByteView(identity), peer_seven);
+    auto loaded = storage::load_history(paths, kBob, ByteView(identity));
+    REQUIRE(loaded.size() == 1);
+    CHECK(loaded[0].text == "fresh");
+
+    const storage::RetentionPolicy peer_never =
+        storage::effective_retention(global, 0u);
+    storage::save_history(paths, kBob, entries, ByteView(identity), peer_never);
+    loaded = storage::load_history(paths, kBob, ByteView(identity));
+    REQUIRE(loaded.size() == 2);
+    CHECK(loaded[0].text == "ancient");
 }
 
 TEST_CASE("the reference group record opens", "[stores][vectors]") {

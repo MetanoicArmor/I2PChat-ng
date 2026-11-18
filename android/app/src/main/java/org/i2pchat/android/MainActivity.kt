@@ -12,9 +12,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -22,17 +26,24 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -40,6 +51,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -72,10 +84,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -87,9 +102,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import android.content.Intent
 import android.graphics.BitmapFactory
-import android.net.Uri
-import android.webkit.MimeTypeMap
-import androidx.core.content.FileProvider
 import java.io.File
 import org.i2pchat.android.ui.EmojiChars
 import org.i2pchat.android.ui.theme.I2PChatTheme
@@ -156,56 +168,39 @@ fun I2PChatRoot(bridge: ChatBridge) {
 }
 
 @Composable
-fun ChatImageThumb(path: String) {
-    val context = LocalContext.current
+fun AvatarThumb(path: String, label: String, sizeDp: Int = 40) {
     val bitmap = remember(path) {
-        runCatching {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, bounds)
-            var sample = 1
-            val maxSide = 1280
-            while (
-                (bounds.outWidth / sample) > maxSide ||
-                (bounds.outHeight / sample) > maxSide
-            ) {
-                sample *= 2
-            }
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
-        }.getOrNull()
+        path.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(it) }.getOrNull() }
     }
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap,
-            contentDescription = File(path).name,
-            modifier = Modifier
-                .widthIn(max = 260.dp)
-                .heightIn(max = 320.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable { openReceivedFile(context, path) },
-            contentScale = ContentScale.Fit,
-        )
-    } else {
-        Text(
-            "📷 ${File(path).name.ifBlank { path }}",
-            modifier = Modifier.clickable { openReceivedFile(context, path) },
-        )
+    Box(
+        modifier = Modifier
+            .size(sizeDp.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Text(
+                label.take(1).uppercase().ifBlank { "?" },
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
 fun openReceivedFile(context: android.content.Context, path: String) {
     val file = File(path)
     if (!file.isFile) return
-    val uri = runCatching {
-        FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-    }.getOrElse { Uri.fromFile(file) }
-    val ext = file.extension.lowercase()
-    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-        ?: when {
-            ext in listOf("jpg", "jpeg", "png", "gif", "webp", "heic") -> "image/*"
-            ext == "pdf" -> "application/pdf"
-            else -> "*/*"
-        }
+    val uri = MediaUtils.contentUri(context, path) ?: return
+    val mime = MediaUtils.mimeFor(path)
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, mime)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -216,28 +211,12 @@ fun openReceivedFile(context: android.content.Context, path: String) {
     }
 }
 
-@Composable
-fun OpenFileWarningDialog(
-    path: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val name = File(path).name
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Открыть файл?") },
-        text = {
-            Text(
-                "Файл «$name» получен от собеседника. Открывайте только если доверяете отправителю — вложенные файлы могут быть вредоносными.",
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Открыть") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
-        },
-    )
+fun openMediaOrFile(context: android.content.Context, path: String, openViewer: (String) -> Unit) {
+    when (MediaUtils.kindFor(path)) {
+        MediaKind.Image, MediaKind.Video -> openViewer(path)
+        MediaKind.Audio -> Unit // inline player handles playback
+        MediaKind.Other -> openReceivedFile(context, path)
+    }
 }
 
 @Composable
@@ -470,24 +449,31 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(filtered, key = { it.addr }) { item ->
-                    Column(
+                    Row(
                         Modifier
                             .fillMaxWidth()
                             .clickable {
                                 bridge.selectConversation(item.addr, item.isGroup)
                                 nav.navigate("conversation")
                             }
-                            .padding(16.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(item.title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                            if (item.unread > 0) Text(item.unread.toString(), color = MaterialTheme.colorScheme.primary)
-                            if (item.live) Text(" live", color = MaterialTheme.colorScheme.primary)
+                        AvatarThumb(item.avatarPath, item.title)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(item.title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                if (item.unread > 0) {
+                                    Text(item.unread.toString(), color = MaterialTheme.colorScheme.primary)
+                                }
+                                if (item.live) Text(" live", color = MaterialTheme.colorScheme.primary)
+                            }
+                            Text(
+                                if (item.isGroup) "Group · ${item.lastPreview}" else item.lastPreview.ifBlank { item.addr },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
-                        Text(
-                            if (item.isGroup) "Group · ${item.lastPreview}" else item.lastPreview.ifBlank { item.addr },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
                     }
                 }
             }
@@ -495,7 +481,7 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     val state by bridge.state.collectAsStateWithLifecycle()
@@ -507,49 +493,208 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var search by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
-    var pendingOpenPath by remember { mutableStateOf<String?>(null) }
+    var messageMenu by remember { mutableStateOf<MessageUi?>(null) }
+    var viewerPath by remember { mutableStateOf<String?>(null) }
+    var pendingSavePath by remember { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val composeFocus = remember { FocusRequester() }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, false)
     }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) bridge.sendFile(uri, true)
     }
-    LaunchedEffect(id, group) { bridge.selectConversation(id, group) }
+    val saveAsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val dest = result.data?.data
+        val src = pendingSavePath
+        pendingSavePath = null
+        if (result.resultCode != android.app.Activity.RESULT_OK || dest == null || src.isNullOrBlank()) {
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                MediaUtils.copyToUri(context, src, dest)
+            }
+            Toast.makeText(
+                context,
+                if (ok) "Saved" else "Could not save file",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+    fun launchSaveAs(path: String) {
+        val file = File(path)
+        if (!file.isFile) {
+            Toast.makeText(context, "File not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingSavePath = path
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = MediaUtils.mimeFor(path)
+            putExtra(Intent.EXTRA_TITLE, file.name)
+        }
+        saveAsLauncher.launch(intent)
+    }
+    fun showKeyboard() {
+        emoji = false
+        scope.launch {
+            yield()
+            runCatching {
+                composeFocus.requestFocus()
+                keyboardController?.show()
+            }
+        }
+    }
+    fun showEmojiPanel() {
+        emoji = true
+        keyboardController?.hide()
+    }
+    LaunchedEffect(id, group) {
+        emoji = false
+        bridge.selectConversation(id, group)
+    }
+    LaunchedEffect(emoji) {
+        if (emoji) {
+            keyboardController?.hide()
+        }
+    }
     LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) list.scrollToItem(state.messages.lastIndex)
     }
     val title = state.conversations.firstOrNull { it.addr == id }?.title ?: id.take(18)
+    val contact = state.contacts.firstOrNull { it.addr == id }
+    var useGlobalRetention by remember(id, contact?.historyMaxAgeDays) {
+        mutableStateOf(contact?.historyMaxAgeDays == null)
+    }
+    var peerRetentionDays by remember(id, contact?.historyMaxAgeDays) {
+        mutableStateOf(
+            (contact?.historyMaxAgeDays ?: state.uiPrefs.historyRetentionDays).toString(),
+        )
+    }
     if (renaming) {
         AlertDialog(
             onDismissRequest = { renaming = false },
-            title = { Text("Display name") },
+            title = { Text("Edit contact") },
             text = {
-                OutlinedTextField(newName, { newName = it }, label = { Text("Name") })
+                Column {
+                    OutlinedTextField(newName, { newName = it }, label = { Text("Name") })
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = useGlobalRetention,
+                            onCheckedChange = { useGlobalRetention = it },
+                            enabled = state.uiPrefs.historyEnabled,
+                        )
+                        Text(
+                            "Use global auto-delete (${state.uiPrefs.historyRetentionDays}d)",
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    OutlinedTextField(
+                        value = peerRetentionDays,
+                        onValueChange = { peerRetentionDays = it },
+                        label = { Text("Auto-delete after days (0 = never)") },
+                        enabled = state.uiPrefs.historyEnabled && !useGlobalRetention,
+                    )
+                    if (!state.uiPrefs.historyEnabled) {
+                        Text(
+                            "Enable Save history in Settings first.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    bridge.setPeerProfile(id, newName, state.contacts.firstOrNull { it.addr == id }?.note.orEmpty())
+                    bridge.setPeerProfile(id, newName, contact?.note.orEmpty())
+                    if (state.uiPrefs.historyEnabled) {
+                        bridge.setPeerHistoryMaxAge(
+                            id,
+                            if (useGlobalRetention) null else peerRetentionDays.toIntOrNull()?.coerceAtLeast(0),
+                        )
+                    }
                     renaming = false
                 }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
         )
     }
-    pendingOpenPath?.let { path ->
-        OpenFileWarningDialog(
-            path = path,
-            onConfirm = {
-                pendingOpenPath = null
-                openReceivedFile(context, path)
+    viewerPath?.let { path ->
+        MediaViewerDialog(path = path, onDismiss = { viewerPath = null })
+    }
+    messageMenu?.let { msg ->
+        val mediaPath = MediaUtils.mediaPath(msg)
+        AlertDialog(
+            onDismissRequest = { messageMenu = null },
+            title = { Text("Message") },
+            text = {
+                Text(
+                    msg.fileCaption.ifBlank { msg.text }.ifBlank { "(empty)" }.let {
+                        if (it.length > 160) it.take(157) + "…" else it
+                    },
+                )
             },
-            onDismiss = { pendingOpenPath = null },
+            confirmButton = {
+                Column {
+                    TextButton(
+                        onClick = {
+                            val who = when {
+                                msg.kind == "out" || msg.kind == "me" -> "me"
+                                group && msg.sender.isNotBlank() -> msg.sender.take(16)
+                                else -> title.ifBlank { "message" }
+                            }
+                            val quote = ReplyFormat.formatQuote(who, msg.text)
+                            bridge.setCompose(quote + state.compose)
+                            messageMenu = null
+                        },
+                    ) { Text("Reply") }
+                    if (mediaPath.isNotBlank() && File(mediaPath).isFile &&
+                        MediaUtils.kindFor(mediaPath) in setOf(
+                            MediaKind.Image,
+                            MediaKind.Video,
+                            MediaKind.Audio,
+                        )
+                    ) {
+                        TextButton(
+                            onClick = {
+                                messageMenu = null
+                                launchSaveAs(mediaPath)
+                            },
+                        ) { Text("Save as…") }
+                    }
+                    TextButton(
+                        onClick = {
+                            bridge.deleteHistoryMessage(msg.historyIndex)
+                            messageMenu = null
+                        },
+                        enabled = msg.historyIndex >= 0,
+                    ) { Text("Delete") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageMenu = null }) { Text("Cancel") }
+            },
         )
     }
+    val peerAvatar = state.conversations.firstOrNull { it.addr == id }?.avatarPath.orEmpty()
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(title) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!group) {
+                            AvatarThumb(peerAvatar, title, sizeDp = 32)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(title)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -559,7 +704,14 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         if (!group) {
-                            DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; renaming = true })
+                            DropdownMenuItem(
+                                text = { Text("Edit contact") },
+                                onClick = {
+                                    menu = false
+                                    newName = title
+                                    renaming = true
+                                },
+                            )
                             DropdownMenuItem(text = { Text("Connect") }, onClick = { menu = false; bridge.connectSelected() })
                             DropdownMenuItem(text = { Text("Disconnect") }, onClick = { menu = false; bridge.disconnectSelected() })
                             DropdownMenuItem(text = { Text("Forget TOFU pin") }, onClick = { menu = false; bridge.forgetPin(id) })
@@ -593,7 +745,12 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).imePadding().fillMaxSize()) {
+        Column(
+            Modifier
+                .padding(padding)
+                .then(if (emoji) Modifier else Modifier.imePadding())
+                .fillMaxSize(),
+        ) {
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -604,47 +761,117 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                 it.text.contains(search, true) || it.sender.contains(search, true)
             }
             LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
-                items(shown) { msg ->
+                items(shown, key = { "${it.historyIndex}:${it.ts}:${it.kind}" }) { msg ->
                     if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
                         SessionNoticeRow(msg)
                     } else {
                         val mine = msg.kind == "out" || msg.kind == "me"
+                        val reply = if (msg.imagePath.isBlank() && msg.filePath.isBlank()) {
+                            ReplyFormat.parse(msg.text)
+                        } else {
+                            null
+                        }
                         Column(
                             Modifier.fillMaxWidth().padding(vertical = 4.dp),
                             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
                         ) {
-                            Card {
+                            Card(
+                                modifier = Modifier.combinedClickable(
+                                    onClick = {
+                                        val path = MediaUtils.mediaPath(msg)
+                                        if (path.isNotBlank() &&
+                                            MediaUtils.kindFor(path) != MediaKind.Audio
+                                        ) {
+                                            openMediaOrFile(context, path) { viewerPath = it }
+                                        }
+                                    },
+                                    onLongClick = { messageMenu = msg },
+                                ),
+                            ) {
                                 Column(Modifier.padding(10.dp)) {
                                     if (group && msg.sender.isNotBlank()) {
                                         Text(msg.sender.take(16), style = MaterialTheme.typography.labelSmall)
                                     }
-                                    if (msg.imagePath.isNotBlank()) {
-                                        ChatImageThumb(msg.imagePath)
-                                        if (msg.fileCaption.isNotBlank()) {
-                                            Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall)
-                                        }
-                                    } else if (msg.filePath.isNotBlank() || msg.text.startsWith("[file] ")) {
-                                        val path = msg.filePath
-                                        Text(
-                                            "📎 ${msg.fileCaption.ifBlank { msg.text }}",
-                                            modifier = if (path.isNotBlank()) {
-                                                Modifier.clickable { pendingOpenPath = path }
-                                            } else {
-                                                Modifier
-                                            },
-                                        )
-                                        if (path.isNotBlank()) {
-                                            Text(
-                                                "Нажмите, чтобы открыть",
-                                                style = MaterialTheme.typography.labelSmall,
-                                            )
-                                        }
+                                    val mediaPath = MediaUtils.mediaPath(msg)
+                                    val mediaKind = if (mediaPath.isNotBlank()) {
+                                        MediaUtils.kindFor(mediaPath)
                                     } else {
-                                        Text(msg.text)
+                                        null
+                                    }
+                                    when {
+                                        mediaKind == MediaKind.Image && mediaPath.isNotBlank() -> {
+                                            ChatImageThumb(mediaPath) { viewerPath = mediaPath }
+                                            if (msg.fileCaption.isNotBlank()) {
+                                                Text(msg.fileCaption, style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                        mediaKind == MediaKind.Video && mediaPath.isNotBlank() -> {
+                                            ChatVideoThumb(mediaPath) { viewerPath = mediaPath }
+                                        }
+                                        mediaKind == MediaKind.Audio && mediaPath.isNotBlank() -> {
+                                            InlineAudioPlayer(mediaPath)
+                                        }
+                                        msg.filePath.isNotBlank() || msg.text.startsWith("[file] ") -> {
+                                            Text("📎 ${msg.fileCaption.ifBlank { msg.text }}")
+                                            if (msg.filePath.isNotBlank()) {
+                                                Text(
+                                                    "Tap to open",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                )
+                                            }
+                                        }
+                                        reply != null -> {
+                                            Text(
+                                                "@${reply.author} wrote:",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Row(
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .height(IntrinsicSize.Min)
+                                                    .clickable {
+                                                        val needle = reply.quote.trim()
+                                                        val exact = shown.indexOfFirst {
+                                                            it.text.trim() == needle
+                                                        }
+                                                        val target = if (exact >= 0) {
+                                                            exact
+                                                        } else {
+                                                            shown.indexOfFirst {
+                                                                it.text.contains(needle) &&
+                                                                    it.historyIndex != msg.historyIndex
+                                                            }
+                                                        }
+                                                        if (target >= 0) {
+                                                            scope.launch { list.animateScrollToItem(target) }
+                                                        }
+                                                    },
+                                            ) {
+                                                Box(
+                                                    Modifier
+                                                        .width(3.dp)
+                                                        .fillMaxHeight()
+                                                        .background(MaterialTheme.colorScheme.primary),
+                                                )
+                                                Text(
+                                                    reply.quote.ifBlank { " " },
+                                                    modifier = Modifier.padding(start = 8.dp),
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                            if (reply.body.isNotBlank()) {
+                                                Spacer(Modifier.height(6.dp))
+                                                Text(reply.body)
+                                            }
+                                        }
+                                        else -> Text(msg.text)
                                     }
                                     Text(
                                         listOf(
-                                            msg.ts.take(19),
+                                            TimeFormat.formatMessageClock(msg.ts),
                                             when (msg.delivery) {
                                                 "delivered" -> "✓"
                                                 "sent" -> "·"
@@ -662,8 +889,56 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
             }
+            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
+                IconButton(
+                    onClick = {
+                        if (emoji) {
+                            showKeyboard()
+                        } else {
+                            showEmojiPanel()
+                        }
+                    },
+                ) {
+                    Icon(
+                        if (emoji) Icons.Default.Keyboard else Icons.Default.EmojiEmotions,
+                        if (emoji) "Keyboard" else "Emoji",
+                    )
+                }
+                if (!group) {
+                    IconButton(onClick = { filePicker.launch("*/*") }) { Icon(Icons.Default.AttachFile, "File") }
+                    IconButton(onClick = { imagePicker.launch("image/*") }) { Icon(Icons.Default.Image, "Image") }
+                }
+                Box(Modifier.weight(1f)) {
+                    OutlinedTextField(
+                        value = state.compose,
+                        onValueChange = bridge::setCompose,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(composeFocus),
+                        placeholder = { Text("Message") },
+                    )
+                    // While the emoji panel replaces the IME, taps on the field
+                    // switch back to the soft keyboard (Telegram-style).
+                    if (emoji) {
+                        Box(
+                            Modifier
+                                .matchParentSize()
+                                .clickable { showKeyboard() },
+                        )
+                    }
+                }
+                IconButton(onClick = { bridge.send() }) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "Send")
+                }
+            }
             if (emoji) {
-                LazyVerticalGrid(columns = GridCells.Adaptive(44.dp), modifier = Modifier.height(180.dp)) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(44.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+                ) {
                     items(EmojiChars) { glyph ->
                         Text(
                             glyph,
@@ -673,22 +948,6 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                                 .padding(8.dp),
                         )
                     }
-                }
-            }
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-                IconButton(onClick = { emoji = !emoji }) { Icon(Icons.Default.EmojiEmotions, "Emoji") }
-                if (!group) {
-                    IconButton(onClick = { filePicker.launch("*/*") }) { Icon(Icons.Default.AttachFile, "File") }
-                    IconButton(onClick = { imagePicker.launch("image/*") }) { Icon(Icons.Default.Image, "Image") }
-                }
-                OutlinedTextField(
-                    value = state.compose,
-                    onValueChange = bridge::setCompose,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") },
-                )
-                IconButton(onClick = { bridge.send() }) {
-                    Icon(Icons.AutoMirrored.Filled.Send, "Send")
                 }
             }
             LaunchedEffect(state.inviteToken) {
@@ -708,6 +967,15 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     val context = LocalContext.current
     var maxMessages by remember { mutableStateOf(state.uiPrefs.historyMaxMessages.toString()) }
     var days by remember { mutableStateOf(state.uiPrefs.historyRetentionDays.toString()) }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                if (bytes.isNotEmpty()) bridge.setSelfAvatar(bytes)
+            }
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -734,6 +1002,16 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
+                Text("Your avatar", fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AvatarThumb(state.selfAvatarPath, state.profile.ifBlank { "me" }, sizeDp = 56)
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        TextButton(onClick = { avatarPicker.launch("image/*") }) { Text("Set avatar") }
+                        TextButton(onClick = { bridge.clearSelfAvatar() }) { Text("Clear") }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
                 Text("Your address", fontWeight = FontWeight.SemiBold)
                 Text(state.localAddr.ifBlank { "Waiting for SAM…" })
                 TextButton(onClick = {
@@ -746,12 +1024,27 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                 Button(onClick = { nav.navigate("backup") }, modifier = Modifier.fillMaxWidth()) { Text("Backup / restore") }
                 Button(onClick = { bridge.pollOffline() }, modifier = Modifier.fillMaxWidth()) { Text("Check offline now") }
                 Spacer(Modifier.height(16.dp))
-                Text("History retention", fontWeight = FontWeight.SemiBold)
+                Text("History", fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = state.uiPrefs.historyEnabled,
+                        onCheckedChange = { bridge.setHistoryEnabled(it) },
+                    )
+                    Text("Save history to disk", modifier = Modifier.padding(start = 8.dp))
+                }
                 OutlinedTextField(value = maxMessages, onValueChange = { maxMessages = it }, label = { Text("Max messages") })
-                OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Max age (days, 0 = none)") })
+                OutlinedTextField(value = days, onValueChange = { days = it }, label = { Text("Global max age (days, 0 = none)") })
                 Button(onClick = {
-                    bridge.saveRetention(maxMessages.toIntOrNull() ?: 1000, days.toIntOrNull() ?: 0)
+                    bridge.saveRetention(
+                        maxMessages.toIntOrNull() ?: 1000,
+                        days.toIntOrNull() ?: 0,
+                        state.uiPrefs.historyEnabled,
+                    )
                 }) { Text("Save retention") }
+                Text(
+                    "Per-peer auto-delete: open a chat → Rename / Edit contact.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Spacer(Modifier.height(16.dp))
                 Text("I2P stays in a foreground service on this phone. That is required to keep tunnels alive; it will use battery.")
             }

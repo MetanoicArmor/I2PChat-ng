@@ -20,6 +20,7 @@ object NativeEngine {
         fun onImageReceived(peer: String, path: String)
         fun onImageText(peer: String, text: String)
         fun onContactsChanged()
+        fun onAvatarChanged(peer: String, path: String)
         fun onGroupMessage(groupId: String)
         fun onLocalAddress(addr: String)
         fun onTrustPrompt(kind: String, peer: String, newKey: String, oldKey: String)
@@ -60,6 +61,7 @@ object NativeEngine {
     @JvmStatic external fun nativeRemovePeer(addr: String)
     @JvmStatic external fun nativeForgetPin(addr: String)
     @JvmStatic external fun nativeClearHistory(addr: String)
+    @JvmStatic external fun nativeDeleteHistoryMessage(id: String, index: Int, isGroup: Boolean): Boolean
     @JvmStatic external fun nativeCreateGroup(title: String, membersJson: String): String
     @JvmStatic external fun nativeUpdateGroup(id: String, title: String, membersJson: String): String
     @JvmStatic external fun nativeDeleteGroup(id: String): Boolean
@@ -78,4 +80,9 @@ object NativeEngine {
     @JvmStatic external fun nativeComposeDrafts(save: Boolean, json: String): String
     @JvmStatic external fun nativeSaveReplicas(json: String)
     @JvmStatic external fun nativeSetRetention(maxMessages: Int, maxAgeDays: Int)
+    @JvmStatic external fun nativeSetHistoryEnabled(enabled: Boolean)
+    /** days < 0 clears the per-peer override (inherit global). */
+    @JvmStatic external fun nativeSetPeerHistoryMaxAge(addr: String, days: Int): Boolean
+    @JvmStatic external fun nativeSetSelfAvatar(bytes: ByteArray): String
+    @JvmStatic external fun nativeClearSelfAvatar()
 }

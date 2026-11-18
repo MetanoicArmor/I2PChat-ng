@@ -182,6 +182,50 @@ Signal parse_signal(std::string_view body) {
         signal.well_formed = true;
         return signal;
     }
+    if (const auto tail = tail_after(signal.payload, "AVATAR_META|")) {
+        signal.kind = SignalKind::AvatarMeta;
+        const std::vector<std::string> parts = split(*tail, '|');
+        if (parts.size() >= 4) {
+            signal.avatar_sha = trim(parts[0]);
+            const auto bytes = parse_uint(parts[1]);
+            signal.avatar_fmt = trim(parts[2]);
+            const auto id = parse_uint(parts[3]);
+            if (bytes && id && !signal.avatar_sha.empty() && !signal.avatar_fmt.empty()) {
+                signal.avatar_bytes = *bytes;
+                signal.message_id = *id;
+                signal.well_formed = true;
+            }
+        }
+        return signal;
+    }
+    if (const auto tail = tail_after(signal.payload, "AVATAR_GET|")) {
+        signal.kind = SignalKind::AvatarGet;
+        const std::vector<std::string> parts = split(*tail, '|');
+        signal.avatar_sha = trim(parts.front());
+        if (parts.size() > 1) {
+            if (const auto id = parse_uint(parts[1])) {
+                signal.message_id = *id;
+                signal.well_formed = true;
+            }
+        } else if (signal.avatar_sha.empty()) {
+            // `AVATAR_GET|` with only empty sha and no id is still useful after
+            // import; treat as well-formed with msg_id 0.
+            signal.well_formed = true;
+        }
+        return signal;
+    }
+    if (const auto tail = tail_after(signal.payload, "AVATAR_ACK|")) {
+        signal.kind = SignalKind::AvatarAck;
+        const std::vector<std::string> parts = split(*tail, '|');
+        signal.avatar_sha = trim(parts.front());
+        if (parts.size() > 1) {
+            if (const auto id = parse_uint(parts[1])) {
+                signal.message_id = *id;
+                signal.well_formed = !signal.avatar_sha.empty();
+            }
+        }
+        return signal;
+    }
     if (signal.payload.find("QUIT") != std::string::npos) {
         signal.kind = SignalKind::Quit;
         signal.well_formed = true;
@@ -240,6 +284,20 @@ std::string build_group_blindbox_root_ack(std::string_view group_id,
                                           std::uint64_t root_epoch) {
     return "GROUP_BLINDBOX_ROOT_ACK|" + std::string(group_id) + "|" +
            std::to_string(group_epoch) + "|" + std::to_string(root_epoch);
+}
+
+std::string build_avatar_meta(std::string_view sha256, std::uint64_t bytes,
+                              std::string_view fmt, std::uint64_t message_id) {
+    return "AVATAR_META|" + std::string(sha256) + "|" + std::to_string(bytes) + "|" +
+           std::string(fmt) + "|" + std::to_string(message_id);
+}
+
+std::string build_avatar_get(std::string_view sha256, std::uint64_t message_id) {
+    return "AVATAR_GET|" + std::string(sha256) + "|" + std::to_string(message_id);
+}
+
+std::string build_avatar_ack(std::string_view sha256, std::uint64_t message_id) {
+    return "AVATAR_ACK|" + std::string(sha256) + "|" + std::to_string(message_id);
 }
 
 }  // namespace i2pchat::protocol

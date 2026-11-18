@@ -33,6 +33,9 @@ data class ContactUi(
     val isGroup: Boolean = false,
     val members: List<String> = emptyList(),
     val epoch: Long = 0,
+    val avatarPath: String = "",
+    /** null = inherit global history age; 0 = no age prune; >0 = days. */
+    val historyMaxAgeDays: Int? = null,
 ) {
     val title: String
         get() = displayName.ifBlank { if (isGroup) "Group" else addr.take(18) }
@@ -49,6 +52,8 @@ data class MessageUi(
     val imagePath: String = "",
     /** Absolute local path when `text` is `[file] …`. */
     val filePath: String = "",
+    /** Index in the peer/group history array used by native delete. */
+    val historyIndex: Int = -1,
 ) {
     val fileCaption: String
         get() = when {
@@ -99,6 +104,7 @@ data class ChatUiState(
     val starting: Boolean = false,
     val status: String = "Stopped",
     val localAddr: String = "",
+    val selfAvatarPath: String = "",
     val transport: String = "Stopped",
     val contacts: List<ContactUi> = emptyList(),
     val groups: List<ContactUi> = emptyList(),
@@ -150,6 +156,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             try {
                 NativeEngine.nativeSetListener(this)
                 refreshProfiles()
+                appendNotice("system", versionBanner())
             } catch (error: Throwable) {
                 _state.update {
                     it.copy(
@@ -159,6 +166,12 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 }
             }
         }
+    }
+
+    /** Shown in Status → Events so sideloaded / flavor builds are identifiable. */
+    private fun versionBanner(): String {
+        return "I2PChat Android ${BuildConfig.VERSION_NAME} " +
+            "(build ${BuildConfig.VERSION_CODE}, ${BuildConfig.BUILD_TYPE}/${BuildConfig.FLAVOR})"
     }
 
     fun refreshProfiles() {
@@ -186,15 +199,34 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         _state.update { it.copy(router = normalized) }
     }
 
-    fun saveRetention(maxMessages: Int, days: Int) {
+    fun saveRetention(maxMessages: Int, days: Int, historyEnabled: Boolean = _state.value.uiPrefs.historyEnabled) {
         val prefs = _state.value.uiPrefs.copy(
+            historyEnabled = historyEnabled,
             historyMaxMessages = maxMessages.coerceAtLeast(0),
             historyRetentionDays = days.coerceAtLeast(0),
         )
         prefs.save(appRoot)
         _state.update { it.copy(uiPrefs = prefs) }
         viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeSetHistoryEnabled(prefs.historyEnabled)
             NativeEngine.nativeSetRetention(prefs.historyMaxMessages, prefs.historyRetentionDays)
+        }
+    }
+
+    fun setHistoryEnabled(enabled: Boolean) {
+        saveRetention(
+            _state.value.uiPrefs.historyMaxMessages,
+            _state.value.uiPrefs.historyRetentionDays,
+            enabled,
+        )
+    }
+
+    fun setPeerHistoryMaxAge(addr: String, days: Int?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val code = if (days == null) -1 else days.coerceAtLeast(0)
+            runCatching { NativeEngine.nativeSetPeerHistoryMaxAge(addr, code) }
+            refreshSnapshot()
+            if (addr == _state.value.selectedId) loadHistory()
         }
     }
 
@@ -291,6 +323,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     error = "",
                     status = "Starting I2P…",
                     sessionNotices = listOf(
+                        MessageUi("system", versionBanner(), ""),
                         MessageUi(
                             "system",
                             if (router.usingBundled) {
@@ -356,15 +389,26 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             }
             if (!ready) {
                 val routerStatus = I2pdForegroundService.readStatus(appRoot)
-                failStart(
-                    "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus " +
-                        if (router.usingBundled) {
-                            "Try Router settings → Restart bundled i2pd, or wait a minute and Open again."
-                        } else {
-                            "Start i2pd on this phone and check Router settings → external SAM ${router.samHost}:${router.samPort}."
-                        },
+                if (router.usingBundled) {
+                    failStart(
+                        "I2P SAM ${router.samHost}:${router.samPort} is not ready. $routerStatus " +
+                            "Try Router settings → Restart bundled i2pd, or wait a minute and Open again.",
+                    )
+                    return@launch
+                }
+                // External router: keep the session open and let the native SAM
+                // watchdog rediscover the router when the user starts i2pd again.
+                appendNotice(
+                    "system",
+                    "I2P SAM ${router.samHost}:${router.samPort} is not ready yet — " +
+                        "will keep trying. Start i2pd on this phone if it is stopped.",
                 )
-                return@launch
+                _state.update {
+                    it.copy(
+                        status = "Waiting for external I2P router…",
+                        transport = "reconnecting",
+                    )
+                }
             }
             val result = runCatching {
                 JSONObject(
@@ -385,6 +429,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 failStart(result.optString("error", "Failed to start"))
                 return@launch
             }
+            runCatching { NativeEngine.nativeSetHistoryEnabled(ui.historyEnabled) }
             val drafts = runCatching {
                 val obj = JSONObject(NativeEngine.nativeComposeDrafts(false, "{}"))
                 buildMap {
@@ -575,6 +620,17 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    fun deleteHistoryMessage(index: Int) {
+        val id = _state.value.selectedId
+        val group = _state.value.selectedIsGroup
+        if (id.isBlank() || index < 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeDeleteHistoryMessage(id, index, group)
+            loadHistory()
+            if (!group) refreshSnapshot()
+        }
+    }
+
     fun createGroup(title: String, members: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeCreateGroup(title, JSONArray(members).toString())
@@ -695,6 +751,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                             messageId = o.optString("messageId").ifBlank { o.optString("msgId") },
                             imagePath = resolveChatImagePath(text, appRoot),
                             filePath = resolveChatFilePath(text, appRoot),
+                            historyIndex = i,
                         ),
                     )
                 }
@@ -716,6 +773,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         _state.update {
             it.copy(
                 localAddr = snap.optString("localAddr", it.localAddr),
+                selfAvatarPath = snap.optString("selfAvatarPath", it.selfAvatarPath),
                 running = snap.optBoolean("running", it.running),
                 blindboxReady = snap.optBoolean("blindboxReady"),
                 replicaSource = snap.optString("replicaSource"),
@@ -743,8 +801,34 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     lastActivityTs = o.optString("lastActivityTs"),
                     live = o.optBoolean("live"),
                     offlineReady = o.optBoolean("offlineReady"),
+                    avatarPath = o.optString("avatarPath"),
+                    historyMaxAgeDays = if (o.isNull("historyMaxAgeDays")) {
+                        null
+                    } else {
+                        o.optInt("historyMaxAgeDays")
+                    },
                 ),
             )
+        }
+    }
+
+    fun setSelfAvatar(bytes: ByteArray) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val err = runCatching { NativeEngine.nativeSetSelfAvatar(bytes) }.getOrDefault("native failed")
+            onMain {
+                if (err.isNotBlank()) {
+                    _state.update { it.copy(error = err) }
+                } else {
+                    refreshSnapshot()
+                }
+            }
+        }
+    }
+
+    fun clearSelfAvatar() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { NativeEngine.nativeClearSelfAvatar() }
+            onMain { refreshSnapshot() }
         }
     }
 
@@ -907,7 +991,25 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onTransportState(state: String, reason: String) = onMain {
-        _state.update { it.copy(transport = state, status = reason.ifBlank { state }) }
+        val status = when (state) {
+            "reconnecting" -> when {
+                reason == "waiting-for-router" || reason == "sam-lost" ->
+                    "Waiting for I2P router…"
+                reason.isBlank() -> "Reconnecting…"
+                else -> reason
+            }
+            "failed" -> when {
+                reason.isBlank() || reason == "sam-unreachable" || reason == "sam-reopen-failed" ->
+                    "Router problem"
+                else -> reason
+            }
+            "ready" -> "Online"
+            "degraded" -> "Tunnels pending"
+            "warming_tunnels" -> "Building tunnels…"
+            "sam_connected" -> "SAM connected"
+            else -> reason.ifBlank { state }
+        }
+        _state.update { it.copy(transport = state, status = status) }
     }
 
     override fun onTransfer(peer: String, json: String) = onMain { }
@@ -936,6 +1038,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onContactsChanged() = onMain {
+        viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
+    }
+
+    override fun onAvatarChanged(peer: String, path: String) = onMain {
         viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
     }
 

@@ -18,6 +18,7 @@
 
 #include "chat_model.hpp"
 #include "i2pchat/presentation/chat_view.hpp"
+#include "i2pchat/presentation/reply_format.hpp"
 
 namespace i2pchat::gui {
 namespace {
@@ -30,6 +31,9 @@ constexpr int kBubbleRadius = 12;
 constexpr int kMetaGapY = 2;
 constexpr int kMetaAlpha = 150;
 constexpr int kMetaFontDelta = 3;
+constexpr int kQuoteBarWidth = 3;
+constexpr int kQuoteGap = 8;
+constexpr int kQuotePadLeft = 8;
 
 int cell_width(const QStyleOptionViewItem& option) {
     int width = option.rect.width();
@@ -173,6 +177,35 @@ QColor text_color(presentation::LineKind kind, bool dark) {
     return dark ? QColor(0xf5, 0xf5, 0xf7) : QColor(0x1d, 0x1d, 0x1f);
 }
 
+struct ReplyLayout {
+    bool is_reply = false;
+    QString header;
+    QString quote;
+    QString body;
+    QString quoted_plain;
+};
+
+ReplyLayout make_reply_layout(const QString& text) {
+    ReplyLayout out;
+    const auto parsed = presentation::parse_reply_message(text.toStdString());
+    if (!parsed) {
+        return out;
+    }
+    out.is_reply = true;
+    out.header = QStringLiteral("@%1 wrote:").arg(QString::fromStdString(parsed->author));
+    out.quoted_plain = QString::fromStdString(parsed->quoted_plain);
+    out.quote = out.quoted_plain;
+    out.body = QString::fromStdString(parsed->body);
+    return out;
+}
+
+QString measure_text_for_bubble(const ReplyLayout& reply, const QString& fallback) {
+    if (!reply.is_reply) {
+        return fallback;
+    }
+    return reply.header + QLatin1Char('\n') + reply.quote + QLatin1Char('\n') + reply.body;
+}
+
 }  // namespace
 
 ChatItemDelegate::ChatItemDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
@@ -218,14 +251,33 @@ QSize ChatItemDelegate::sizeHint(const QStyleOptionViewItem& option,
     }
 
     const MediaHint media = parse_media(text);
+    const ReplyLayout reply =
+        media.kind == MediaHint::Kind::None ? make_reply_layout(text) : ReplyLayout{};
     const QString resolved = resolve_media_path(media, images_dir_, downloads_dir_);
     QString shown = media.kind == MediaHint::Kind::None ? text : media.caption;
     if (media.kind == MediaHint::Kind::File) {
         shown = QStringLiteral("📎  ") + shown;
     }
+    if (reply.is_reply) {
+        shown = measure_text_for_bubble(reply, text);
+    }
     const int bubble_w = bubble_width_px(cell, shown.isEmpty() ? text : shown, font);
     const int inner = inner_text_width(bubble_w);
-    qreal height = wrapped_height(shown.isEmpty() ? text : shown, font, inner);
+    qreal height = 0;
+    if (reply.is_reply) {
+        QFont header = font;
+        header.setBold(true);
+        height += wrapped_height(reply.header, header, inner);
+        height += 4;
+        const int quote_inner = std::max(10, inner - kQuoteBarWidth - kQuotePadLeft);
+        height += wrapped_height(reply.quote.isEmpty() ? QStringLiteral(" ") : reply.quote, font,
+                                 quote_inner);
+        height += 6;
+        height += wrapped_height(reply.body.isEmpty() ? QStringLiteral(" ") : reply.body, font,
+                                 inner);
+    } else {
+        height = wrapped_height(shown.isEmpty() ? text : shown, font, inner);
+    }
     if (media.kind == MediaHint::Kind::Image && !resolved.isEmpty()) {
         QImageReader reader(resolved);
         QSize native = reader.size();
@@ -280,10 +332,15 @@ void ChatItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
 
     const bool outgoing = kind == presentation::LineKind::Outgoing;
     const MediaHint media = parse_media(text);
+    const ReplyLayout reply =
+        media.kind == MediaHint::Kind::None ? make_reply_layout(text) : ReplyLayout{};
     const QString resolved = resolve_media_path(media, images_dir_, downloads_dir_);
     QString shown = media.kind == MediaHint::Kind::None ? text : media.caption;
     if (media.kind == MediaHint::Kind::File) {
         shown = QStringLiteral("📎  ") + shown;
+    }
+    if (reply.is_reply) {
+        shown = measure_text_for_bubble(reply, text);
     }
     const int bubble_w = bubble_width_px(cell, shown, font);
     const int x = outgoing ? option.rect.right() - bubble_w : option.rect.left();
@@ -309,13 +366,52 @@ void ChatItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
             y += scaled.height() + 4;
         }
     }
-    const QRectF text_area(inner.left(), y, inner.width(),
-                           std::max(1.0, inner.bottom() - meta_h - y));
 
-    painter->setPen(fg);
-    painter->setFont(font);
-    painter->drawText(text_area.toRect(), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                      shown.isEmpty() ? QStringLiteral(" ") : shown);
+    if (reply.is_reply) {
+        QFont header = font;
+        header.setBold(true);
+        QColor header_fg = fg;
+        header_fg.setAlpha(200);
+        painter->setFont(header);
+        painter->setPen(header_fg);
+        const QRectF header_rect(inner.left(), y, inner.width(),
+                                 wrapped_height(reply.header, header, static_cast<int>(inner.width())));
+        painter->drawText(header_rect.toRect(), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                          reply.header);
+        y = header_rect.bottom() + 4;
+
+        const int quote_left = static_cast<int>(inner.left()) + kQuoteBarWidth + kQuotePadLeft;
+        const int quote_width =
+            std::max(10, static_cast<int>(inner.width()) - kQuoteBarWidth - kQuotePadLeft);
+        const qreal quote_h =
+            wrapped_height(reply.quote.isEmpty() ? QStringLiteral(" ") : reply.quote, font,
+                           quote_width);
+        const QRectF quote_bar(inner.left(), y, kQuoteBarWidth, quote_h);
+        QColor bar = outgoing ? QColor(255, 255, 255, 180) : QColor(0x2f, 0x92, 0xf0, 200);
+        painter->fillRect(quote_bar, bar);
+        QColor quote_fg = fg;
+        quote_fg.setAlpha(185);
+        painter->setPen(quote_fg);
+        painter->setFont(font);
+        const QRectF quote_rect(quote_left, y, quote_width, quote_h);
+        painter->drawText(quote_rect.toRect(), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                          reply.quote.isEmpty() ? QStringLiteral(" ") : reply.quote);
+        y = quote_rect.bottom() + 6;
+
+        painter->setPen(fg);
+        painter->setFont(font);
+        const QRectF body_rect(inner.left(), y, inner.width(),
+                               std::max(1.0, inner.bottom() - meta_h - y));
+        painter->drawText(body_rect.toRect(), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                          reply.body.isEmpty() ? QStringLiteral(" ") : reply.body);
+    } else {
+        const QRectF text_area(inner.left(), y, inner.width(),
+                               std::max(1.0, inner.bottom() - meta_h - y));
+        painter->setPen(fg);
+        painter->setFont(font);
+        painter->drawText(text_area.toRect(), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                          shown.isEmpty() ? QStringLiteral(" ") : shown);
+    }
 
     QString meta = time;
     if (!marker.isEmpty()) {
@@ -335,7 +431,45 @@ void ChatItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
 }
 
 bool ChatItemDelegate::editorEvent(QEvent* event, QAbstractItemModel*,
-                                   const QStyleOptionViewItem&, const QModelIndex& index) {
+                                   const QStyleOptionViewItem& option, const QModelIndex& index) {
+    if (event->type() == QEvent::MouseButtonRelease) {
+        const auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            const QString text = index.data(ChatModel::TextRole).toString();
+            const MediaHint media = parse_media(text);
+            const ReplyLayout reply =
+                media.kind == MediaHint::Kind::None ? make_reply_layout(text) : ReplyLayout{};
+            if (reply.is_reply && !reply.quoted_plain.isEmpty()) {
+                const auto kind = static_cast<presentation::LineKind>(
+                    index.data(ChatModel::KindRole).toInt());
+                const bool outgoing = kind == presentation::LineKind::Outgoing;
+                const QFont font = option.font;
+                const int cell = option.rect.width();
+                const QString shown = measure_text_for_bubble(reply, text);
+                const int bubble_w = bubble_width_px(cell, shown, font);
+                const int x = outgoing ? option.rect.right() - bubble_w : option.rect.left();
+                const QRectF bubble(x, option.rect.top() + kBubbleOuterY, bubble_w,
+                                    option.rect.height() - 2 * kBubbleOuterY);
+                const QRectF inner =
+                    bubble.adjusted(kPaddingX, kPaddingY, -kPaddingX, -kPaddingY);
+                QFont header = font;
+                header.setBold(true);
+                qreal y = inner.top();
+                y += wrapped_height(reply.header, header, static_cast<int>(inner.width()));
+                y += 4;
+                const int quote_width =
+                    std::max(10, static_cast<int>(inner.width()) - kQuoteBarWidth - kQuotePadLeft);
+                const qreal quote_h = wrapped_height(
+                    reply.quote.isEmpty() ? QStringLiteral(" ") : reply.quote, font, quote_width);
+                const QRectF quote_hit(inner.left(), y, inner.width(), quote_h);
+                if (quote_hit.contains(mouse->pos())) {
+                    emit quoteActivated(reply.quoted_plain);
+                    return true;
+                }
+            }
+        }
+    }
+
     if (event->type() != QEvent::MouseButtonDblClick) {
         return false;
     }

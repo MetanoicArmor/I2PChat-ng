@@ -2,10 +2,43 @@
 
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 
 #include "contact_list_model.hpp"
 
 namespace i2pchat::gui {
+namespace {
+
+constexpr int kAvatarSize = 36;
+
+QPixmap circular_avatar(const QString& path, int size, const QColor& placeholder,
+                        const QString& initial) {
+    QPixmap canvas(size, size);
+    canvas.fill(Qt::transparent);
+    QPainter painter(&canvas);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QPainterPath clip;
+    clip.addEllipse(0, 0, size, size);
+    painter.setClipPath(clip);
+    QPixmap source(path);
+    if (!source.isNull()) {
+        const QPixmap scaled =
+            source.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        painter.drawPixmap(QRect(0, 0, size, size), scaled);
+    } else {
+        painter.fillRect(0, 0, size, size, placeholder);
+        painter.setPen(Qt::white);
+        QFont font = painter.font();
+        font.setBold(true);
+        font.setPointSizeF(size * 0.35);
+        painter.setFont(font);
+        painter.drawText(QRect(0, 0, size, size), Qt::AlignCenter,
+                         initial.isEmpty() ? QStringLiteral("?") : initial.left(1).toUpper());
+    }
+    return canvas;
+}
+
+}  // namespace
 
 ContactItemDelegate::ContactItemDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
 
@@ -25,6 +58,7 @@ void ContactItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     const int kind = index.data(ContactListModel::KindRole).toInt();
     const QString title = index.data(ContactListModel::TitleRole).toString();
     const QString subtitle = index.data(ContactListModel::SubtitleRole).toString();
+    const QString avatar_path = index.data(ContactListModel::AvatarPathRole).toString();
     const bool live = index.data(ContactListModel::LiveRole).toBool();
     const unsigned unread = index.data(ContactListModel::UnreadRole).toUInt();
     const bool selected = option.state.testFlag(QStyle::State_Selected) ||
@@ -64,20 +98,28 @@ void ContactItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         painter->fillPath(path, fill);
     }
 
+    const int avatar_y = bubble.top() + (bubble.height() - kAvatarSize) / 2;
+    const QRect avatar_rect(bubble.left() + 8, avatar_y, kAvatarSize, kAvatarSize);
+    const QColor placeholder =
+        kind == static_cast<int>(SidebarKind::Group) ? QColor(124, 58, 237) : accent;
+    painter->drawPixmap(avatar_rect,
+                        circular_avatar(avatar_path, kAvatarSize, placeholder, title));
+
+    const int text_left = avatar_rect.right() + 10;
     QFont title_font = option.font;
     title_font.setBold(true);
     painter->setFont(title_font);
     painter->setPen(title_color);
-    QRect title_rect = bubble.adjusted(8, 6, live || unread ? -28 : -8, -22);
-    painter->drawText(title_rect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
-                      title);
+    QRect title_rect(text_left, bubble.top() + 6,
+                     bubble.right() - text_left - (live || unread ? 28 : 8), 18);
+    painter->drawText(title_rect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, title);
 
     QFont sub_font = option.font;
     sub_font.setPointSizeF(std::max(9.0, sub_font.pointSizeF() - 1.5));
     sub_font.setBold(false);
     painter->setFont(sub_font);
     painter->setPen(muted);
-    painter->drawText(bubble.adjusted(10, 26, -10, -6),
+    painter->drawText(QRect(text_left, bubble.top() + 26, bubble.right() - text_left - 10, 16),
                       Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, subtitle);
 
     if (unread > 0) {

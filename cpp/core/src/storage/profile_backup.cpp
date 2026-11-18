@@ -17,10 +17,13 @@
 
 #include "i2pchat/crypto.hpp"
 #include "i2pchat/encoding.hpp"
+#include "i2pchat/sam/destination.hpp"
 #include "i2pchat/storage/atomic_write.hpp"
+#include "i2pchat/storage/avatar_store.hpp"
 #include "i2pchat/storage/chat_history.hpp"
 #include "i2pchat/storage/profile_dat.hpp"
 #include "i2pchat/storage/profile_paths.hpp"
+#include "i2pchat/storage/sealed_json.hpp"
 
 namespace i2pchat::storage {
 namespace {
@@ -345,6 +348,8 @@ nlohmann::json build_manifest(const std::string& bundle_type, const std::string&
             kind = "history";
         } else if (name.starts_with("blindbox/")) {
             kind = "blindbox";
+        } else if (name == "avatar.enc" || name == "avatar_state.enc") {
+            kind = "avatar";
         }
         entries.push_back({{"kind", kind},
                            {"path", name},
@@ -391,6 +396,43 @@ std::tuple<std::map<std::string, Bytes>, std::size_t, std::size_t> collect_profi
     if (auto drafts = collect_optional_file(paths.compose_drafts())) {
         files["compose_drafts.json"] = *drafts;
         ++sidecars;
+    }
+
+    if (auto avatar = collect_optional_file(paths.self_avatar())) {
+        files["avatar.enc"] = *avatar;
+        ++sidecars;
+        // Re-seal a self-only state into a temp file so peer caches never leave.
+        try {
+            std::string key_line = to_string(ByteView(*profile_dat));
+            while (!key_line.empty() &&
+                   (key_line.back() == '\n' || key_line.back() == '\r')) {
+                key_line.pop_back();
+            }
+            const sam::Destination dest = sam::Destination::from_private_base64(key_line);
+            AvatarState full = load_avatar_state(paths, ByteView(dest.private_key()));
+            AvatarState self_only = export_self_avatar_state(full);
+            if (!self_only.self) {
+                const Bytes plain =
+                    read_sealed_blob(paths.self_avatar(), ByteView(dest.private_key()),
+                                     avatar_blob_format("self"));
+                if (const auto fmt = detect_avatar_format(ByteView(plain))) {
+                    AvatarMeta meta;
+                    meta.sha256 = sha256_hex_bytes(ByteView(plain));
+                    meta.fmt = *fmt;
+                    meta.bytes = static_cast<std::uint64_t>(plain.size());
+                    self_only.self = std::move(meta);
+                }
+            }
+            const auto tmp = paths.data_dir() / (profile + ".avatar_state.export.tmp");
+            write_sealed_json(tmp, avatar_state_to_json(self_only),
+                              ByteView(dest.private_key()), kAvatarStateFormat);
+            files["avatar_state.enc"] = read_file(tmp);
+            std::error_code remove_ec;
+            std::filesystem::remove(tmp, remove_ec);
+            ++sidecars;
+        } catch (const std::exception&) {
+            // Avatar export is best-effort; profile backup still succeeds.
+        }
     }
 
     std::error_code ec;
@@ -530,11 +572,37 @@ BackupImportSummary import_profile_bundle(const std::filesystem::path& bundle_pa
             }
             dest_name = target + ".history." + suffix;
             ++history;
+        } else if (logical == "avatar.enc") {
+            dest_name = target + ".avatar.enc";
+        } else if (logical == "avatar_state.enc") {
+            dest_name = target + ".avatar_state.enc";
         } else {
             fail("Unexpected file in profile bundle: " + logical);
         }
         atomic_write_bytes(pdir / dest_name, ByteView(content));
         ++restored;
+    }
+    // Peer avatar cache is never in the bundle; ensure delivery starts pending
+    // after import by clearing any accidental peers/delivery from state.
+    try {
+        ProfilePaths imported(pdir, target);
+        std::error_code ec;
+        if (std::filesystem::exists(imported.avatar_state(), ec) &&
+            std::filesystem::exists(imported.identity_dat(), ec)) {
+            const ProfileDatContents contents =
+                read_profile_dat_file(imported.identity_dat(), target, pdir, {}, false);
+            if (contents.private_key_base64) {
+                const sam::Destination dest =
+                    sam::Destination::from_private_base64(*contents.private_key_base64);
+                AvatarState state =
+                    load_avatar_state(imported, ByteView(dest.private_key()));
+                state.peers.clear();
+                state.delivery.clear();
+                save_avatar_state(imported, state, ByteView(dest.private_key()));
+            }
+        }
+    } catch (const std::exception&) {
+        // Non-fatal: first live session will still AVATAR_GET.
     }
     return {"profile", source_profile, target, restored, history, 0};
 }
