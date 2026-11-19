@@ -38,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -245,10 +247,19 @@ private fun ReplyQuoteBlock(
     }
 }
 
+/** Insert [chunk] at the caret (or replace the selection) and leave the caret after it. */
+fun TextFieldValue.insertAtCaret(chunk: String): TextFieldValue {
+    val start = selection.min
+    val end = selection.max
+    val next = text.replaceRange(start, end, chunk)
+    val caret = (start + chunk.length).coerceIn(0, next.length)
+    return copy(text = next, selection = TextRange(caret))
+}
+
 @Composable
 fun KeetComposer(
-    text: String,
-    onTextChange: (String) -> Unit,
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
     onSend: () -> Unit,
     onToggleEmoji: () -> Unit,
     showAttach: Boolean,
@@ -295,8 +306,8 @@ fun KeetComposer(
             }
         }
         BasicTextField(
-            value = text,
-            onValueChange = onTextChange,
+            value = value,
+            onValueChange = onValueChange,
             modifier = Modifier
                 .weight(1f)
                 .padding(vertical = 12.dp)
@@ -311,7 +322,7 @@ fun KeetComposer(
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
             decorationBox = { inner ->
                 Box {
-                    if (text.isEmpty()) {
+                    if (value.text.isEmpty()) {
                         Text(
                             stringResource(R.string.message_hint),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

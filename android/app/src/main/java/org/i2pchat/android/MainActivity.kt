@@ -97,9 +97,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,6 +123,7 @@ import org.i2pchat.android.ui.KeetMessageBubble
 import org.i2pchat.android.ui.MediaViewerDialog
 import org.i2pchat.android.ui.MediaViewerRequest
 import org.i2pchat.android.ui.PeerAvatar
+import org.i2pchat.android.ui.insertAtCaret
 import org.i2pchat.android.ui.theme.I2PChatTheme
 import org.i2pchat.android.ui.theme.TerminalPalettes
 
@@ -1182,6 +1185,15 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var emoji by remember { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
     val composeFocus = remember { FocusRequester() }
+    // Track caret explicitly so emoji inserts land at the selection and leave the caret after.
+    var composeField by remember(id) {
+        mutableStateOf(TextFieldValue(state.compose, TextRange(state.compose.length)))
+    }
+    LaunchedEffect(state.compose) {
+        if (composeField.text != state.compose) {
+            composeField = TextFieldValue(state.compose, TextRange(state.compose.length))
+        }
+    }
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var finding by remember { mutableStateOf(false) }
@@ -1484,15 +1496,22 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                             glyph,
                             style = emojiSafeTextStyle().copy(fontSize = 22.sp),
                             modifier = Modifier
-                                .clickable { bridge.setCompose(state.compose + glyph) }
+                                .clickable {
+                                    val next = composeField.insertAtCaret(glyph)
+                                    composeField = next
+                                    bridge.setCompose(next.text)
+                                }
                                 .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 12.dp),
                         )
                     }
                 }
             }
             KeetComposer(
-                text = state.compose,
-                onTextChange = bridge::setCompose,
+                value = composeField,
+                onValueChange = { next ->
+                    composeField = next
+                    if (next.text != state.compose) bridge.setCompose(next.text)
+                },
                 onSend = { bridge.send() },
                 onToggleEmoji = {
                     // Telegram-style: the panel and the keyboard take turns.
