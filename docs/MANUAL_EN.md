@@ -258,7 +258,7 @@ Transfer progress is displayed in the chat area as messages like:
 <filename>: <received>/<size> bytes
 ```
 
-<img src="../screenshots/4.png" alt="Chat area: outgoing file send progress in the message list" width="900" />
+<img src="../screenshots/4.png" alt="Desktop Status: Ready to chat, I2P tunnels, BlindBox, events log" width="900" />
 
 On the receiving side:
 
