@@ -2112,24 +2112,15 @@ class I2PChatCore:
             self.on_file_event(info)
 
     async def _request_file_offer_decision(self, filename: str, size: int) -> Optional[str]:
-        """Ask the UI before writing an incoming file.
+        """Decide where an incoming file is written.
 
-        ``None`` rejects. An empty string accepts into the incoming-files
-        directory. Any other string is the full path the user picked.
-        A boolean ``True`` from an older callback means the default directory.
+        Always auto-accepts into the incoming-files directory (empty string).
+        Per-file Accept/Reject/Save-as dialogs were removed (Kennedy g2387);
+        use the message menu or TUI ``/savefile`` to copy elsewhere. ``on_file_offer``
+        is ignored when set (kept for API compatibility).
         """
-        if self.on_file_offer is None:
-            return ""
-        try:
-            result = self.on_file_offer(filename, size)
-            if asyncio.isfuture(result) or asyncio.iscoroutine(result):
-                result = await result
-        except Exception as e:
-            self._emit_error(f"Incoming file decision callback failed: {e}")
-            return None
-        if isinstance(result, str):
-            return result
-        return "" if result else None
+        _ = (filename, size, self.on_file_offer)
+        return ""
 
     def _emit_inline_image(self, path: str, is_from_me: bool, sent_filename: Optional[str] = None) -> None:
         if self.on_inline_image_received:
@@ -2334,6 +2325,18 @@ class I2PChatCore:
         if k in self._live_sessions:
             return self._live_sessions[k]
         raise ValueError(f"No live session for peer route {peer_for_route!r}")
+
+    async def _live_write_drain(
+        self,
+        writer: asyncio.StreamWriter,
+        data: bytes,
+        *,
+        sess: LivePeerSession,
+    ) -> None:
+        """Write + drain under the peer live write lock (text/file/signals share one SAM writer)."""
+        async with sess.write_lock:
+            writer.write(data)
+            await writer.drain()
 
     def _handshake_complete_for_peer_route(self, peer_for_route: str) -> bool:
         try:
@@ -8983,12 +8986,14 @@ class I2PChatCore:
                 reason="live-session",
                 hint="Message sent over live secure session.",
             )
+            live_sess = self._session_view_for_peer_route(
+                frame_peer_id or peer_for_route
+            )
             for chunk in chunks:
                 frame, msg_id = self.frame_message_with_id(
                     "U", chunk, peer_id=frame_peer_id
                 )
-                writer.write(frame)
-                await writer.drain()
+                await self._live_write_drain(writer, frame, sess=live_sess)
                 routing_pid = frame_peer_id or self._normalize_peer_addr(peer_for_route)
                 self._register_pending_ack(
                     text_ack_table,
@@ -9019,11 +9024,19 @@ class I2PChatCore:
             )
         except Exception as e:
             self._emit_error(f"Failed to send message: {e}")
-            self.session_manager.mark_live_failure(
-                reason="send-failed",
-                peer_id=peer_for_route,
-            )
-            self._schedule_disconnect(self._peer_id_for_frame())
+            transferring = False
+            try:
+                s = self._session_view_for_peer_route(peer_for_route or "")
+                transferring = bool(s._file_transfer_active)
+            except Exception:
+                transferring = False
+            # Do not tear down the live stream while an outgoing file still owns it.
+            if not transferring:
+                self.session_manager.mark_live_failure(
+                    reason="send-failed",
+                    peer_id=peer_for_route,
+                )
+                self._schedule_disconnect(self._peer_id_for_frame())
             lifecycle = delivery_lifecycle_from_send_result(
                 route="blocked",
                 accepted=False,
@@ -9047,15 +9060,16 @@ class I2PChatCore:
         sess: Any,
     ) -> None:
         """S-фрейм (MSG_ACK, IMG_ACK): при исходящей передаче файла реже await drain()."""
-        writer.write(frame)
-        if not sess._file_transfer_active:
-            await writer.drain()
-            sess._soft_signal_ack_since_drain = 0
-            return
-        sess._soft_signal_ack_since_drain += 1
-        if sess._soft_signal_ack_since_drain >= _msg_ack_soft_drain_every():
-            await writer.drain()
-            sess._soft_signal_ack_since_drain = 0
+        async with sess.write_lock:
+            writer.write(frame)
+            if not sess._file_transfer_active:
+                await writer.drain()
+                sess._soft_signal_ack_since_drain = 0
+                return
+            sess._soft_signal_ack_since_drain += 1
+            if sess._soft_signal_ack_since_drain >= _msg_ack_soft_drain_every():
+                await writer.drain()
+                sess._soft_signal_ack_since_drain = 0
 
     async def _send_abort_file(self, peer_for_route: Optional[str] = None) -> None:
         """Отправить пиру сигнал отмены передачи файла (получатель отменил или отправитель)."""
@@ -9067,10 +9081,12 @@ class I2PChatCore:
         if writer is None:
             return
         try:
-            writer.write(
-                self.frame_message("S", "__SIGNAL__:ABORT_FILE", peer_id=fpid)
+            sess = self._session_view_for_peer_route(pr)
+            await self._live_write_drain(
+                writer,
+                self.frame_message("S", "__SIGNAL__:ABORT_FILE", peer_id=fpid),
+                sess=sess,
             )
-            await writer.drain()
         except Exception:
             pass
 
@@ -9086,14 +9102,16 @@ class I2PChatCore:
         if writer is None:
             return
         try:
-            writer.write(
+            sess = self._session_view_for_peer_route(pr)
+            await self._live_write_drain(
+                writer,
                 self.frame_message(
                     "S",
                     f"__SIGNAL__:REJECT_FILE|{filename}",
                     peer_id=fpid,
-                )
+                ),
+                sess=sess,
             )
-            await writer.drain()
         except Exception:
             pass
 
@@ -9156,154 +9174,164 @@ class I2PChatCore:
         filename = os.path.basename(path)
         filesize = os.path.getsize(path)
 
-        sess._file_transfer_active = True
-        sess._soft_signal_ack_since_drain = 0
-        sess._cancel_transfer = False
-        sess._transfer_aborted_by_peer = False
-        sess._transfer_rejected_by_peer = False
-
-        try:
-            self._emit_system(f"Sending file: {filename} ({filesize} bytes)")
-
-            header = f"{filename}|{filesize}"
-            header_frame, file_msg_id = self.frame_message_with_id(
-                "F", header, peer_id=fpid
-            )
-            writer.write(header_frame)
-            await writer.drain()
-            routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
-            self._register_pending_ack(
-                file_acks,
-                file_msg_id,
-                token=os.path.basename(filename),
-                ack_kind="file",
-                routing_peer_id=routing_pid,
-            )
-
-            info = FileTransferInfo(
-                filename=filename,
-                size=filesize,
-                received=0,
-                is_sending=True,
-                source_path=path,
-            )
-            self._emit_file_event(info)
-
-            chunk_size = _file_read_chunk_bytes()
-            drain_batch = _file_send_drain_batch()
-            sent = 0
-            pending_drains = 0
-            with open(path, "rb") as f:
-                while True:
-                    if sess._cancel_transfer:
-                        if pending_drains:
-                            try:
-                                await writer.drain()
-                            except Exception:
-                                pass
-                        await self._send_abort_file(peer_for_route)
-                        raise Exception("Transfer cancelled by user")
-                    if sess._transfer_aborted_by_peer:
-                        if pending_drains:
-                            try:
-                                await writer.drain()
-                            except Exception:
-                                pass
-                        self._emit_system("Receiver cancelled the transfer")
-                        raise Exception("Transfer cancelled by receiver")
-                    if sess._transfer_rejected_by_peer:
-                        if pending_drains:
-                            try:
-                                await writer.drain()
-                            except Exception:
-                                pass
-                        raise Exception("Receiver rejected the file")
-                    if not sess.conn:
-                        raise ConnectionError("Connection lost during transfer")
-
-                    chunk = await asyncio.to_thread(f.read, chunk_size)
-                    if not chunk:
-                        break
-
-                    encoded = base64.b64encode(chunk).decode()
-                    writer.write(self.frame_message("D", encoded, peer_id=fpid))
-                    pending_drains += 1
-                    if pending_drains >= drain_batch:
-                        t0 = time.monotonic()
-                        await writer.drain()
-                        if self._file_xfer_debug:
-                            dt = time.monotonic() - t0
-                            if dt >= 0.25:
-                                logger.info(
-                                    "file xfer send: slow drain %.3fs bytes_sent=%s batch=%s",
-                                    dt,
-                                    sent + len(chunk),
-                                    drain_batch,
-                                )
-                        pending_drains = 0
-
-                    sent += len(chunk)
-                    if should_emit_file_progress(sent, len(chunk), filesize):
-                        info = FileTransferInfo(
-                            filename=filename,
-                            size=filesize,
-                            received=sent,
-                            is_sending=True,
-                            source_path=path,
-                        )
-                        self._emit_file_event(info)
-
-            if pending_drains:
-                await writer.drain()
-
-            writer.write(self.frame_message("E", "", peer_id=fpid))
-            await writer.drain()
-
-            info = FileTransferInfo(
-                filename=filename,
-                size=filesize,
-                received=filesize,
-                is_sending=True,
-                source_path=path,
-            )
-            self._emit_file_event(info)
-
-            if sess.conn:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self.receive_loop(sess.conn, peer_id=fpid))
-                except RuntimeError:
-                    pass
-
-        except (ConnectionError, ConnectionResetError, BrokenPipeError, OSError) as e:
-            info = FileTransferInfo(
-                filename=filename,
-                size=filesize,
-                received=-1,
-                is_sending=True,
-                source_path=path,
-            )
-            self._emit_file_event(info)
-            self._emit_error(f"File transfer interrupted: connection lost")
-
-        except Exception as e:
-            rejected = "rejected" in str(e).lower()
-            info = FileTransferInfo(
-                filename=filename,
-                size=filesize,
-                received=-1,
-                is_sending=True,
-                rejected_by_peer=rejected,
-                source_path=path,
-            )
-            self._emit_file_event(info)
-            if rejected:
-                self._emit_error("Receiver rejected the file.")
-            else:
-                self._emit_error(f"File transfer failed: {e}")
-        finally:
-            sess._file_transfer_active = False
+        async with sess.file_send_lock:
+            sess._file_transfer_active = True
             sess._soft_signal_ack_since_drain = 0
+            sess._cancel_transfer = False
+            sess._transfer_aborted_by_peer = False
+            sess._transfer_rejected_by_peer = False
+
+            try:
+                self._emit_system(f"Sending file: {filename} ({filesize} bytes)")
+
+                header = f"{filename}|{filesize}"
+                header_frame, file_msg_id = self.frame_message_with_id(
+                    "F", header, peer_id=fpid
+                )
+                await self._live_write_drain(writer, header_frame, sess=sess)
+                routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
+                self._register_pending_ack(
+                    file_acks,
+                    file_msg_id,
+                    token=os.path.basename(filename),
+                    ack_kind="file",
+                    routing_peer_id=routing_pid,
+                )
+
+                info = FileTransferInfo(
+                    filename=filename,
+                    size=filesize,
+                    received=0,
+                    is_sending=True,
+                    source_path=path,
+                )
+                self._emit_file_event(info)
+
+                chunk_size = _file_read_chunk_bytes()
+                drain_batch = _file_send_drain_batch()
+                sent = 0
+                pending_drains = 0
+                with open(path, "rb") as f:
+                    while True:
+                        if sess._cancel_transfer:
+                            if pending_drains:
+                                try:
+                                    async with sess.write_lock:
+                                        await writer.drain()
+                                except Exception:
+                                    pass
+                            await self._send_abort_file(peer_for_route)
+                            raise Exception("Transfer cancelled by user")
+                        if sess._transfer_aborted_by_peer:
+                            if pending_drains:
+                                try:
+                                    async with sess.write_lock:
+                                        await writer.drain()
+                                except Exception:
+                                    pass
+                            self._emit_system("Receiver cancelled the transfer")
+                            raise Exception("Transfer cancelled by receiver")
+                        if sess._transfer_rejected_by_peer:
+                            if pending_drains:
+                                try:
+                                    async with sess.write_lock:
+                                        await writer.drain()
+                                except Exception:
+                                    pass
+                            raise Exception("Receiver rejected the file")
+                        if not sess.conn:
+                            raise ConnectionError("Connection lost during transfer")
+
+                        chunk = await asyncio.to_thread(f.read, chunk_size)
+                        if not chunk:
+                            break
+
+                        encoded = base64.b64encode(chunk).decode()
+                        async with sess.write_lock:
+                            writer.write(
+                                self.frame_message("D", encoded, peer_id=fpid)
+                            )
+                            pending_drains += 1
+                            if pending_drains >= drain_batch:
+                                t0 = time.monotonic()
+                                await writer.drain()
+                                if self._file_xfer_debug:
+                                    dt = time.monotonic() - t0
+                                    if dt >= 0.25:
+                                        logger.info(
+                                            "file xfer send: slow drain %.3fs bytes_sent=%s batch=%s",
+                                            dt,
+                                            sent + len(chunk),
+                                            drain_batch,
+                                        )
+                                pending_drains = 0
+
+                        sent += len(chunk)
+                        if should_emit_file_progress(sent, len(chunk), filesize):
+                            info = FileTransferInfo(
+                                filename=filename,
+                                size=filesize,
+                                received=sent,
+                                is_sending=True,
+                                source_path=path,
+                            )
+                            self._emit_file_event(info)
+
+                if pending_drains:
+                    async with sess.write_lock:
+                        await writer.drain()
+
+                await self._live_write_drain(
+                    writer,
+                    self.frame_message("E", "", peer_id=fpid),
+                    sess=sess,
+                )
+
+                info = FileTransferInfo(
+                    filename=filename,
+                    size=filesize,
+                    received=filesize,
+                    is_sending=True,
+                    source_path=path,
+                )
+                self._emit_file_event(info)
+
+                if sess.conn:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.receive_loop(sess.conn, peer_id=fpid))
+                    except RuntimeError:
+                        pass
+
+            except (ConnectionError, ConnectionResetError, BrokenPipeError, OSError) as e:
+                info = FileTransferInfo(
+                    filename=filename,
+                    size=filesize,
+                    received=-1,
+                    is_sending=True,
+                    source_path=path,
+                )
+                self._emit_file_event(info)
+                self._emit_error(f"File transfer interrupted: connection lost")
+
+            except Exception as e:
+                rejected = "rejected" in str(e).lower()
+                info = FileTransferInfo(
+                    filename=filename,
+                    size=filesize,
+                    received=-1,
+                    is_sending=True,
+                    rejected_by_peer=rejected,
+                    source_path=path,
+                )
+                self._emit_file_event(info)
+                if rejected:
+                    self._emit_error("Receiver rejected the file.")
+                else:
+                    self._emit_error(f"File transfer failed: {e}")
+            finally:
+                sess._file_transfer_active = False
+                sess._soft_signal_ack_since_drain = 0
 
     async def send_image_lines(
         self, lines: list[str], *, peer_address: Optional[str] = None
@@ -9327,10 +9355,12 @@ class I2PChatCore:
             self._emit_error("No live connection for the selected peer.")
             return
 
-        for line in lines:
-            writer.write(self.frame_message("I", line, peer_id=fpid))
-        writer.write(self.frame_message("I", "__END__", peer_id=fpid))
-        await writer.drain()
+        sess = self._session_view_for_peer_route(peer_for_route)
+        async with sess.write_lock:
+            for line in lines:
+                writer.write(self.frame_message("I", line, peer_id=fpid))
+            writer.write(self.frame_message("I", "__END__", peer_id=fpid))
+            await writer.drain()
 
     async def send_image(
         self, path: str, *, peer_address: Optional[str] = None
@@ -9402,148 +9432,154 @@ class I2PChatCore:
             return None
 
         sess = self._session_view_for_peer_route(peer_for_route)
-        sess._file_transfer_active = True
-        sess._soft_signal_ack_since_drain = 0
-        sess._cancel_transfer = False
-
-        try:
-            self._emit_system(f"Sending image: {filename} ({filesize} bytes)")
-
-            # Прогресс загрузки в UI (is_inline_image — чтобы GUI заменил виджет на превью, не «File sent»)
-            self._emit_file_event(
-                FileTransferInfo(
-                    filename=filename,
-                    size=filesize,
-                    received=0,
-                    is_sending=True,
-                    is_inline_image=True,
-                    source_path=path,
-                )
-            )
-
-            # Отправляем заголовок: G + filename|size
-            header = f"{filename}|{filesize}"
-            header_frame, image_msg_id = self.frame_message_with_id(
-                "G", header, peer_id=fpid
-            )
-            writer.write(header_frame)
-            await writer.drain()
-            routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
-            self._register_pending_ack(
-                image_acks,
-                image_msg_id,
-                token=os.path.basename(filename),
-                ack_kind="image",
-                routing_peer_id=routing_pid,
-            )
-
-            chunk_size = _file_read_chunk_bytes()
-            drain_batch = _file_send_drain_batch()
-            sent = 0
-            pending_drains = 0
-            offset = 0
-            while offset < filesize:
-                if sess._cancel_transfer:
-                    if pending_drains:
-                        try:
-                            await writer.drain()
-                        except Exception:
-                            pass
-                    raise Exception("Transfer cancelled by user")
-                if not sess.conn:
-                    raise ConnectionError("Connection lost during transfer")
-
-                chunk = payload[offset : offset + chunk_size]
-                offset += len(chunk)
-                if not chunk:
-                    break
-
-                encoded = base64.b64encode(chunk).decode()
-                writer.write(self.frame_message("G", encoded, peer_id=fpid))
-                pending_drains += 1
-                if pending_drains >= drain_batch:
-                    t0 = time.monotonic()
-                    await writer.drain()
-                    if self._file_xfer_debug:
-                        dt = time.monotonic() - t0
-                        if dt >= 0.25:
-                            logger.info(
-                                "file xfer image send: slow drain %.3fs bytes_sent=%s batch=%s",
-                                dt,
-                                sent + len(chunk),
-                                drain_batch,
-                            )
-                    pending_drains = 0
-
-                sent += len(chunk)
-                if should_emit_file_progress(sent, len(chunk), filesize):
-                    self._emit_file_event(
-                        FileTransferInfo(
-                            filename=filename,
-                            size=filesize,
-                            received=sent,
-                            is_sending=True,
-                            is_inline_image=True,
-                            source_path=path,
-                        )
-                    )
-
-            if pending_drains:
-                await writer.drain()
-
-            # Отправляем маркер завершения
-            writer.write(self.frame_message("G", "__IMG_END__", peer_id=fpid))
-            await writer.drain()
-            
-            self._emit_file_event(
-                FileTransferInfo(
-                    filename=filename,
-                    size=filesize,
-                    received=filesize,
-                    is_sending=True,
-                    is_inline_image=True,
-                    source_path=path,
-                )
-            )
-            
-            # Уведомляем UI об отправленном изображении (filename для галочки доставки)
-            self._emit_inline_image(local_path, is_from_me=True, sent_filename=filename)
-            
-            # Очистка кэша при необходимости
-            cleanup_images_cache()
-            
-            return local_path
-            
-        except (ConnectionError, ConnectionResetError, BrokenPipeError, OSError) as e:
-            self._emit_file_event(
-                FileTransferInfo(
-                    filename=filename,
-                    size=filesize,
-                    received=-1,
-                    is_sending=True,
-                    is_inline_image=True,
-                    source_path=path,
-                )
-            )
-            self._emit_error(f"Image transfer interrupted: connection lost")
-            return None
-            
-        except Exception as e:
-            self._emit_file_event(
-                FileTransferInfo(
-                    filename=filename,
-                    size=filesize,
-                    received=-1,
-                    is_sending=True,
-                    is_inline_image=True,
-                    source_path=path,
-                )
-            )
-            self._emit_error(f"Image transfer failed: {e}")
-            return None
-        finally:
-            sess._file_transfer_active = False
+        async with sess.file_send_lock:
+            sess._file_transfer_active = True
             sess._soft_signal_ack_since_drain = 0
+            sess._cancel_transfer = False
+
+            try:
+                self._emit_system(f"Sending image: {filename} ({filesize} bytes)")
+
+                # Прогресс загрузки в UI (is_inline_image — чтобы GUI заменил виджет на превью, не «File sent»)
+                self._emit_file_event(
+                    FileTransferInfo(
+                        filename=filename,
+                        size=filesize,
+                        received=0,
+                        is_sending=True,
+                        is_inline_image=True,
+                        source_path=path,
+                    )
+                )
+
+                # Отправляем заголовок: G + filename|size
+                header = f"{filename}|{filesize}"
+                header_frame, image_msg_id = self.frame_message_with_id(
+                    "G", header, peer_id=fpid
+                )
+                await self._live_write_drain(writer, header_frame, sess=sess)
+                routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
+                self._register_pending_ack(
+                    image_acks,
+                    image_msg_id,
+                    token=os.path.basename(filename),
+                    ack_kind="image",
+                    routing_peer_id=routing_pid,
+                )
+
+                chunk_size = _file_read_chunk_bytes()
+                drain_batch = _file_send_drain_batch()
+                sent = 0
+                pending_drains = 0
+                offset = 0
+                while offset < filesize:
+                    if sess._cancel_transfer:
+                        if pending_drains:
+                            try:
+                                async with sess.write_lock:
+                                    await writer.drain()
+                            except Exception:
+                                pass
+                        raise Exception("Transfer cancelled by user")
+                    if not sess.conn:
+                        raise ConnectionError("Connection lost during transfer")
+
+                    chunk = payload[offset : offset + chunk_size]
+                    offset += len(chunk)
+                    if not chunk:
+                        break
+
+                    encoded = base64.b64encode(chunk).decode()
+                    async with sess.write_lock:
+                        writer.write(self.frame_message("G", encoded, peer_id=fpid))
+                        pending_drains += 1
+                        if pending_drains >= drain_batch:
+                            t0 = time.monotonic()
+                            await writer.drain()
+                            if self._file_xfer_debug:
+                                dt = time.monotonic() - t0
+                                if dt >= 0.25:
+                                    logger.info(
+                                        "file xfer image send: slow drain %.3fs bytes_sent=%s batch=%s",
+                                        dt,
+                                        sent + len(chunk),
+                                        drain_batch,
+                                    )
+                            pending_drains = 0
+
+                    sent += len(chunk)
+                    if should_emit_file_progress(sent, len(chunk), filesize):
+                        self._emit_file_event(
+                            FileTransferInfo(
+                                filename=filename,
+                                size=filesize,
+                                received=sent,
+                                is_sending=True,
+                                is_inline_image=True,
+                                source_path=path,
+                            )
+                        )
+
+                if pending_drains:
+                    async with sess.write_lock:
+                        await writer.drain()
+
+                # Отправляем маркер завершения
+                await self._live_write_drain(
+                    writer,
+                    self.frame_message("G", "__IMG_END__", peer_id=fpid),
+                    sess=sess,
+                )
+
+                self._emit_file_event(
+                    FileTransferInfo(
+                        filename=filename,
+                        size=filesize,
+                        received=filesize,
+                        is_sending=True,
+                        is_inline_image=True,
+                        source_path=path,
+                    )
+                )
+
+                # Уведомляем UI об отправленном изображении (filename для галочки доставки)
+                self._emit_inline_image(local_path, is_from_me=True, sent_filename=filename)
+
+                # Очистка кэша при необходимости
+                cleanup_images_cache()
+
+                return local_path
+
+            except (ConnectionError, ConnectionResetError, BrokenPipeError, OSError) as e:
+                self._emit_file_event(
+                    FileTransferInfo(
+                        filename=filename,
+                        size=filesize,
+                        received=-1,
+                        is_sending=True,
+                        is_inline_image=True,
+                        source_path=path,
+                    )
+                )
+                self._emit_error(f"Image transfer interrupted: connection lost")
+                return None
+
+            except Exception as e:
+                self._emit_file_event(
+                    FileTransferInfo(
+                        filename=filename,
+                        size=filesize,
+                        received=-1,
+                        is_sending=True,
+                        is_inline_image=True,
+                        source_path=path,
+                    )
+                )
+                self._emit_error(f"Image transfer failed: {e}")
+                return None
+            finally:
+                sess._file_transfer_active = False
+                sess._soft_signal_ack_since_drain = 0
 
     async def send_control(self, signal: str) -> None:
         lap = self._last_active_peer_for_telemetry()
@@ -9554,10 +9590,12 @@ class I2PChatCore:
         if writer is None:
             return
         try:
-            writer.write(
-                self.frame_message("S", f"__SIGNAL__:{signal}", peer_id=fpid)
+            sess = self._session_view_for_peer_route(pr)
+            await self._live_write_drain(
+                writer,
+                self.frame_message("S", f"__SIGNAL__:{signal}", peer_id=fpid),
+                sess=sess,
             )
-            await writer.drain()
         except Exception:
             pass
 

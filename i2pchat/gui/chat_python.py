@@ -187,6 +187,8 @@ class TransferEventRef:
     timestamp: str
     # Full path of a received file or picture; empty for everything else.
     path: str = ""
+    # Shared with chat message #refs when this row is a received item on disk.
+    ref_id: Optional[int] = None
 
 
 # Core service kinds that go through notice filtering instead of straight into the chat log.
@@ -585,7 +587,6 @@ class I2PChat(App):
             on_system=self.handle_system,
             on_error=self.handle_error,
             on_file_event=self.handle_file_event,
-            on_file_offer=self.handle_file_offer,
             on_image_received=self.handle_image_received,
             on_inline_image_received=self.handle_inline_image_received,
             on_text_delivered=self.handle_text_delivered,
@@ -660,22 +661,16 @@ class I2PChat(App):
         return f"http://{host}:{port}"
 
     async def handle_file_offer(self, filename: str, size: int) -> str | bool:
-        """Ask before a peer's file touches the disk.
-
-        Returns a path to save this one file elsewhere, ``True`` for the
-        configured folder, or ``False`` to reject.
-        """
+        """Auto-accept into downloads (Kennedy g2387). Use ``/savefile`` to copy elsewhere."""
         from i2pchat.core.i2p_chat_core import sanitize_filename
 
         shown_name = sanitize_filename(filename)
-        self.post("system", f"Incoming file offer: {escape(shown_name)} ({size:,} bytes).")
-        choice = await self.push_screen_wait(
-            TuiFileOfferScreen(filename=shown_name, size=size)
+        self.post(
+            "system",
+            f"Receiving file: {escape(shown_name)} ({size:,} bytes) → downloads. "
+            f"Use /savefile to copy elsewhere.",
         )
-        if choice == "saveas":
-            path = await self.push_screen_wait(TuiSavePathScreen(filename=shown_name))
-            return path or False
-        return bool(choice)
+        return True
 
     def _active_peer_label(self) -> str:
         core = getattr(self, "core", None)
@@ -2224,13 +2219,26 @@ class I2PChat(App):
     def _record_transfer_event(
         self, kind: str, filename: str, detail: str, *, path: str = ""
     ) -> None:
+        ref_id: Optional[int] = None
+        saved = path if path and os.path.isfile(path) else ""
+        if saved:
+            # Same #N space as chat messages so /savefile <N> works.
+            ref_id = self._record_recent_message(
+                sender="file",
+                text=f"[{kind}] {os.path.basename(saved)}",
+                peer=self._current_target_peer(),
+                message_id=None,
+                delivery_state=None,
+                timestamp=datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            )
         self._recent_transfers.appendleft(
             TransferEventRef(
                 kind=kind,
                 filename=os.path.basename(filename),
                 detail=detail,
                 timestamp=datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                path=path,
+                path=saved or path,
+                ref_id=ref_id,
             )
         )
 
@@ -2238,6 +2246,13 @@ class I2PChat(App):
         """Newest received file or picture that is still on disk."""
         for item in self._recent_transfers:
             if item.path and os.path.isfile(item.path):
+                return item.path
+        return None
+
+    def _received_path_for_ref(self, ref_id: int) -> Optional[str]:
+        """Disk path for message/transfer ref ``#N``, if still present."""
+        for item in self._recent_transfers:
+            if item.ref_id == ref_id and item.path and os.path.isfile(item.path):
                 return item.path
         return None
 
@@ -2654,33 +2669,57 @@ class I2PChat(App):
 
         elif cmd == "sendfile":
             if not args:
-                self.post("error", "Usage: /sendfile <path>")
+                self.post("error", "Usage: /sendfile <path> [path…]")
                 return
-            path = os.path.expanduser(args[0])
-            if not os.path.exists(path):
-                self.post("error", f"File not found: {path}")
+            paths = [os.path.expanduser(a) for a in args]
+            missing = [p for p in paths if not os.path.exists(p)]
+            if missing:
+                self.post("error", f"File not found: {missing[0]}")
                 return
-            self.run_worker(self.core.send_file(path))
+
+            async def _send_many() -> None:
+                for p in paths:
+                    await self.core.send_file(p)
+
+            self.run_worker(_send_many())
 
         elif cmd == "savefile":
             if not args:
-                self.post("error", "Usage: /savefile <file path or folder>")
+                self.post(
+                    "error",
+                    "Usage: /savefile <file path or folder>  or  /savefile <N> <file path or folder>",
+                )
                 return
-            source = self._last_received_path()
-            if not source:
-                self.post("error", "No received file or picture to save yet.")
-                return
-            await self._save_received_copy(source, args[0])
+            dest_arg = args[0]
+            source: Optional[str] = None
+            if len(args) >= 2 and args[0].isdigit():
+                source = self._received_path_for_ref(int(args[0]))
+                if not source:
+                    self.post("error", f"No received file for message #{args[0]}.")
+                    return
+                dest_arg = args[1]
+            else:
+                source = self._last_received_path()
+                if not source:
+                    self.post("error", "No received file or picture to save yet.")
+                    return
+            await self._save_received_copy(source, dest_arg)
 
         elif cmd == "sendpic":
             if not args:
-                self.post("error", "Usage: /sendpic <path>")
+                self.post("error", "Usage: /sendpic <path> [path…]")
                 return
-            path = os.path.expanduser(args[0])
-            if not os.path.exists(path):
-                self.post("error", f"File not found: {path}")
+            paths = [os.path.expanduser(a) for a in args]
+            missing = [p for p in paths if not os.path.exists(p)]
+            if missing:
+                self.post("error", f"File not found: {missing[0]}")
                 return
-            self.run_worker(self.core.send_image(path))
+
+            async def _send_pics() -> None:
+                for p in paths:
+                    await self.core.send_image(p)
+
+            self.run_worker(_send_pics())
 
         elif cmd == "img":
             if not args:
@@ -3307,10 +3346,14 @@ class I2PChat(App):
         self.post("help", "Groups: F8 or /group list|create|open|close|info|members|topology|invite|join|send. Compose box sends to active group when open.")
         self.post("help", "Connection: /connect <addr>, /disconnect, /save, /unlock, /status")
         self.post("help", "Status: F9 opens readiness and service notices; /verbose on|off shows technical messages in the chat.")
-        self.post("help", "Files: /sendfile <path> (/send-file) sends any file; the peer is asked to accept it.")
-        self.post("help", "Pictures: /sendpic <path> (/send-picture) sends an image file that the peer sees as a picture in the chat.")
+        self.post("help", "Files: /sendfile <path> [path…] (/send-file) queues one or more files over the live session.")
+        self.post("help", "Pictures: /sendpic <path> [path…] (/send-picture) sends image file(s) the peer sees as pictures.")
         self.post("help", "Text art: /img <path> converts a picture to Braille characters and sends it as text; /img-bw <path> does the same with solid blocks.")
-        self.post("help", "Saving: /savefile <path> copies the last received file or picture to <path>; F3 lists received items with Save as.")
+        self.post(
+            "help",
+            "Saving: /savefile <path> copies the last received item; "
+            "/savefile <N> <path> copies message/transfer #N; F3 lists received items with Save as.",
+        )
         self.post("help", "Replies: /recent [count] lists the latest messages with numbers; /reply <number> puts a quote of that message into the compose box; /reply <number> <text> sends the quote and your answer at once.")
         self.post("help", "Launcher: optional via /launcher (/menu) if you want the quick launcher overlay.")
         self.post("help", "Contacts: F2 / Ctrl+B or /contacts to view the book. Also: /contacts use|add|edit|remove|info … (legacy /contact-* commands still work).")
@@ -4593,17 +4636,20 @@ class TuiMediaScreen(ModalScreen[None]):
         table.clear(columns=True)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns("When", "Kind", "File", "Detail")
+        table.add_columns("#", "When", "Kind", "File", "Detail")
         self._rows = list(self.host._recent_transfers)[:20]
         if not self._rows:
-            table.add_row("—", "", "No recent transfers", "", key="empty")
+            table.add_row("—", "—", "", "No recent transfers", "", key="empty")
             table.disabled = True
             self.query_one("#media_save_as", Button).disabled = True
             return
         table.disabled = False
         for idx, item in enumerate(self._rows):
             detail = f"{item.detail} · can be saved" if item.path else item.detail
-            table.add_row(item.timestamp, item.kind, item.filename, detail, key=str(idx))
+            ref_col = f"#{item.ref_id}" if item.ref_id is not None else "—"
+            table.add_row(
+                ref_col, item.timestamp, item.kind, item.filename, detail, key=str(idx)
+            )
         if selected is not None:
             for idx, item in enumerate(self._rows):
                 if item is selected:

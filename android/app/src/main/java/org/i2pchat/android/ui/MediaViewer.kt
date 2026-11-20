@@ -1,10 +1,14 @@
 package org.i2pchat.android.ui
 
 import android.media.MediaPlayer
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
@@ -12,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -137,6 +142,21 @@ private fun FullscreenVideo(path: String) {
                 setOnErrorListener { _, _, _ ->
                     Toast.makeText(context, R.string.media_play_failed, Toast.LENGTH_SHORT).show()
                     true
+                }
+                // Double-tap left/right seeks ±10s (Kennedy g2387); single taps still reach MediaController.
+                var lastTapMs = 0L
+                setOnTouchListener { view, event ->
+                    if (event.action != MotionEvent.ACTION_UP) return@setOnTouchListener false
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastTapMs < 300L) {
+                        val delta = if (event.x < view.width / 2f) -10_000 else 10_000
+                        val dur = duration.coerceAtLeast(0)
+                        seekTo((currentPosition + delta).coerceIn(0, dur))
+                        lastTapMs = 0L
+                        return@setOnTouchListener true
+                    }
+                    lastTapMs = now
+                    false
                 }
                 setVideoPath(path)
             }
@@ -274,7 +294,31 @@ fun InlineAudioPlayer(
                 progress = {
                     if (audio.duration > 0) (audio.position.toFloat() / audio.duration).coerceIn(0f, 1f) else 0f
                 },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .height(14.dp)
+                    .pointerInput(audio.duration, audio.player) {
+                        val dur = audio.duration
+                        if (dur <= 0) return@pointerInput
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            fun seekToX(x: Float) {
+                                val frac = (x / size.width.toFloat()).coerceIn(0f, 1f)
+                                val pos = (frac * dur).toInt()
+                                runCatching { audio.player?.seekTo(pos) }
+                                audio.position = pos
+                            }
+                            seekToX(down.position.x)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (!change.pressed) break
+                                seekToX(change.position.x)
+                                change.consume()
+                            }
+                        }
+                    },
                 color = color,
                 trackColor = color.copy(alpha = 0.25f),
             )

@@ -2509,6 +2509,22 @@ class ChatListView(QtWidgets.QListView):
     def _copy_path(self, path: str) -> None:
         QtWidgets.QApplication.clipboard().setText(path)
 
+    def _save_path_as(self, path: str) -> None:
+        """Copy a received file/image to a user-chosen location (Kennedy g2387)."""
+        if not path or not os.path.isfile(path):
+            return
+        dest, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save as…", os.path.basename(path)
+        )
+        if not dest:
+            return
+        try:
+            shutil.copy2(path, dest)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Save as…", f"Could not save the file:\n{exc}"
+            )
+
     def _reply_author(self, item: ChatItem) -> str:
         resolver = self.reply_author_resolver
         if resolver is not None:
@@ -2568,6 +2584,12 @@ class ChatListView(QtWidgets.QListView):
                 lambda path=p: self._copy_path(path),
                 tool_tip=menu_tt.TT_COPY_PATH,
             )
+            if os.path.isfile(p):
+                self._context_popup.add_action(
+                    "Save as…",
+                    lambda path=p: self._save_path_as(path),
+                    tool_tip="Copy this image to a location you choose",
+                )
             if item.text.strip():
                 add_copy_text()
                 add_copy_timestamp()
@@ -2585,6 +2607,11 @@ class ChatListView(QtWidgets.QListView):
                     "Copy path",
                     lambda path=fp: self._copy_path(path),
                     tool_tip=menu_tt.TT_COPY_PATH,
+                )
+                self._context_popup.add_action(
+                    "Save as…",
+                    lambda path=fp: self._save_path_as(path),
+                    tool_tip="Copy this file to a location you choose",
                 )
             if item.open_folder_path and os.path.isdir(item.open_folder_path):
                 folder = item.open_folder_path
@@ -4019,7 +4046,7 @@ class MessageInputEdit(QtWidgets.QTextEdit):
         if paths:
             parent = self.window()
             if isinstance(parent, ChatWindow):
-                parent._send_local_path(paths[0])
+                parent._send_local_paths(paths)
                 event.acceptProposedAction()
                 return
         super().dropEvent(event)
@@ -11268,7 +11295,6 @@ class ChatWindow(QtWidgets.QMainWindow):
             on_system=self.handle_core_system,
             on_error=self.handle_error,
             on_file_event=on_file,
-            on_file_offer=self.ask_incoming_file_accept,
             on_image_received=self.handle_image_received,
             on_inline_image_received=self.handle_inline_image_received,
             on_text_delivered=self.handle_text_delivered,
@@ -13169,19 +13195,27 @@ class ChatWindow(QtWidgets.QMainWindow):
         return dlg.passphrase()
 
     def _send_local_path(self, path: str) -> None:
-        low = path.lower()
-        if low.endswith((".png", ".jpg", ".jpeg", ".webp")):
-            ok, err, _ = validate_image(path)
-            if not ok:
-                self.handle_error(err or "Invalid image file")
-                return
-            asyncio.create_task(
-                self.core.send_image(path, peer_address=self._outbound_peer_arg())
-            )
-            return
-        asyncio.create_task(
-            self.core.send_file(path, peer_address=self._outbound_peer_arg())
-        )
+        self._send_local_paths([path])
+
+    def _send_local_paths(self, paths: list[str]) -> None:
+        """Queue one or more local files (images use send_image; others send_file)."""
+        peer = self._outbound_peer_arg()
+
+        async def _queue() -> None:
+            for path in paths:
+                if not path:
+                    continue
+                low = path.lower()
+                if low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    ok, err, _ = validate_image(path)
+                    if not ok:
+                        self.handle_error(err or "Invalid image file")
+                        continue
+                    await self.core.send_image(path, peer_address=peer)
+                else:
+                    await self.core.send_file(path, peer_address=peer)
+
+        asyncio.create_task(_queue())
 
     @QtCore.pyqtSlot()
     def _set_own_avatar(self) -> None:
@@ -13982,28 +14016,24 @@ class ChatWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot()
     def on_send_file_clicked(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Select file to send"
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Select file(s) to send"
         )
-        if not path:
+        if not paths:
             return
-        asyncio.create_task(
-            self.core.send_file(path, peer_address=self._outbound_peer_arg())
-        )
+        self._send_local_paths(paths)
 
     @QtCore.pyqtSlot()
     def on_send_pic_clicked(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
-            "Select image to send",
+            "Select image(s) to send",
             "",
             "Images (*.png *.jpg *.jpeg *.webp);;All Files (*)",
         )
-        if not path:
+        if not paths:
             return
-        asyncio.create_task(
-            self.core.send_image(path, peer_address=self._outbound_peer_arg())
-        )
+        self._send_local_paths(paths)
 
     @QtCore.pyqtSlot(str)
     def on_clipboard_image_ready(self, path: str) -> None:

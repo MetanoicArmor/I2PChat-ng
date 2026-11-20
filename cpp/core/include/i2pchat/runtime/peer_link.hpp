@@ -80,8 +80,10 @@ public:
     /// loops. Returns immediately; everything after this is callback-driven.
     void start();
 
-    /// Queues an application frame. Silently dropped once the link is closed,
-    /// which is the only sane behaviour for a fire-and-forget send on a
+    /// Queues an application frame onto the serialized outbox (text and file
+    /// chunks share one drain loop, so a live send during a file transfer cannot
+    /// interleave mid-write on the socket). Silently dropped once the link is
+    /// closed, which is the only sane behaviour for a fire-and-forget send on a
     /// connection the caller cannot hold a lock on.
     void send(char msg_type, ByteView payload, std::uint64_t msg_id);
     void send_text(char msg_type, std::string_view payload, std::uint64_t msg_id) {

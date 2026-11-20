@@ -28,6 +28,23 @@ def _is_image_path(path: str) -> bool:
     return ext.lower() in _IMAGE_EXTENSIONS
 
 
+def action_for_path(path: str) -> DropAction:
+    """Image extensions → send_image; everything else → send_file."""
+    if _is_image_path(path):
+        return SEND_IMAGE
+    return SEND_FILE
+
+
+def classify_drop_paths(urls: Sequence[str]) -> list[tuple[str, DropAction]]:
+    """Per-path actions for a multi-file drop (Kennedy g2387)."""
+    out: list[tuple[str, DropAction]] = []
+    for raw in urls:
+        path = (raw or "").strip()
+        if path:
+            out.append((path, action_for_path(path)))
+    return out
+
+
 def classify_drop(mime_types: Sequence[str], urls: Sequence[str]) -> DropAction:
     """Return the appropriate DropAction for a drop event.
 
@@ -36,19 +53,16 @@ def classify_drop(mime_types: Sequence[str], urls: Sequence[str]) -> DropAction:
 
     Rules:
     - If no local file URLs are present → reject.
-    - If the single dropped file has an image extension → send_image.
-    - Otherwise → send_file.
-    - Multiple files → reject (not supported).
+    - One image → send_image; one other file → send_file.
+    - Multiple files → send_file (caller should use ``classify_drop_paths``).
     """
+    _ = mime_types
     local_paths = [u for u in urls if u]
     if not local_paths:
         return REJECT
     if len(local_paths) > 1:
-        return REJECT
-    path = local_paths[0]
-    if _is_image_path(path):
-        return SEND_IMAGE
-    return SEND_FILE
+        return SEND_FILE
+    return action_for_path(local_paths[0])
 
 
 def validate_drop_file(path: str) -> tuple[bool, str]:

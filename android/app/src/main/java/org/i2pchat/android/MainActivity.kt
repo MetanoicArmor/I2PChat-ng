@@ -171,22 +171,6 @@ fun I2PChatRoot(bridge: ChatBridge) {
     if (state.tofu != null) {
         TofuDialog(state.tofu!!, onAccept = { bridge.answerTofu(true) }, onReject = { bridge.answerTofu(false) })
     }
-    val saveAsLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { uri ->
-        if (uri == null) bridge.answerFileOffer(false)
-        else bridge.answerFileOfferSavingTo(uri)
-    }
-    if (state.fileOffer != null) {
-        val offer = state.fileOffer!!
-        FileOfferDialog(
-            offer,
-            bridge,
-            onAccept = { bridge.answerFileOffer(true) },
-            onReject = { bridge.answerFileOffer(false) },
-            onSaveAs = { saveAsLauncher.launch(offer.name) },
-        )
-    }
     if (!state.nativeLoaded) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
             Text(stringResource(R.string.native_failed_title), style = MaterialTheme.typography.headlineSmall)
@@ -1210,11 +1194,15 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var pendingSaveFile by remember { mutableStateOf<String?>(null) }
     var viewer by remember { mutableStateOf<MediaViewerRequest?>(null) }
     val list = rememberLazyListState()
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) bridge.sendFile(uri, false)
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) bridge.sendFiles(uris, false)
     }
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) bridge.sendFile(uri, true)
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isNotEmpty()) bridge.sendFiles(uris, true)
     }
     val saveMemoryImage = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("image/*"),
@@ -1524,7 +1512,7 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 },
                 showAttach = !group,
-                onPickFile = { filePicker.launch("*/*") },
+                onPickFile = { filePicker.launch(arrayOf("*/*")) },
                 onPickImage = { imagePicker.launch("image/*") },
                 focusRequester = composeFocus,
                 onFieldTap = {

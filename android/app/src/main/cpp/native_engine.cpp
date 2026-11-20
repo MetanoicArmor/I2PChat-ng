@@ -807,23 +807,10 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
             }
             return i2pchat::session::TrustDecision::Deferred;
         };
-        events.offer_file = [](const std::string& peer, const std::string& name,
-                               std::uint64_t size) {
-            JNIEnv* local = g_engine.env();
-            if (local == nullptr) {
-                return i2pchat::transfer::OfferDecision::Reject;
-            }
-            jstring j_peer = utf8_to_jstring(local, peer);
-            jstring j_name = utf8_to_jstring(local, name);
-            g_engine.call_void("onFileOffer", "(Ljava/lang/String;Ljava/lang/String;J)V", j_peer,
-                               j_name, static_cast<jlong>(std::min<std::uint64_t>(
-                                           size, static_cast<std::uint64_t>(INT64_MAX))));
-            local->DeleteLocalRef(j_peer);
-            local->DeleteLocalRef(j_name);
-            // The bytes are spooled to a `.pending` file in the app-private
-            // downloads directory while the dialog is up; they only get the
-            // real name (and the ACK goes out) once the user says yes.
-            return i2pchat::transfer::OfferDecision::Deferred;
+        // Kennedy g2387: auto-accept into downloads; Save as is a message-menu action.
+        events.offer_file = [](const std::string& /*peer*/, const std::string& /*name*/,
+                               std::uint64_t /*size*/) {
+            return i2pchat::transfer::OfferDecision::Accept;
         };
 
         g_engine.service = std::make_unique<ChatService>(g_engine.io.get_executor(),

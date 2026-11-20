@@ -27,7 +27,11 @@ def _app() -> tuple[I2PChat, list[tuple[str, str]]]:
     app = object.__new__(I2PChat)
     posted: list[tuple[str, str]] = []
     app._recent_transfers = deque(maxlen=80)
+    app._recent_messages = deque(maxlen=200)
+    app._message_ref_counter = 0
+    app._message_ref_by_id = {}
     app._transfer_progress_buckets = {}
+    app._current_target_peer = lambda: None  # type: ignore[method-assign]
     app.post = lambda kind, text, **_kw: posted.append((kind, text))  # type: ignore[method-assign]
     return app, posted
 
@@ -91,6 +95,23 @@ def test_last_received_path_skips_sent_items_and_deleted_files(tmp_path: Path) -
 
     assert I2PChat._last_received_path(app) == older
     assert app._recent_transfers[0].filename == "report.pdf"
+
+
+def test_savefile_by_message_ref(tmp_path: Path) -> None:
+    app, posted = _app()
+    first = _received(tmp_path, "a.png", b"aaa")
+    second = _received(tmp_path, "b.png", b"bbb")
+    I2PChat._record_transfer_event(app, "image", first, "received", path=first)
+    I2PChat._record_transfer_event(app, "image", second, "received", path=second)
+    ref_first = app._recent_transfers[1].ref_id
+    assert ref_first is not None
+    source = I2PChat._received_path_for_ref(app, ref_first)
+    assert source == first
+    keep = tmp_path / "out"
+    keep.mkdir()
+    assert asyncio.run(I2PChat._save_received_copy(app, source, str(keep)))
+    assert (keep / "a.png").read_bytes() == b"aaa"
+    assert posted[-1][0] == "success"
 
 
 def test_received_picture_and_finished_file_record_their_paths(tmp_path: Path) -> None:

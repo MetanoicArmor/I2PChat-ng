@@ -1236,23 +1236,26 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     fun sendFile(uri: Uri, image: Boolean) {
+        sendFiles(listOf(uri), image)
+    }
+
+    /** Queue several files sequentially on the live peer (Kennedy g2387). */
+    fun sendFiles(uris: List<Uri>, image: Boolean) {
         val id = _state.value.selectedId
-        if (id.isBlank() || _state.value.selectedIsGroup) return
+        if (id.isBlank() || _state.value.selectedIsGroup || uris.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
-            val copied = stageOutgoing(uri, image) ?: return@launch
-            try {
-                // The engine streams every chunk before returning.
-                NativeEngine.nativeSendFile(id, copied.absolutePath, image)
-            } finally {
-                if (image) {
-                    // The chat shows a sent picture from this file. It is only
-                    // removed when the engine refused the send outright and
-                    // nothing in the chat refers to it.
-                    if (!historyShowsImage(id, copied)) copied.delete()
-                } else {
-                    // A staged copy of an ordinary file is no longer needed.
-                    copied.delete()
-                    copied.parentFile?.delete()
+            for (uri in uris) {
+                val copied = stageOutgoing(uri, image) ?: continue
+                try {
+                    // The engine streams every chunk before returning; file_send_inflight queues peers.
+                    NativeEngine.nativeSendFile(id, copied.absolutePath, image)
+                } finally {
+                    if (image) {
+                        if (!historyShowsImage(id, copied)) copied.delete()
+                    } else {
+                        copied.delete()
+                        copied.parentFile?.delete()
+                    }
                 }
             }
             loadHistory()

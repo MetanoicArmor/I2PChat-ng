@@ -21,7 +21,7 @@ class TestClassifyDrop(unittest.TestCase):
         cases = [
             ([], REJECT),
             ([""], REJECT),
-            (["/tmp/a.txt", "/tmp/b.txt"], REJECT),  # multiple files
+            (["/tmp/a.txt", "/tmp/b.txt"], SEND_FILE),  # multi-file batch
             (["/tmp/photo.png"], SEND_IMAGE),
             (["/tmp/photo.PNG"], SEND_IMAGE),
             (["/tmp/photo.jpg"], SEND_IMAGE),

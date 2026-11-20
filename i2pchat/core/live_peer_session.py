@@ -80,6 +80,10 @@ class LivePeerSession:
     _transfer_aborted_by_peer: bool = False
     _transfer_rejected_by_peer: bool = False
     _recv_loop_active: bool = False
+    # Serialize live SAM StreamWriter use so send_text cannot drain mid send_file.
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # One outgoing F/D/E (or G/image) at a time per peer.
+    file_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     receive_task: Optional[asyncio.Task] = None
 

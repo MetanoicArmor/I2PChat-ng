@@ -142,6 +142,9 @@ struct ChatService::Peer {
     bool reconnect_grace_spent = false;
     unsigned auto_attempt = 0;
     std::shared_ptr<asio::steady_timer> auto_reconnect;
+    /// One outgoing file/image transfer at a time; PeerLink outbox already
+    /// serializes concurrent text frames with chunk writes.
+    bool file_send_inflight = false;
 };
 
 std::string_view delivery_state_name(DeliveryState state) {
@@ -1350,6 +1353,20 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
         co_return false;
     }
 
+    // Queue behind another outgoing file/image on this peer.
+    while (target->file_send_inflight && !stopping_) {
+        asio::steady_timer wait(executor_);
+        wait.expires_after(std::chrono::milliseconds(20));
+        boost::system::error_code ignored;
+        co_await wait.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+        target = find_peer(peer_addr);
+        if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+            emit_error("Files can only be sent over a live connection.");
+            co_return false;
+        }
+    }
+    target->file_send_inflight = true;
+
     std::optional<transfer::OutgoingTransfer> outgoing;
     const std::filesystem::path source = path;
     const std::string source_base = source.filename().string();
@@ -1358,6 +1375,7 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     try {
         outgoing.emplace(std::move(path), false);
     } catch (const std::exception& error) {
+        target->file_send_inflight = false;
         emit_error(std::string("cannot send that file: ") + error.what());
         co_return false;
     }
@@ -1384,6 +1402,9 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     while (std::optional<transfer::Frame> next = outgoing->next()) {
         Peer* still = find_peer(peer_addr);
         if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            if (Peer* done = find_peer(peer_addr); done != nullptr) {
+                done->file_send_inflight = false;
+            }
             update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
             emit_error("Connection dropped mid-transfer.");
             co_return false;
@@ -1393,7 +1414,7 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
             events_.on_transfer(peer_addr, outgoing->progress());
         }
         // Yield so keepalives and incoming frames are not starved by a large
-        // file's chunk loop.
+        // file's chunk loop. PeerLink outbox serializes any concurrent send_text.
         asio::steady_timer breath(executor_);
         breath.expires_after(std::chrono::milliseconds(0));
         boost::system::error_code ignored;
@@ -1401,6 +1422,9 @@ asio::awaitable<bool> ChatService::send_file(std::string peer, std::filesystem::
     }
     if (events_.on_transfer) {
         events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
+    }
+    if (Peer* done = find_peer(peer_addr); done != nullptr) {
+        done->file_send_inflight = false;
     }
     co_return true;
 }
@@ -1413,11 +1437,25 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
         co_return false;
     }
 
+    while (target->file_send_inflight && !stopping_) {
+        asio::steady_timer wait(executor_);
+        wait.expires_after(std::chrono::milliseconds(20));
+        boost::system::error_code ignored;
+        co_await wait.async_wait(asio::redirect_error(asio::use_awaitable, ignored));
+        target = find_peer(peer_addr);
+        if (target == nullptr || target->link == nullptr || !target->link->secure()) {
+            emit_error("Images can only be sent over a live connection.");
+            co_return false;
+        }
+    }
+    target->file_send_inflight = true;
+
     std::optional<transfer::OutgoingTransfer> outgoing;
     const std::filesystem::path source = path;
     try {
         outgoing.emplace(std::move(path), true);
     } catch (const std::exception& error) {
+        target->file_send_inflight = false;
         emit_error(std::string("cannot send that image: ") + error.what());
         co_return false;
     }
@@ -1441,6 +1479,9 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
     while (std::optional<transfer::Frame> next = outgoing->next()) {
         Peer* still = find_peer(peer_addr);
         if (still == nullptr || still->link == nullptr || still->link->closed()) {
+            if (Peer* done = find_peer(peer_addr); done != nullptr) {
+                done->file_send_inflight = false;
+            }
             update_delivery(peer_addr, msg_id, DeliveryState::Failed, "live", "connection dropped");
             co_return false;
         }
@@ -1452,6 +1493,9 @@ asio::awaitable<bool> ChatService::send_image(std::string peer, std::filesystem:
     }
     if (events_.on_transfer) {
         events_.on_transfer(peer_addr, outgoing->progress(transfer::Outcome::Completed));
+    }
+    if (Peer* done = find_peer(peer_addr); done != nullptr) {
+        done->file_send_inflight = false;
     }
     co_return true;
 }
