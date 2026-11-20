@@ -1,8 +1,8 @@
 cask "i2pchat" do
-  version "1.6.2"
+  version "1.6.3"
 
   on_arm do
-    sha256 "82af0fa2942e553a1f7c421c1257a5b2f3cc5c0819be9c8dae48d2ca44cc2c6d"
+    sha256 "484fee6bc7d19b9c92182e097248d1fa9123b2a4bc7b8d3bf54c24f45103cc3a"
 
     url "https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v#{version}/I2PChat-macOS-arm64-v#{version}.zip"
 
@@ -10,7 +10,7 @@ cask "i2pchat" do
     app "I2PChat-macOS-arm64-bundle/I2PChat.app"
   end
   on_intel do
-    sha256 "d63fc7dfa09601d3928012abc669d0504dea14353e3d14b0e57efe3c6f3db21b"
+    sha256 "6f706c29f9e97de383176dd1f85bcdb427eb46f8fc793de013acf3ca4011ae93"
 
     url "https://github.com/MetanoicArmor/I2PChat-ng/releases/download/v#{version}/I2PChat-macOS-x64-v#{version}.zip"
 
