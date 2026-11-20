@@ -39,6 +39,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +70,34 @@ data class MediaViewerRequest(
     val memoryKey: String = "",
     val title: String = "",
 )
+
+/** Survives process/Activity recreation so rotation does not dump the user back to chat. */
+val MediaViewerRequestSaver: Saver<MediaViewerRequest?, Any> = run {
+    val kindKey = "kind"
+    val pathKey = "path"
+    val memoryKey = "memoryKey"
+    val titleKey = "title"
+    mapSaver(
+        save = { req ->
+            if (req == null) emptyMap()
+            else mapOf(
+                kindKey to req.kind.name,
+                pathKey to req.path,
+                memoryKey to req.memoryKey,
+                titleKey to req.title,
+            )
+        },
+        restore = { map ->
+            if (map.isEmpty()) null
+            else MediaViewerRequest(
+                kind = MediaKind.valueOf(map[kindKey] as String),
+                path = map[pathKey] as String,
+                memoryKey = map[memoryKey] as String,
+                title = map[titleKey] as String,
+            )
+        },
+    )
+}
 
 /** In-app fullscreen image or video viewer. Back or the close button dismisses it. */
 @Composable

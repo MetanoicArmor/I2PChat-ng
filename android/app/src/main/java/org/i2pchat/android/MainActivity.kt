@@ -84,6 +84,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -122,10 +123,13 @@ import org.i2pchat.android.ui.KeetComposer
 import org.i2pchat.android.ui.KeetMessageBubble
 import org.i2pchat.android.ui.MediaViewerDialog
 import org.i2pchat.android.ui.MediaViewerRequest
+import org.i2pchat.android.ui.MediaViewerRequestSaver
 import org.i2pchat.android.ui.PeerAvatar
 import org.i2pchat.android.ui.insertAtCaret
+import org.i2pchat.android.ui.theme.ChatConversationBackground
 import org.i2pchat.android.ui.theme.I2PChatTheme
 import org.i2pchat.android.ui.theme.TerminalPalettes
+import org.i2pchat.android.ui.theme.ThemePreviewSwatch
 
 class MainActivity : ComponentActivity() {
     // Application-scoped: survives Activity destroy while the chat FGS holds
@@ -1192,7 +1196,9 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     var pendingSaveSealed by remember { mutableStateOf<String?>(null) }
     var pendingSaveSealedPeer by remember { mutableStateOf("") }
     var pendingSaveFile by remember { mutableStateOf<String?>(null) }
-    var viewer by remember { mutableStateOf<MediaViewerRequest?>(null) }
+    var viewer: MediaViewerRequest? by rememberSaveable(stateSaver = MediaViewerRequestSaver) {
+        mutableStateOf(null)
+    }
     val list = rememberLazyListState()
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
@@ -1441,7 +1447,16 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     },
                 )
             }
-            LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(12.dp)) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                ChatConversationBackground(
+                    themeId = state.theme,
+                    modifier = Modifier.matchParentSize(),
+                )
+                LazyColumn(
+                    state = list,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(12.dp),
+                ) {
                 itemsIndexed(shown) { index, msg ->
                     if (msg.kind == "system" || msg.kind == "info" || msg.kind == "success" || msg.kind == "error") {
                         HistoryNoticeRow(msg, onLongClick = { messageMenu = msg })
@@ -1475,6 +1490,7 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                             onLongClick = { messageMenu = msg },
                         )
                     }
+                }
                 }
             }
             if (emoji) {
@@ -1606,7 +1622,18 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                         FilterChip(
                             selected = state.theme == value,
                             onClick = { bridge.setTheme(value) },
-                            label = { Text(stringResource(label)) },
+                            label = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    ThemePreviewSwatch(
+                                        themeId = value,
+                                        modifier = Modifier
+                                            .size(18.dp, 12.dp)
+                                            .clip(RoundedCornerShape(3.dp)),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(stringResource(label))
+                                }
+                            },
                             modifier = Modifier.padding(end = 8.dp),
                         )
                     }
@@ -1620,11 +1647,11 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                             onClick = { bridge.setTheme(palette.id) },
                             label = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        Modifier
-                                            .size(10.dp)
-                                            .clip(CircleShape)
-                                            .background(palette.primary),
+                                    ThemePreviewSwatch(
+                                        themeId = palette.id,
+                                        modifier = Modifier
+                                            .size(18.dp, 12.dp)
+                                            .clip(RoundedCornerShape(3.dp)),
                                     )
                                     Spacer(Modifier.width(6.dp))
                                     Text(palette.label)
