@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.6.3** | [RELEASE_1.6.3.md](RELEASE_1.6.3.md) — File transfer serialize + auto-accept + multi-file/`/savefile`; Android themed chat wallpapers; media viewer survives rotation; emoji caret; screenshots |
 | **1.6.2** | [RELEASE_1.6.2.md](RELEASE_1.6.2.md) — Avatars sync; TUI `//` and `/reply N text`; Android media/time/emoji/delete/SAM reconnect; chat FGS keeps session in background (#46); Firejail; signed checksums |
 | **1.6.1** | [RELEASE_1.6.1.md](RELEASE_1.6.1.md) — Connect after hang-up; Android inbound after Disconnect; TOFU keeps inbound through Accept |
 | **1.6.0** | [RELEASE_1.6.0.md](RELEASE_1.6.0.md) — reconnect grace before BlindBox; Exit flush drafts; Android Status Exit; shared icon.png launcher |
