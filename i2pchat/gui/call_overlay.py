@@ -113,10 +113,11 @@ class CallMiniBar(QtWidgets.QFrame):
 
 
 class CallOverlayWidget(QtWidgets.QWidget):
-    """Fullscreen-ish call surface hosted over the chat column."""
+    """Full call page (shown via ChatWindow's QStackedWidget, not a floating overlay)."""
 
     closed = QtCore.pyqtSignal()
     minimized = QtCore.pyqtSignal()
+    shown = QtCore.pyqtSignal()
 
     def __init__(self, host: QtWidgets.QWidget) -> None:
         super().__init__(host)
@@ -124,6 +125,10 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self.setObjectName("CallOverlay")
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         pal = self.palette()
         pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#10141c"))
         pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#e8eaed"))
@@ -142,7 +147,6 @@ class CallOverlayWidget(QtWidgets.QWidget):
             "  background-color: #2e7d32; color: white; }"
             "QWidget#CallControlsBar { background-color: #161b26; border-top: 1px solid #2a3140; }"
         )
-        self.hide()
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -221,7 +225,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._accept_btn.clicked.connect(self._accept)
         self._reject_btn.clicked.connect(self._reject)
 
-        self._mini = CallMiniBar(host.window())
+        win = host.window() if host is not None else None
+        self._mini = CallMiniBar(win if isinstance(win, QtWidgets.QWidget) else None)
         self._mini.hide()
         self._mini.expand_requested.connect(self._expand_from_mini)
         self._mini.hangup_requested.connect(self._hangup)
@@ -247,21 +252,6 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._pcm_buf = bytearray()
         self._prefs = load_call_prefs()
         self._want_video_start = False
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._fit_to_parent()
-
-    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
-        if obj is self.parent() and event.type() == QtCore.QEvent.Type.Resize:
-            self._fit_to_parent()
-        return super().eventFilter(obj, event)
-
-    def _fit_to_parent(self) -> None:
-        parent = self.parent()
-        if isinstance(parent, QtWidgets.QWidget) and self.isVisible():
-            self.setGeometry(parent.rect())
-            self.raise_()
 
     def attach_core(self, core: Any) -> None:
         self._core = core
@@ -289,7 +279,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._refresh_from_state()
         except Exception as exc:
             self.hide_all()
-            QtWidgets.QMessageBox.warning(self, tr("call.title"), str(exc))
+            QtWidgets.QMessageBox.warning(self.window(), tr("call.title"), str(exc))
 
     def show_incoming(self, state: dict[str, Any]) -> None:
         self.show_overlay()
@@ -301,25 +291,17 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._refresh_buttons(state)
 
     def show_overlay(self) -> None:
-        parent = self.parent()
-        if isinstance(parent, QtWidgets.QWidget):
-            parent.installEventFilter(self)
-            self.setGeometry(parent.rect())
-        self.setVisible(True)
-        self.raise_()
-        self.update()
         self._mini.hide()
         if self._manager is not None:
             self._manager.set_minimized(False)
+        self.shown.emit()
 
     def hide_all(self) -> None:
         self._stop_media()
-        self.hide()
         self._mini.hide()
         self.closed.emit()
 
     def _on_minimize(self) -> None:
-        self.hide()
         if self._manager is not None:
             self._manager.set_minimized(True)
             snap = self._manager.snapshot()
@@ -330,7 +312,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 screen=snap["screen"],
                 peer=str(snap.get("peer") or ""),
             )
-        win = self._host.window()
+        win = self.window()
         if win is not None:
             geo = win.geometry()
             self._mini.move(geo.x() + geo.width() - 440, geo.y() + 80)

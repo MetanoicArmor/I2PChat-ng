@@ -7811,8 +7811,13 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._restart_bundled_router_clicked
         )
         self.status_panel.import_netdb_requested.connect(self._import_netdb_zip_clicked)
+        self._call_overlay = CallOverlayWidget(self._center_stack)
+        self._call_overlay.shown.connect(self._show_call_page)
+        self._call_overlay.closed.connect(self._on_call_overlay_closed)
+        self._call_overlay.minimized.connect(self._on_call_overlay_minimized)
         self._center_stack.addWidget(self._chat_page)
         self._center_stack.addWidget(self.status_panel)
+        self._center_stack.addWidget(self._call_overlay)
         right_column_layout.addWidget(self._center_stack, 1)
 
         right_pack_layout = QtWidgets.QHBoxLayout(self.contacts_right_pack)
@@ -7847,8 +7852,6 @@ class ChatWindow(QtWidgets.QMainWindow):
         right_pack_layout.addWidget(self.contacts_toggle_btn)
         right_pack_layout.addWidget(self._contacts_sidebar_resize_grip)
         right_pack_layout.addWidget(self.right_chat_column, 1)
-        self._call_overlay = CallOverlayWidget(self.right_chat_column)
-        self._call_overlay.hide()
 
         self.contacts_splitter.addWidget(self.contacts_sidebar)
         self.contacts_splitter.addWidget(self.contacts_right_pack)
@@ -8178,6 +8181,18 @@ class ChatWindow(QtWidgets.QMainWindow):
 
     def _show_status_page(self) -> None:
         self._center_stack.setCurrentWidget(self.status_panel)
+
+    def _show_call_page(self) -> None:
+        if hasattr(self, "_call_overlay"):
+            self._center_stack.setCurrentWidget(self._call_overlay)
+
+    def _on_call_overlay_closed(self) -> None:
+        if self._center_stack.currentWidget() is getattr(self, "_call_overlay", None):
+            self._show_chat_page()
+
+    def _on_call_overlay_minimized(self) -> None:
+        # Return to chat while the floating mini-bar keeps the call alive.
+        self._show_chat_page()
         _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
         self._refresh_status_panel()
 
