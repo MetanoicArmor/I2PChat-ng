@@ -1003,6 +1003,15 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
     val routerDown = state.transport == "failed"
     var askExit by remember { mutableStateOf(false) }
     var askFlush by remember { mutableStateOf(false) }
+    val importNetDb = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        bridge.importNetDbZip(uri) { ok, message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            if (ok) bridge.refreshStatus()
+        }
+    }
     LaunchedEffect(state.running, state.tunnelsReady) {
         if (!state.running) return@LaunchedEffect
         // BlindBox readiness can lag the first Status paint after start.
@@ -1080,6 +1089,21 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
                                 OutlinedButton(onClick = { bridge.restartBundledRouter() }, modifier = Modifier.fillMaxWidth()) {
                                     Text(stringResource(R.string.restart_bundled))
                                 }
+                            }
+                            if (issue?.offersImportNetDb == true && router.usingBundled) {
+                                OutlinedButton(
+                                    onClick = {
+                                        importNetDb.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(stringResource(R.string.import_netdb))
+                                }
+                                Text(
+                                    stringResource(R.string.import_netdb_hint),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
+                                )
                             }
                             OutlinedButton(onClick = { nav.navigate("router") }, modifier = Modifier.fillMaxWidth()) {
                                 Text(stringResource(R.string.router_settings))

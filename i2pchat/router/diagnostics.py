@@ -16,6 +16,7 @@ from i2pchat.presentation.i18n import tr
 
 ACTION_ROUTER_SETTINGS = "router_settings"
 ACTION_RESTART_ROUTER = "restart_router"
+ACTION_IMPORT_NETDB_ZIP = "import_netdb_zip"
 
 _LOG_TAIL_BYTES = 256 * 1024
 # Bind failures only matter at the latest startup. A 16 MiB router.log keeps
@@ -79,7 +80,10 @@ def diagnose_log_text(log_text: str) -> Optional[RouterIssue]:
     if _NO_NETWORK.search(log_text) and not reseed_failed:
         return RouterIssue("no_network")
     if reseed_failed:
-        return RouterIssue("reseed_failed", actions=(ACTION_ROUTER_SETTINGS,))
+        return RouterIssue(
+            "reseed_failed",
+            actions=(ACTION_IMPORT_NETDB_ZIP, ACTION_ROUTER_SETTINGS),
+        )
     return None
 
 

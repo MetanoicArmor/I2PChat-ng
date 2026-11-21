@@ -6970,6 +6970,7 @@ class StatusPanel(QtWidgets.QWidget):
     back_to_chats = QtCore.pyqtSignal()
     restart_router_requested = QtCore.pyqtSignal()
     router_settings_requested = QtCore.pyqtSignal()
+    import_netdb_requested = QtCore.pyqtSignal()
     verbose_toggled = QtCore.pyqtSignal(bool)
 
     _CHECK_MARKS = {"ok": ("✓", "#2fbf71"), "failed": ("✗", "#e5484d"), "pending": ("…", "#d4a72c")}
@@ -7012,9 +7013,14 @@ class StatusPanel(QtWidgets.QWidget):
         buttons = QtWidgets.QHBoxLayout()
         self._restart_btn = QtWidgets.QPushButton(tr("status.restart_router"), self._problem)
         self._restart_btn.clicked.connect(self.restart_router_requested.emit)
+        self._import_netdb_btn = QtWidgets.QPushButton(tr("status.import_netdb"), self._problem)
+        self._import_netdb_btn.setToolTip(tr("status.import_netdb_hint"))
+        self._import_netdb_btn.clicked.connect(self.import_netdb_requested.emit)
+        self._import_netdb_btn.hide()
         self._settings_btn = QtWidgets.QPushButton(tr("status.router_settings"), self._problem)
         self._settings_btn.clicked.connect(self.router_settings_requested.emit)
         buttons.addWidget(self._restart_btn)
+        buttons.addWidget(self._import_netdb_btn)
         buttons.addWidget(self._settings_btn)
         buttons.addStretch(1)
         pl.addWidget(self._problem_title)
@@ -7058,6 +7064,8 @@ class StatusPanel(QtWidgets.QWidget):
         self._chats_btn.setText(tr("status.chats") + " →")
         self._problem_title.setText(tr("status.problem"))
         self._restart_btn.setText(tr("status.restart_router"))
+        self._import_netdb_btn.setText(tr("status.import_netdb"))
+        self._import_netdb_btn.setToolTip(tr("status.import_netdb_hint"))
         self._settings_btn.setText(tr("status.router_settings"))
         self._events_title.setText(tr("status.events"))
         self._verbose_check.setText(tr("status.verbose"))
@@ -7092,11 +7100,13 @@ class StatusPanel(QtWidgets.QWidget):
         can_restart: bool,
         events: list[str],
         verbose: list[str],
+        can_import_netdb: bool = False,
     ) -> None:
         self._title.setText(tr("status.ready") if ready else tr("status.not_ready"))
         if issue_text:
             self._problem_text.setText(issue_text)
             self._restart_btn.setVisible(can_restart)
+            self._import_netdb_btn.setVisible(can_import_netdb)
             self._problem.show()
         else:
             self._problem.hide()
@@ -7760,6 +7770,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.status_panel.restart_router_requested.connect(
             self._restart_bundled_router_clicked
         )
+        self.status_panel.import_netdb_requested.connect(self._import_netdb_zip_clicked)
         self._center_stack.addWidget(self._chat_page)
         self._center_stack.addWidget(self.status_panel)
         right_column_layout.addWidget(self._center_stack, 1)
@@ -8165,6 +8176,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             checks=[(c.label, c.value or "—", c.state) for c in readiness.checks],
             issue_text=readiness.issue_text,
             can_restart=readiness.can_restart,
+            can_import_netdb=readiness.can_import_netdb,
             events=events,
             verbose=verbose,
         )
@@ -12041,6 +12053,66 @@ class ChatWindow(QtWidgets.QMainWindow):
             )
             return
         self.handle_system(f"Opened router log: {path}")
+
+    def _import_netdb_zip_clicked(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            tr("status.import_netdb"),
+            "",
+            "ZIP archives (*.zip);;All files (*)",
+        )
+        if not path:
+            return
+
+        async def _import_async() -> None:
+            from i2pchat.router.netdb_import import NetDbImportError
+
+            self._readiness.session_starting()
+            try:
+                if self._bundled_router_manager is None:
+                    raise NetDbImportError("Built-in i2pd is not available.")
+                if self.core is not None:
+                    await self.core.shutdown()
+                stats = await self._bundled_router_manager.import_netdb_zip(path)
+                sam_address = self._bundled_router_manager.sam_address()
+                self._active_sam_address = sam_address
+                self.core = self._create_core(self.profile, sam_address)
+                self._sidebar_identity_refresh_core_id = None
+                await self.core.init_session()
+                self._update_peer_lock_indicator()
+                self.refresh_status_label()
+                self._refresh_connection_buttons()
+                self._refresh_sidebar_once_identity_ready()
+                QtCore.QTimer.singleShot(0, self._refresh_offline_history_display)
+                self.handle_system(
+                    tr(
+                        "status.import_netdb_ok",
+                        fresh=stats.fresh_router_info_files,
+                        total=stats.total_files,
+                    )
+                )
+            except Exception as e:
+                logger.exception("netDb ZIP import failed")
+                err_msg = str(e).strip() or type(e).__name__
+                self._readiness.session_failed(err_msg, self._router_settings)
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    tr("status.import_netdb"),
+                    tr("status.import_netdb_failed", error=err_msg),
+                )
+            finally:
+                self._refresh_status_panel()
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr("status.import_netdb"),
+                "No asyncio event loop (qasync). Restart the app and try again.",
+            )
+            return
+        asyncio.create_task(_import_async())
 
     def _restart_bundled_router_clicked(self) -> None:
         async def _restart_router_async() -> None:

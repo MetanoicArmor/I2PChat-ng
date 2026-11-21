@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from i2pchat.presentation.i18n import tr
 from i2pchat.router.diagnostics import (
+    ACTION_IMPORT_NETDB_ZIP,
     ACTION_RESTART_ROUTER,
     RouterIssue,
     diagnose_log_text,
@@ -35,6 +36,7 @@ class Readiness:
     checks: tuple[ReadinessCheck, ...]
     issue_text: Optional[str]
     can_restart: bool
+    can_import_netdb: bool = False
 
 
 def transport_state(core: Any) -> str:
@@ -204,10 +206,14 @@ class ReadinessTracker:
         ready = all(c.state in (STATE_OK, STATE_OFF) for c in checks[:4])
         issue_text: Optional[str] = None
         can_restart = False
+        can_import_netdb = False
         if self.issue is not None:
             issue_text = self.issue.message
             can_restart = bundled and ACTION_RESTART_ROUTER in self.issue.actions
+            can_import_netdb = (
+                bundled and ACTION_IMPORT_NETDB_ZIP in self.issue.actions
+            )
         elif self.start_error is not None:
             issue_text = self.start_error
             can_restart = bundled
-        return Readiness(ready, checks, issue_text, can_restart)
+        return Readiness(ready, checks, issue_text, can_restart, can_import_netdb)

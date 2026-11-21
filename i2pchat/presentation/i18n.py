@@ -149,8 +149,15 @@ _EN: dict[str, str] = {
     "diag.reseed_failed": (
         "Could not download the initial list of I2P nodes (reseed). Check your "
         "internet connection and the system clock, use a proxy for the first start, "
-        "or reseed manually if your provider blocks access."
+        "or import a netDb ZIP from Status if your provider blocks access."
     ),
+    "status.import_netdb": "Import netDb ZIP…",
+    "status.import_netdb_hint": (
+        "Choose a ZIP whose RouterInfo entries are mostly newer than 270 hours. "
+        "The built-in router restarts after a successful import."
+    ),
+    "status.import_netdb_ok": "netDb imported ({fresh} fresh RouterInfo of {total} files). Restarting i2pd…",
+    "status.import_netdb_failed": "netDb import failed: {error}",
     "diag.clock_skew": (
         "The system clock differs too much from network time. Enable automatic "
         "time synchronization and restart."
@@ -311,9 +318,19 @@ _RU: dict[str, str] = {
     "diag.reseed_failed": (
         "Не удалось загрузить начальный список узлов I2P (ресид). Проверьте "
         "подключение к интернету и синхронизацию системных часов, используйте "
-        "прокси при первом запуске или выполните ресид вручную доступным вам "
-        "способом, если ваш провайдер блокирует доступ."
+        "прокси при первом запуске или импортируйте ZIP с netDb из экрана "
+        "«Статус», если ваш провайдер блокирует доступ."
     ),
+    "status.import_netdb": "Импорт netDb ZIP…",
+    "status.import_netdb_hint": (
+        "Выберите ZIP, в котором больше половины файлов — RouterInfo не старше "
+        "270 часов. После успешного импорта встроенный роутер перезапустится."
+    ),
+    "status.import_netdb_ok": (
+        "netDb импортирован ({fresh} свежих RouterInfo из {total} файлов). "
+        "Перезапуск i2pd…"
+    ),
+    "status.import_netdb_failed": "Не удалось импортировать netDb: {error}",
     "diag.clock_skew": (
         "Системное время сильно расходится с сетевым. Включите автоматическую "
         "синхронизацию времени и перезапустите приложение."

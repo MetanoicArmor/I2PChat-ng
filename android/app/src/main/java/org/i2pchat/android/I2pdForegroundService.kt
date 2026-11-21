@@ -377,6 +377,11 @@ class I2pdForegroundService : Service() {
             }
         }
 
+        /** Block until the :i2pd process releases its lock (or [timeoutMs] elapses). */
+        fun waitUntilStopped(context: Context, timeoutMs: Long = 20_000) {
+            waitUntilRouterProcessExits(context.applicationContext, timeoutMs)
+        }
+
         fun stop(context: Context) {
             val app = context.applicationContext
             val stopIntent = Intent(app, I2pdForegroundService::class.java).setAction(ACTION_STOP)

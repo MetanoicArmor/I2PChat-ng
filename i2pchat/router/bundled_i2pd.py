@@ -1124,6 +1124,38 @@ class BundledI2pdManager:
             warming_seconds=warming_seconds,
         )
 
+    async def import_netdb_zip(self, zip_path: str):
+        """Stop i2pd, extract a validated netDb ZIP into datadir/netDb, then restart.
+
+        Returns :class:`~i2pchat.router.netdb_import.NetDbZipStats`.
+        """
+        from .netdb_import import extract_netdb_zip_to, netdb_dir_for_datadir
+        from .settings import router_runtime_dir
+
+        data_dir = None
+        try:
+            data_dir = self.data_dir()
+        except RuntimeError:
+            data_dir = None
+        if not data_dir:
+            # Prefer the standard runtime layout even before the first start.
+            data_dir = os.path.join(router_runtime_dir(), "data")
+        netdb = netdb_dir_for_datadir(data_dir)
+        was_running = self.is_running()
+        if was_running:
+            await self.stop()
+        try:
+            stats = extract_netdb_zip_to(zip_path, netdb)
+        except Exception:
+            if was_running:
+                try:
+                    await self.start()
+                except Exception:
+                    pass
+            raise
+        await self.start()
+        return stats
+
     async def _wait_for_bundled_sam_ready(self, rt: BundledI2pdRuntime, timeout: float) -> None:
         """Like wait_for_sam_ready but fail fast if the i2pd child exits (e.g. missing .so on Linux)."""
         loop = asyncio.get_running_loop()

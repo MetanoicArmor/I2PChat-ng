@@ -803,6 +803,70 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    /** Stop i2pd, import a validated netDb ZIP, then restart the bundled router. */
+    fun importNetDbZip(uri: Uri, onDone: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val router = RouterPrefs.load(appRoot)
+            if (!router.usingBundled) {
+                onMain { onDone(false, str(R.string.import_netdb_bundled_only)) }
+                return@launch
+            }
+            val bytes = runCatching {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            if (bytes == null) {
+                onMain { onDone(false, str(R.string.import_netdb_read_failed)) }
+                return@launch
+            }
+            val result = runCatching {
+                // Validate before touching the running router.
+                NetDbImport.validate(bytes)
+                runCatching { NativeEngine.nativeStop() }
+                I2pdForegroundService.stop(getApplication())
+                I2pdForegroundService.waitUntilStopped(getApplication(), 20_000)
+                val stats = NetDbImport.extractToNetDb(bytes, NetDbImport.netDbDir(appRoot))
+                I2pdForegroundService.restartBundled(getApplication(), appRoot)
+                pollJob?.cancel()
+                tunnelWatchJob?.cancel()
+                stats
+            }
+            onMain {
+                result.fold(
+                    onSuccess = { stats ->
+                        _state.update {
+                            it.copy(
+                                running = false,
+                                starting = false,
+                                samReady = false,
+                                routerIssue = null,
+                                status = str(R.string.svc_restarting),
+                                error = "",
+                            )
+                        }
+                        monitorRouterWarmup()
+                        onDone(
+                            true,
+                            str(
+                                R.string.import_netdb_ok,
+                                stats.freshRouterInfoFiles,
+                                stats.totalFiles,
+                            ),
+                        )
+                    },
+                    onFailure = { err ->
+                        onDone(
+                            false,
+                            str(
+                                R.string.import_netdb_failed,
+                                err.message?.ifBlank { err.javaClass.simpleName }.orEmpty(),
+                            ),
+                        )
+                    },
+                )
+            }
+        }
+    }
+
     private var saveAsUri: Uri? = null
 
     private fun incomingCache(): File = File(getApplication<Application>().cacheDir, "incoming")

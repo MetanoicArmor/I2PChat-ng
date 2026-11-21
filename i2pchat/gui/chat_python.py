@@ -2434,6 +2434,42 @@ class I2PChat(App):
         )
         await self._initialize_core_session()
 
+    async def _import_netdb_zip(self, zip_path: str) -> None:
+        from i2pchat.router.netdb_import import NetDbImportError
+
+        if self._router_settings.backend != "bundled":
+            self.post("error", "netDb import is only available with the built-in i2pd.")
+            return
+        manager = self._bundled_router_manager
+        if manager is None:
+            self.post("error", "Built-in i2pd is not running.")
+            return
+        self._readiness.session_starting()
+        try:
+            await self.core.shutdown()
+            stats = await manager.import_netdb_zip(zip_path)
+            self._active_sam_address = manager.sam_address()
+            self._active_http_proxy_address = manager.http_proxy_address()
+            self.network_status = "initializing"
+            self.peer_b32 = self.selected_peer or "Initializing SAM Session..."
+            self.core = self._create_core(self.profile, self._active_sam_address)
+            await self._initialize_core_session()
+            self.post(
+                "success",
+                tr(
+                    "status.import_netdb_ok",
+                    fresh=stats.fresh_router_info_files,
+                    total=stats.total_files,
+                ),
+            )
+        except Exception as exc:
+            err = str(exc).strip() or type(exc).__name__
+            self._readiness.session_failed(err, self._router_settings)
+            self.post("error", tr("status.import_netdb_failed", error=err))
+            if isinstance(exc, NetDbImportError):
+                return
+            raise
+
     async def _set_router_backend(self, backend: str) -> None:
         normalized = backend.strip().lower()
         if normalized not in {"system", "bundled", "default"}:
@@ -5194,6 +5230,7 @@ class TuiStatusScreen(ModalScreen[None]):
         ("f9", "close", "Chat"),
         ("v", "toggle_verbose", "Verbose"),
         ("r", "show_router", "Router"),
+        ("i", "import_netdb", "Import netDb"),
     ]
 
     CSS = """
@@ -5294,9 +5331,15 @@ class TuiStatusScreen(ModalScreen[None]):
                 style = {"error": "red", "warning": "yellow", "success": "green"}.get(notice.severity, "white")
                 log.write(f"[dim]{ts}[/] [{style}]{escape(strip_terminal_controls(text))}[/]")
         verbose_label = tr("status.verbose") + (": on" if verbose else ": off")
-        self.query_one("#tui_status_help", Static).update(
-            f"{escape(tr('tui.status_hint'))} · R: {escape(tr('status.router_settings'))} · {escape(verbose_label)}"
-        )
+        help_bits = [
+            escape(tr("tui.status_hint")),
+            f"R: {escape(tr('status.router_settings'))}",
+            escape(verbose_label),
+        ]
+        if readiness.can_import_netdb:
+            help_bits.append(f"I: {escape(tr('status.import_netdb'))}")
+        self.query_one("#tui_status_help", Static).update(" · ".join(help_bits))
+        self._can_import_netdb = readiness.can_import_netdb
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -5308,6 +5351,20 @@ class TuiStatusScreen(ModalScreen[None]):
     def action_show_router(self) -> None:
         self.dismiss(None)
         self.host._show_router_screen()
+
+    def action_import_netdb(self) -> None:
+        if not getattr(self, "_can_import_netdb", False):
+            self.host.post("error", tr("diag.reseed_failed"))
+            return
+
+        def _on_path(path: str | None) -> None:
+            if not path or not str(path).strip():
+                return
+            self.host.run_worker(
+                self.host._import_netdb_zip(os.path.expanduser(str(path).strip()))
+            )
+
+        self.app.push_screen(TuiNetDbZipPathScreen(), _on_path)
 
 
 class TuiDiagnosticsScreen(ModalScreen[None]):
@@ -5473,6 +5530,48 @@ class TuiConfirmScreen(ModalScreen[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm_ok":
             self.action_confirm()
+        else:
+            self.action_cancel()
+
+
+class TuiNetDbZipPathScreen(ModalScreen[str]):
+    """Ask for a path to a netDb ZIP used after a failed reseed."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    TuiNetDbZipPathScreen { align: center middle; }
+    #netdb_zip_dialog {
+        width: 72;
+        height: auto;
+        border: heavy $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="netdb_zip_dialog"):
+            yield Static(tr("status.import_netdb"))
+            yield Static(tr("status.import_netdb_hint"))
+            yield Input("", placeholder="/path/to/netDb.zip", id="netdb_zip_path")
+            with Horizontal():
+                yield Button("Cancel", id="netdb_zip_cancel")
+                yield Button("Import", id="netdb_zip_ok", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#netdb_zip_path", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "netdb_zip_path":
+            self.dismiss(event.value.strip())
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "netdb_zip_ok":
+            self.dismiss(self.query_one("#netdb_zip_path", Input).value.strip())
         else:
             self.action_cancel()
 

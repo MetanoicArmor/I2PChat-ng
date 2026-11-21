@@ -27,6 +27,10 @@ data class RouterIssue(
 ) {
     val offersRestart: Boolean
         get() = code == RouterIssueCode.PORT_IN_USE || code == RouterIssueCode.ROUTER_CRASHED
+
+    /** Offer a file-picker import of a netDb ZIP for the built-in router. */
+    val offersImportNetDb: Boolean
+        get() = code == RouterIssueCode.RESEED_FAILED
 }
 
 object RouterDiagnostics {

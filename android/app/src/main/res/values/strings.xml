@@ -276,7 +276,13 @@
 
     <!-- Router diagnostics -->
     <string name="diag_system_sam_unreachable">Cannot connect to the system i2pd router at %1$s. Make sure the router is running, SAM is enabled in it, and the address and port are correct.</string>
-    <string name="diag_reseed_failed">Could not download the initial list of I2P nodes (reseed). Check your internet connection and the device clock, use a proxy for the first start, or reseed manually if your provider blocks access.</string>
+    <string name="diag_reseed_failed">Could not download the initial list of I2P nodes (reseed). Check your internet connection and the device clock, use a proxy for the first start, or import a netDb ZIP from Status if your provider blocks access.</string>
+    <string name="import_netdb">Import netDb ZIP…</string>
+    <string name="import_netdb_hint">Choose a ZIP whose RouterInfo entries are mostly newer than 270 hours. The built-in router restarts after a successful import.</string>
+    <string name="import_netdb_ok">netDb imported (%1$d fresh RouterInfo of %2$d files). Restarting i2pd…</string>
+    <string name="import_netdb_failed">netDb import failed: %1$s</string>
+    <string name="import_netdb_bundled_only">netDb import is only available with the built-in i2pd.</string>
+    <string name="import_netdb_read_failed">Could not read the selected ZIP file.</string>
     <string name="diag_clock_skew">The device clock differs too much from network time. Enable automatic date and time and restart the router.</string>
     <string name="diag_port_in_use">A router port is already in use, probably by an old i2pd process. Restart the built-in i2pd or change the ports in router settings.</string>
     <string name="diag_no_network">The router has no network access. Check your internet connection.</string>
