@@ -1494,6 +1494,8 @@ class I2PChatCore:
         self.on_trust_mismatch_decision = on_trust_mismatch_decision
         self.on_saved_contacts_changed = on_saved_contacts_changed
         self.on_avatar_updated: Optional[Callable[[str], Any]] = None
+        self.on_call_event: Optional[Callable[[str, dict], Any]] = None
+        self._call_manager = None
         self.profile_password = ""
         self.on_profile_password: Optional[Callable[[], Any]] = None
         self._trust_auto = (
@@ -2899,6 +2901,47 @@ class I2PChatCore:
             return True
         except Exception:
             return False
+
+    def get_call_manager(self):
+        """Lazy CallSessionManager for 1:1 audio/video over SAM DATAGRAM."""
+        if self._call_manager is None:
+            from i2pchat.core.call_session import CallSessionManager
+
+            def _on_event(kind: str, payload: dict) -> None:
+                cb = self.on_call_event
+                if cb is not None:
+                    try:
+                        cb(kind, payload)
+                    except Exception:
+                        logger.debug("on_call_event failed", exc_info=True)
+
+            self._call_manager = CallSessionManager(
+                sam_address=self.sam_address,
+                send_signal=self.send_control_to_peer,
+                on_event=_on_event,
+                profile=self.profile,
+            )
+        return self._call_manager
+
+    async def start_call(self, peer_addr: str, *, video: bool = False):
+        peer = self._normalize_peer_addr(peer_addr or "")
+        if not peer:
+            raise RuntimeError("No peer selected for call")
+        return await self.get_call_manager().start_outgoing(peer, video=video)
+
+    async def accept_call(self):
+        return await self.get_call_manager().accept_incoming()
+
+    async def reject_call(self, reason: str = "declined") -> None:
+        await self.get_call_manager().reject_incoming(reason)
+
+    async def hangup_call(self) -> None:
+        mgr = self._call_manager
+        if mgr is not None:
+            await mgr.hangup()
+
+    async def set_call_media(self, **kwargs):
+        return await self.get_call_manager().set_media(**kwargs)
 
     async def _sync_avatars_after_secure(self, peer_addr: str) -> None:
         """After secure: push our avatar if needed, request peer's after import."""
@@ -12305,6 +12348,19 @@ class I2PChatCore:
                                     self.on_file_delivered(ack_filename)
                             except Exception:
                                 self._record_ack_drop("invalid_format", "FILE_ACK parse failed")
+                        elif signal_payload.startswith("CALL_"):
+                            peer_for_call = peer_id or self._normalize_peer_addr(
+                                sess.peer_id or self.current_peer_addr or ""
+                            )
+                            if peer_for_call:
+                                try:
+                                    await self.get_call_manager().handle_signal(
+                                        peer_for_call, signal_payload
+                                    )
+                                except Exception as call_exc:
+                                    logger.debug(
+                                        "CALL signal handling failed: %s", call_exc
+                                    )
                         elif "AVATAR_REQUEST" in body:
                             peer_for_avatar = peer_id or self._normalize_peer_addr(
                                 sess.peer_id or self.current_peer_addr or ""

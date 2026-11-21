@@ -761,6 +761,9 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
         events.on_avatar_request = [](const std::string& peer) {
             g_engine.emit_string("onAvatarRequest", peer);
         };
+        events.on_call_signal = [](const std::string& peer, const std::string& payload) {
+            g_engine.emit_2string("onCallSignal", peer, payload);
+        };
         events.on_sealed_file = [](const std::string& peer, const std::string& id,
                                    const std::string& display_name, const fs::path& path) {
             g_engine.emit_4string("onSealedFile", peer, id, display_name, path.string());

@@ -50,6 +50,8 @@ object NativeEngine {
         fun onFileOffer(peer: String, name: String, size: Long)
         /** Peer asked us to (re)send our avatar over the live channel. */
         fun onAvatarRequest(peer: String)
+        /** Audio/video call signaling (`CALL_INVITE|…`, etc.). */
+        fun onCallSignal(peer: String, payload: String)
         fun onStarted()
         fun onStartFailed(message: String)
     }

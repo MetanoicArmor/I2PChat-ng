@@ -1373,6 +1373,11 @@ void ChatService::on_signal(const std::string& peer_addr, const protocol::Signal
                 events_.on_avatar_request(peer_addr);
             }
             return;
+        case protocol::SignalKind::CallSignal:
+            if (events_.on_call_signal) {
+                events_.on_call_signal(peer_addr, signal.payload);
+            }
+            return;
         case protocol::SignalKind::BlindBoxRoot: {
             blindbox::PeerSnapshot& snapshot = blindbox_snapshot(peer_addr);
             if (signal.epoch < snapshot.root_epoch) {

@@ -412,6 +412,22 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     @Volatile private var activeImagesDir: File? = null
     @Volatile private var activeFilesDir: File? = null
 
+    val callController = CallController(
+        appContext = getApplication(),
+        scope = viewModelScope,
+        samHost = { _state.value.router.samHost },
+        samPort = { _state.value.router.samPort },
+        sendSignal = { peer, signal ->
+            NativeEngine.available && NativeEngine.nativeSendSignal(peer, signal)
+        },
+    )
+
+    fun startAudioCall(peer: String) = callController.startOutgoing(peer, video = false)
+    fun startVideoCall(peer: String) = callController.startOutgoing(peer, video = true)
+    fun acceptCall() = callController.acceptIncoming()
+    fun rejectCall() = callController.rejectIncoming()
+    fun hangupCall() = callController.hangup()
+
     private val processLifecycleObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             _state.update { state ->
@@ -2432,6 +2448,10 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     override fun onAvatarRequest(peer: String) {
         viewModelScope.launch(Dispatchers.IO) { pushOwnAvatarIfNeeded(peer, force = true) }
+    }
+
+    override fun onCallSignal(peer: String, payload: String) {
+        callController.onCallSignal(peer, payload)
     }
 
     override fun onSealedFile(peer: String, id: String, displayName: String, path: String) {

@@ -8,6 +8,7 @@ from .backend import (
     stream_accept,
     stream_connect,
 )
+from .datagram import DatagramSession, create_datagram_session
 from .destination import Destination
 from .errors import (
     CantReachPeer,
@@ -31,6 +32,8 @@ __all__ = [
     "ProtocolError",
     "SAMError",
     "SessionClosed",
+    "DatagramSession",
+    "create_datagram_session",
     "create_session",
     "dest_lookup",
     "naming_lookup",

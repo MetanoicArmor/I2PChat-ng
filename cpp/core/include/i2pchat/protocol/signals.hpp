@@ -45,6 +45,8 @@ enum class SignalKind {
     GroupBlindBoxRootAck,
     /// Peer asks us to (re)send our avatar file: `AVATAR_REQUEST`.
     AvatarRequest,
+    /// Audio/video call signaling: `CALL_INVITE|…`, `CALL_ACCEPT|…`, etc.
+    CallSignal,
 };
 
 struct Signal {

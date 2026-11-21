@@ -190,6 +190,8 @@ struct ChatEvents {
     std::function<void(const std::string& local_addr)> on_local_address;
     /// Peer asked us to push our avatar (``.i2pchat-avatar.jpg``).
     std::function<void(const std::string& peer)> on_avatar_request;
+    /// Audio/video call signaling payload after ``__SIGNAL__:`` (e.g. ``CALL_INVITE|…``).
+    std::function<void(const std::string& peer, const std::string& payload)> on_call_signal;
 };
 
 class ChatService {

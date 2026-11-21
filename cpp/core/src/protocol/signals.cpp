@@ -197,6 +197,11 @@ Signal parse_signal(std::string_view body) {
         signal.well_formed = true;
         return signal;
     }
+    if (signal.payload.rfind("CALL_", 0) == 0) {
+        signal.kind = SignalKind::CallSignal;
+        signal.well_formed = true;
+        return signal;
+    }
     return signal;
 }
 

@@ -77,6 +77,7 @@ from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _s
 from i2pchat.presentation.status_presentation import build_status_presentation
 from i2pchat.presentation.i18n import current_language, set_language, tr
 from i2pchat.presentation.readiness import ReadinessTracker
+from i2pchat.gui.call_overlay import CallOverlayWidget
 from i2pchat.presentation.notices import (
     Notice,
     NoticeLog,
@@ -945,7 +946,9 @@ THEMES: dict[str, dict[str, object]] = {
             QToolButton#MoreActionsButton:pressed {
                 background-color: #c9d2e0;
             }
-            QToolButton#ThemeSwitchButton {
+            QToolButton#ThemeSwitchButton,
+            QToolButton#AudioCallButton,
+            QToolButton#VideoCallButton {
                 background-color: #f8f9fc;
                 border: none;
                 border-radius: 10px;
@@ -954,11 +957,19 @@ THEMES: dict[str, dict[str, object]] = {
                 min-width: %(status_row_height_px)spx;
                 min-height: %(status_row_height_px)spx;
             }
-            QToolButton#ThemeSwitchButton:hover {
+            QToolButton#ThemeSwitchButton:hover,
+            QToolButton#AudioCallButton:hover,
+            QToolButton#VideoCallButton:hover {
                 background-color: #ffffff;
             }
-            QToolButton#ThemeSwitchButton:pressed {
+            QToolButton#ThemeSwitchButton:pressed,
+            QToolButton#AudioCallButton:pressed,
+            QToolButton#VideoCallButton:pressed {
                 background-color: #eef1f6;
+            }
+            QToolButton#AudioCallButton:disabled,
+            QToolButton#VideoCallButton:disabled {
+                opacity: 0.45;
             }
             QToolButton#ChatJumpBottomButton {
                 background-color: #e2e7f0;
@@ -1537,7 +1548,9 @@ THEMES: dict[str, dict[str, object]] = {
             }
             QToolButton#MoreActionsButton:hover { background-color: rgba(255, 255, 255, 0.14); }
             QToolButton#MoreActionsButton:pressed { background-color: rgba(255, 255, 255, 0.18); }
-            QToolButton#ThemeSwitchButton {
+            QToolButton#ThemeSwitchButton,
+            QToolButton#AudioCallButton,
+            QToolButton#VideoCallButton {
                 background-color: rgba(255, 255, 255, 0.08);
                 border: none;
                 border-radius: 9px;
@@ -1546,11 +1559,19 @@ THEMES: dict[str, dict[str, object]] = {
                 min-width: %(status_row_height_px)spx;
                 min-height: %(status_row_height_px)spx;
             }
-            QToolButton#ThemeSwitchButton:hover {
+            QToolButton#ThemeSwitchButton:hover,
+            QToolButton#AudioCallButton:hover,
+            QToolButton#VideoCallButton:hover {
                 background-color: rgba(255, 255, 255, 0.14);
             }
-            QToolButton#ThemeSwitchButton:pressed {
+            QToolButton#ThemeSwitchButton:pressed,
+            QToolButton#AudioCallButton:pressed,
+            QToolButton#VideoCallButton:pressed {
                 background-color: rgba(255, 255, 255, 0.18);
+            }
+            QToolButton#AudioCallButton:disabled,
+            QToolButton#VideoCallButton:disabled {
+                opacity: 0.45;
             }
             QToolButton#ChatJumpBottomButton {
                 background-color: rgba(255, 255, 255, 0.14);
@@ -7265,6 +7286,24 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.theme_switch_button.customContextMenuRequested.connect(
             self._show_theme_switch_menu
         )
+        self.audio_call_button = QtWidgets.QToolButton(self)
+        self.audio_call_button.setObjectName("AudioCallButton")
+        self.audio_call_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.audio_call_button.setAutoRaise(False)
+        self.audio_call_button.setFixedHeight(self._STATUS_ROW_HEIGHT_PX)
+        self.audio_call_button.setFixedWidth(self._STATUS_ROW_HEIGHT_PX)
+        self.audio_call_button.setText("")
+        self.audio_call_button.setToolTip(tr("call.audio"))
+        self.audio_call_button.clicked.connect(lambda: self._start_call(video=False))
+        self.video_call_button = QtWidgets.QToolButton(self)
+        self.video_call_button.setObjectName("VideoCallButton")
+        self.video_call_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.video_call_button.setAutoRaise(False)
+        self.video_call_button.setFixedHeight(self._STATUS_ROW_HEIGHT_PX)
+        self.video_call_button.setFixedWidth(self._STATUS_ROW_HEIGHT_PX)
+        self.video_call_button.setText("")
+        self.video_call_button.setToolTip(tr("call.video"))
+        self.video_call_button.clicked.connect(lambda: self._start_call(video=True))
         _app_inst = QtWidgets.QApplication.instance()
         if _app_inst is not None:
             try:
@@ -7279,11 +7318,12 @@ class ChatWindow(QtWidgets.QMainWindow):
         status_row_layout.setContentsMargins(0, 0, 0, 0)
         status_row_layout.setSpacing(self._UI_GRID_PX)
         status_row_layout.addWidget(self.status_label, 1)
-        status_row_layout.addWidget(
-            self.theme_switch_button,
-            0,
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+        _status_align = (
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
+        status_row_layout.addWidget(self.audio_call_button, 0, _status_align)
+        status_row_layout.addWidget(self.video_call_button, 0, _status_align)
+        status_row_layout.addWidget(self.theme_switch_button, 0, _status_align)
         # Строка статус-бара (средняя детализация); подсказка при наведении отключена.
         self._status_line_text: str = (
             f"Net:starting | Prof:{TRANSIENT_PROFILE_NAME} (T) | Link:offline | Peer:none | St:none | Sec:off | "
@@ -7807,6 +7847,8 @@ class ChatWindow(QtWidgets.QMainWindow):
         right_pack_layout.addWidget(self.contacts_toggle_btn)
         right_pack_layout.addWidget(self._contacts_sidebar_resize_grip)
         right_pack_layout.addWidget(self.right_chat_column, 1)
+        self._call_overlay = CallOverlayWidget(self.right_chat_column)
+        self._call_overlay.hide()
 
         self.contacts_splitter.addWidget(self.contacts_sidebar)
         self.contacts_splitter.addWidget(self.contacts_right_pack)
@@ -10276,6 +10318,16 @@ class ChatWindow(QtWidgets.QMainWindow):
                 disconnect_base, _DISCONNECT_SHORTCUT_PORTABLE
             ),
         )
+        can_call = (
+            self._active_group_id is None
+            and already_secure
+            and bool(norm_target)
+        )
+        if hasattr(self, "audio_call_button"):
+            self.audio_call_button.setVisible(self._active_group_id is None)
+            self.video_call_button.setVisible(self._active_group_id is None)
+            self.audio_call_button.setEnabled(can_call)
+            self.video_call_button.setEnabled(can_call)
         self._refresh_send_controls()
 
     def _refresh_send_controls(self) -> None:
@@ -11851,7 +11903,25 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         core.on_avatar_updated = self._on_avatar_updated
         core.on_profile_password = self._ask_profile_password
+        if hasattr(self, "_call_overlay"):
+            self._call_overlay.attach_core(core)
         return core
+
+    def _start_call(self, *, video: bool) -> None:
+        if self.core is None:
+            return
+        if getattr(self, "_active_group_id", None):
+            return
+        peer = getattr(self.core, "current_peer_addr", None) or ""
+        if not peer:
+            QtWidgets.QMessageBox.information(
+                self, tr("call.title"), tr("call.need_peer")
+            )
+            return
+        if not hasattr(self, "_call_overlay"):
+            return
+        self._call_overlay.attach_core(self.core)
+        self._call_overlay.start_outgoing(video=video)
 
     def _ask_profile_password(self) -> str:
         text, ok = QtWidgets.QInputDialog.getText(
@@ -12309,6 +12379,50 @@ class ChatWindow(QtWidgets.QMainWindow):
         if not played:
             QtWidgets.QApplication.beep()
 
+    def _tinted_gui_icon(self, filename: str, *, icon_px: Optional[int] = None) -> QtGui.QIcon:
+        """Load a gui/icons PNG and tint it for the current light/dark theme."""
+        icon_path = _resolve_gui_icon(filename)
+        if not icon_path:
+            return QtGui.QIcon()
+        source = QtGui.QPixmap(icon_path)
+        if source.isNull():
+            return QtGui.QIcon()
+        px = self._THEME_SWITCH_ICON_PX if icon_px is None else int(icon_px)
+        tint = QtGui.QColor("#1f232b") if self.theme_id == "ligth" else QtGui.QColor("#f2f2f7")
+        dpr = max(1.0, self.devicePixelRatioF())
+        target_w = max(1, int(px * dpr))
+        target_h = max(1, int(px * dpr))
+        source = source.scaled(
+            target_w,
+            target_h,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        tinted = QtGui.QPixmap(source.size())
+        tinted.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(tinted)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), tint)
+        painter.end()
+        tinted.setDevicePixelRatio(dpr)
+        return QtGui.QIcon(tinted)
+
+    def _update_call_toolbar_icons(self) -> None:
+        if not hasattr(self, "audio_call_button"):
+            return
+        icon_px = self._THEME_SWITCH_ICON_PX
+        size = QtCore.QSize(icon_px, icon_px)
+        self.audio_call_button.setIcon(self._tinted_gui_icon("phone.png"))
+        self.audio_call_button.setIconSize(size)
+        self.audio_call_button.setText("")
+        self.audio_call_button.setToolTip(tr("call.audio"))
+        self.video_call_button.setIcon(self._tinted_gui_icon("video.png"))
+        self.video_call_button.setIconSize(size)
+        self.video_call_button.setText("")
+        self.video_call_button.setToolTip(tr("call.video"))
+
     def _update_theme_switch_label(self) -> None:
         _next_pref = _theme_switch_target_preference(self.theme_id)
         _next_lbl = _theme_tooltip_label(_next_pref)
@@ -12320,39 +12434,16 @@ class ChatWindow(QtWidgets.QMainWindow):
             _cur_lbl = _theme_tooltip_label(self._theme_preference)
         # Показываем иконку текущей *эффективной* темы: ligth -> sun, night -> moon.
         icon_name = "sun.max.png" if self.theme_id == "ligth" else "moon.png"
-        icon_path = _resolve_gui_icon(icon_name)
-        tint = QtGui.QColor("#1f232b") if self.theme_id == "ligth" else QtGui.QColor("#f2f2f7")
-        if icon_path:
-            source = QtGui.QPixmap(icon_path)
-            if not source.isNull():
-                icon_px = self._THEME_SWITCH_ICON_PX
-                dpr = max(1.0, self.devicePixelRatioF())
-                target_w = max(1, int(icon_px * dpr))
-                target_h = max(1, int(icon_px * dpr))
-                source = source.scaled(
-                    target_w,
-                    target_h,
-                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                    QtCore.Qt.TransformationMode.SmoothTransformation,
-                )
-                tinted = QtGui.QPixmap(source.size())
-                tinted.fill(QtCore.Qt.GlobalColor.transparent)
-                painter = QtGui.QPainter(tinted)
-                painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
-                painter.drawPixmap(0, 0, source)
-                painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
-                painter.fillRect(tinted.rect(), tint)
-                painter.end()
-                tinted.setDevicePixelRatio(dpr)
-                self.theme_switch_button.setIcon(QtGui.QIcon(tinted))
-                self.theme_switch_button.setIconSize(QtCore.QSize(icon_px, icon_px))
-                self.theme_switch_button.setText("")
-            else:
-                self.theme_switch_button.setIcon(QtGui.QIcon())
-                self.theme_switch_button.setText("◐")
+        icon_px = self._THEME_SWITCH_ICON_PX
+        icon = self._tinted_gui_icon(icon_name)
+        if not icon.isNull():
+            self.theme_switch_button.setIcon(icon)
+            self.theme_switch_button.setIconSize(QtCore.QSize(icon_px, icon_px))
+            self.theme_switch_button.setText("")
         else:
             self.theme_switch_button.setIcon(QtGui.QIcon())
             self.theme_switch_button.setText("◐")
+        self._update_call_toolbar_icons()
         _set_tooltip_if_changed(
             self.theme_switch_button,
             _tooltip_with_portable_shortcut(

@@ -245,30 +245,33 @@ fun I2PChatRoot(bridge: ChatBridge) {
         }
         return
     }
-    NavHost(
-        navController = nav,
-        startDestination = if (state.running || state.starting || state.resuming || state.quitting) {
-            "chats"
-        } else {
-            "profile"
-        },
-    ) {
-        composable("profile") { ProfileScreen(bridge, nav, switching = false) }
-        composable("switchProfile") { ProfileScreen(bridge, nav, switching = true) }
-        composable("status") { StatusScreen(bridge, nav) }
-        composable("chats") { ChatListScreen(bridge, nav) }
-        composable("conversation") { ConversationScreen(bridge, nav) }
-        composable("settings") { SettingsScreen(bridge, nav) }
-        composable("router") { RouterScreen(bridge, nav) }
-        composable("blindbox") { BlindBoxScreen(bridge, nav) }
-        composable("backup") { BackupScreen(bridge, nav) }
-        composable("group") { GroupEditScreen(bridge, nav, null) }
-        composable("groupEdit") {
-            GroupEditScreen(bridge, nav, bridge.state.value.selectedId)
+    Box(Modifier.fillMaxSize()) {
+        NavHost(
+            navController = nav,
+            startDestination = if (state.running || state.starting || state.resuming || state.quitting) {
+                "chats"
+            } else {
+                "profile"
+            },
+        ) {
+            composable("profile") { ProfileScreen(bridge, nav, switching = false) }
+            composable("switchProfile") { ProfileScreen(bridge, nav, switching = true) }
+            composable("status") { StatusScreen(bridge, nav) }
+            composable("chats") { ChatListScreen(bridge, nav) }
+            composable("conversation") { ConversationScreen(bridge, nav) }
+            composable("settings") { SettingsScreen(bridge, nav) }
+            composable("router") { RouterScreen(bridge, nav) }
+            composable("blindbox") { BlindBoxScreen(bridge, nav) }
+            composable("backup") { BackupScreen(bridge, nav) }
+            composable("group") { GroupEditScreen(bridge, nav, null) }
+            composable("groupEdit") {
+                GroupEditScreen(bridge, nav, bridge.state.value.selectedId)
+            }
+            composable("topology") {
+                TopologyScreen(bridge, nav, bridge.state.value.selectedId)
+            }
         }
-        composable("topology") {
-            TopologyScreen(bridge, nav, bridge.state.value.selectedId)
-        }
+        CallOverlayHost(bridge)
     }
 }
 
@@ -1421,6 +1424,13 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 },
                 actions = {
+                    if (!group) {
+                        ConversationCallActions(
+                            bridge = bridge,
+                            peerId = id,
+                            peerSecure = state.peerLink(id) == "secure",
+                        )
+                    }
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.find_in_chat)) }, onClick = {
