@@ -50,3 +50,51 @@ def test_nudge_makes_the_next_tick_dial():
 def test_a_peer_that_was_never_secure_is_not_dialled():
     book = AutoReconnectBook()
     assert book.tick(1000, secure=set(), jitter=_still) == []
+
+
+def test_channel_desync_nudges_reconnect_without_marking_delivery_failed():
+    """Desync tear-down should dial ASAP and leave awaiting_ack as non-failed."""
+    from unittest.mock import MagicMock
+
+    from i2pchat.core.i2p_chat_core import I2PChatCore
+    from i2pchat.protocol.message_delivery import DELIVERY_STATE_FAILED
+
+    core = object.__new__(I2PChatCore)
+    core._auto_reconnect = AutoReconnectBook()
+    core._auto_reconnect.note_secure("peer.b32.i2p")
+    core._auto_reconnect_task = MagicMock()
+    core._auto_reconnect_task.done = lambda: False
+    errors: list[str] = []
+    delivery_updates: list[str] = []
+    core._emit_error = errors.append  # type: ignore[method-assign]
+    core._schedule_disconnect = MagicMock()  # type: ignore[method-assign]
+    core._normalize_peer_addr = lambda p: p  # type: ignore[method-assign]
+    core._peer_protocol_err_suffix = I2PChatCore._peer_protocol_err_suffix  # type: ignore[method-assign]
+    core._ensure_auto_reconnect = MagicMock()  # type: ignore[method-assign]
+    core._emit_outbound_delivery_update = (  # type: ignore[method-assign]
+        lambda *a, **k: delivery_updates.append(str(k.get("delivery_state") or a[1:2]))
+    )
+
+    # Freeze nudge "now" so due > 0 (tick treats due<=0 as "arm backoff").
+    import time as time_mod
+
+    real_mono = time_mod.monotonic
+    time_mod.monotonic = lambda: 10.0  # type: ignore[assignment]
+    try:
+        I2PChatCore._handle_channel_desync(
+            core,
+            "peer.b32.i2p",
+            seq_got=5,
+            seq_expected=4,
+            err_peer="peer.b32.i2p",
+        )
+    finally:
+        time_mod.monotonic = real_mono  # type: ignore[assignment]
+
+    assert errors and "Secure channel out of sync" in errors[0]
+    assert "seq got 5, expected 4" in errors[0]
+    core._schedule_disconnect.assert_called_once_with("peer.b32.i2p")
+    core._ensure_auto_reconnect.assert_called_once()
+    assert core._auto_reconnect.tick(10.0, secure=set(), jitter=_still) == ["peer.b32.i2p"]
+    assert DELIVERY_STATE_FAILED not in delivery_updates
+    assert delivery_updates == []

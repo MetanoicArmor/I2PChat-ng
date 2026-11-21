@@ -32,6 +32,209 @@
 namespace i2pchat::runtime {
 namespace {
 
+/// Stable markers matching `i2pchat.presentation.reply_format` (not localized).
+constexpr std::string_view kDeletedReplyAuthor = "[deleted]";
+constexpr std::string_view kDeletedReplyMarker = "Original message deleted";
+constexpr std::size_t kReplySummaryMax = 120;
+
+std::string summarize_for_reply(std::string_view text, std::string_view attachment_name) {
+    std::string raw;
+    if (!attachment_name.empty()) {
+        raw.assign(attachment_name);
+        while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t')) {
+            raw.erase(raw.begin());
+        }
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) {
+            raw.pop_back();
+        }
+    } else {
+        raw.reserve(text.size());
+        bool space = false;
+        for (char ch : text) {
+            if (ch == '\r') {
+                continue;
+            }
+            if (ch == '\n' || ch == '\t' || ch == ' ') {
+                space = !raw.empty();
+                continue;
+            }
+            if (space) {
+                raw.push_back(' ');
+                space = false;
+            }
+            raw.push_back(ch);
+        }
+    }
+    if (raw.size() > kReplySummaryMax) {
+        raw.resize(kReplySummaryMax - 1);
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) {
+            raw.pop_back();
+        }
+        raw.push_back(static_cast<char>(0xE2));
+        raw.push_back(static_cast<char>(0x80));
+        raw.push_back(static_cast<char>(0xA6));  // …
+    }
+    return raw;
+}
+
+std::string attachment_name_hint(std::string_view text) {
+    auto strip_prefix = [](std::string_view body, std::string_view prefix) -> std::string {
+        if (body.size() < prefix.size() || body.substr(0, prefix.size()) != prefix) {
+            return {};
+        }
+        std::string rest(body.substr(prefix.size()));
+        while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) {
+            rest.erase(rest.begin());
+        }
+        if (rest.empty()) {
+            return {};
+        }
+        const auto slash = rest.find_last_of("/\\");
+        if (slash != std::string::npos) {
+            rest = rest.substr(slash + 1);
+        }
+        return rest;
+    };
+    if (auto name = strip_prefix(text, "[image] "); !name.empty()) {
+        return name;
+    }
+    if (auto name = strip_prefix(text, "[file] "); !name.empty()) {
+        return name;
+    }
+    return {};
+}
+
+bool quote_matches_source(std::string_view quoted, std::string_view source,
+                          std::string_view attachment_name) {
+    while (!quoted.empty() && quoted.back() == '\n') {
+        quoted.remove_suffix(1);
+    }
+    while (!source.empty() && source.back() == '\n') {
+        source.remove_suffix(1);
+    }
+    if (quoted.empty()) {
+        return false;
+    }
+    if (quoted == source) {
+        return true;
+    }
+    const std::string summary = summarize_for_reply(source, attachment_name);
+    return !summary.empty() && quoted == summary;
+}
+
+bool parse_reply_quote(std::string_view text, std::string* author_out, std::string* quoted_out,
+                       std::string* answer_out) {
+    if (text.empty()) {
+        return false;
+    }
+    std::size_t pos = 0;
+    std::string author;
+    if (text.size() >= 2 && text[0] == '@') {
+        const auto nl = text.find('\n');
+        const std::string_view first =
+            nl == std::string_view::npos ? text : text.substr(0, nl);
+        constexpr std::string_view kSuffix = " wrote:";
+        if (first.size() > 1 + kSuffix.size() &&
+            first.substr(first.size() - kSuffix.size()) == kSuffix) {
+            author.assign(first.substr(1, first.size() - 1 - kSuffix.size()));
+            pos = nl == std::string_view::npos ? text.size() : nl + 1;
+        }
+    }
+    std::size_t quote_start = pos;
+    std::size_t quote_end = pos;
+    while (quote_end < text.size()) {
+        const auto nl = text.find('\n', quote_end);
+        const std::string_view line =
+            nl == std::string_view::npos ? text.substr(quote_end)
+                                        : text.substr(quote_end, nl - quote_end);
+        if (line.empty() || line[0] != '>') {
+            break;
+        }
+        quote_end = nl == std::string_view::npos ? text.size() : nl + 1;
+    }
+    if (quote_end == quote_start) {
+        return false;
+    }
+    std::string quoted;
+    std::size_t cursor = quote_start;
+    while (cursor < quote_end) {
+        const auto nl = text.find('\n', cursor);
+        const std::string_view line =
+            nl == std::string_view::npos || nl >= quote_end
+                ? text.substr(cursor, quote_end - cursor)
+                : text.substr(cursor, nl - cursor);
+        if (!quoted.empty()) {
+            quoted.push_back('\n');
+        }
+        if (line.size() >= 2 && line[0] == '>' && line[1] == ' ') {
+            quoted.append(line.substr(2));
+        } else if (!line.empty() && line[0] == '>') {
+            quoted.append(line.substr(1));
+        }
+        if (nl == std::string_view::npos || nl >= quote_end) {
+            break;
+        }
+        cursor = nl + 1;
+    }
+    std::size_t answer_pos = quote_end;
+    while (answer_pos < text.size() &&
+           (text[answer_pos] == '\n' || text[answer_pos] == '\r')) {
+        ++answer_pos;
+    }
+    if (author_out != nullptr) {
+        *author_out = std::move(author);
+    }
+    if (quoted_out != nullptr) {
+        *quoted_out = std::move(quoted);
+    }
+    if (answer_out != nullptr) {
+        answer_out->assign(text.substr(answer_pos));
+    }
+    return true;
+}
+
+std::string format_deleted_reply_quote(std::string_view answer) {
+    std::string out = "@";
+    out.append(kDeletedReplyAuthor);
+    out.append(" wrote:\n> ");
+    out.append(kDeletedReplyMarker);
+    out.append("\n\n");
+    while (!answer.empty() && (answer.front() == '\n' || answer.front() == '\r')) {
+        answer.remove_prefix(1);
+    }
+    out.append(answer);
+    return out;
+}
+
+bool scrub_reply_text_if_matches(std::string* text, std::string_view deleted_source,
+                                 std::string_view attachment_name) {
+    if (text == nullptr) {
+        return false;
+    }
+    std::string author;
+    std::string quoted;
+    std::string answer;
+    if (!parse_reply_quote(*text, &author, &quoted, &answer)) {
+        return false;
+    }
+    if (author == kDeletedReplyAuthor || quoted == kDeletedReplyMarker) {
+        return false;
+    }
+    if (!quote_matches_source(quoted, deleted_source, attachment_name)) {
+        return false;
+    }
+    *text = format_deleted_reply_quote(answer);
+    return true;
+}
+
+void scrub_replies_to_deleted(std::vector<storage::HistoryEntry>& entries,
+                              std::string_view deleted_source) {
+    const std::string att = attachment_name_hint(deleted_source);
+    for (auto& entry : entries) {
+        scrub_reply_text_if_matches(&entry.text, deleted_source, att);
+    }
+}
+
 /// A destination in I2P-base64 is 516 characters or more; a base32 host is 52.
 /// Nothing in between is a valid peer identifier, so the length decides.
 constexpr std::size_t kMinDestinationLength = 300;
@@ -492,6 +695,23 @@ void ChatService::wire_transfers(Peer& peer) {
         return transfer::OfferDecision::Accept;
     };
     callbacks.on_progress = [this, addr](const transfer::Progress& progress) {
+        // Chat-history start marker for an incoming file (not avatar/image).
+        // Final `[file]` is written only in on_file_received when the transfer completes.
+        if (progress.direction == transfer::Direction::Incoming &&
+            progress.outcome == transfer::Outcome::Active && progress.transferred == 0 &&
+            !progress.inline_image) {
+            const std::string& name = progress.name;
+            const bool avatar =
+                name == ".i2pchat-avatar.jpg" || name.rfind(".i2pchat-avatar.", 0) == 0;
+            if (!avatar) {
+                storage::HistoryEntry entry;
+                entry.kind = "system";
+                entry.text = "Receiving file: " + name + " (" + std::to_string(progress.size) +
+                             " bytes)";
+                entry.ts = storage::now_iso8601_utc();
+                append_history(addr, entry);
+            }
+        }
         if (events_.on_transfer) {
             events_.on_transfer(addr, progress);
         }
@@ -888,7 +1108,7 @@ void ChatService::disconnect_peer(std::string_view peer) {
     sessions_.on_disconnected(addr, "user-disconnect");
 }
 
-void ChatService::schedule_auto_reconnect(Peer& peer) {
+void ChatService::schedule_auto_reconnect(Peer& peer, bool immediate) {
     if (stopping_ || !peer.had_secure || peer.user_disconnected || peer.auto_reconnect ||
         peer.auto_reconnect_inflight) {
         return;
@@ -899,7 +1119,8 @@ void ChatService::schedule_auto_reconnect(Peer& peer) {
     }
     const unsigned next = peer.auto_attempt + 1;
     peer.auto_attempt = next;
-    const int seconds = auto_reconnect_seconds(next);
+    // Desync tear-down: dial on the next tick instead of waiting ~20s.
+    const int seconds = immediate ? 0 : auto_reconnect_seconds(next);
     peer.auto_reconnect = std::make_shared<asio::steady_timer>(executor_);
     peer.auto_reconnect->expires_after(std::chrono::seconds(seconds));
     sessions_.on_connecting(peer.addr);
@@ -1051,7 +1272,10 @@ void ChatService::on_link_closed(const std::string& peer_addr, const std::string
     emit_notice("peer.disconnected", "peer_state", peer_addr,
                 "Disconnected from " + peer_addr.substr(0, 16) + "…: " + reason);
     if (entry->had_secure && !entry->user_disconnected && !stopping_) {
-        schedule_auto_reconnect(*entry);
+        const bool desync =
+            reason.find("Replay protection") != std::string::npos ||
+            reason.find("out of sync") != std::string::npos;
+        schedule_auto_reconnect(*entry, /*immediate=*/desync);
     }
     if (events_.on_contacts_changed) {
         events_.on_contacts_changed();
@@ -1920,7 +2144,9 @@ bool ChatService::delete_history_entry(std::string_view peer, std::string_view m
     if (target == entries.end()) {
         return false;
     }
+    const std::string deleted_text = target->text;
     entries.erase(target);
+    scrub_replies_to_deleted(entries, deleted_text);
     if (config_.profile != kTransientProfile) {
         try {
             if (entries.empty()) {
@@ -2174,6 +2400,11 @@ void ChatService::append_group_text(const std::string& group_id, std::string tex
 }
 
 void ChatService::emit_group_message(const std::string& group_id) const {
+    // Const method, but Chats MRU for groups lives in the contact book UI map.
+    auto* self = const_cast<ChatService*>(this);
+    if (self->contacts_.touch_group_activity(group_id, storage::now_iso8601_utc())) {
+        self->save_contacts();
+    }
     if (events_.on_group_message) {
         events_.on_group_message(group_id);
     }

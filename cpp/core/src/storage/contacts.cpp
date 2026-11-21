@@ -84,6 +84,21 @@ std::optional<ContactRecord> record_from_json(const nlohmann::json& entry) {
         record.history_retention_days = static_cast<unsigned>(
             std::clamp<long long>(days, 0, kMaxPeerHistoryRetentionDays));
     }
+    const auto pinned_it = entry.find("pinned");
+    if (pinned_it != entry.end() && pinned_it->is_boolean()) {
+        record.pinned = pinned_it->get<bool>();
+    }
+    const auto order_it = entry.find("pin_order");
+    if (order_it != entry.end() && order_it->is_number_integer()) {
+        record.pin_order = static_cast<int>(std::max(0LL, order_it->get<long long>()));
+    }
+    if (!record.pinned) {
+        record.pin_order = 0;
+    }
+    const auto muted_it = entry.find("notifications_muted");
+    if (muted_it != entry.end() && muted_it->is_boolean()) {
+        record.notifications_muted = muted_it->get<bool>();
+    }
     return record;
 }
 
@@ -97,7 +112,18 @@ nlohmann::json record_to_json(const ContactRecord& record) {
     if (record.history_retention_days > 0) {
         out["history_retention_days"] = record.history_retention_days;
     }
+    if (record.pinned) {
+        out["pinned"] = true;
+        out["pin_order"] = record.pin_order;
+    }
+    if (record.notifications_muted) {
+        out["notifications_muted"] = true;
+    }
     return out;
+}
+
+bool group_ui_worth_keeping(const GroupUiMeta& meta) {
+    return meta.pinned || !meta.last_activity_ts.empty() || meta.notifications_muted;
 }
 
 }  // namespace
@@ -241,6 +267,102 @@ bool ContactBook::set_peer_history_retention_days(std::string_view addr, unsigne
     return true;
 }
 
+bool ContactBook::set_peer_pin(std::string_view addr, bool pinned, int pin_order) {
+    const std::string normalized = normalize_contact_address(addr);
+    if (normalized.empty()) {
+        return false;
+    }
+    pin_order = std::max(0, pin_order);
+    ContactRecord* record = get(normalized);
+    if (record == nullptr) {
+        if (!pinned) {
+            return false;
+        }
+        remember_peer(normalized);
+        record = get(normalized);
+    }
+    if (record == nullptr) {
+        return false;
+    }
+    if (record->pinned == pinned && (!pinned || record->pin_order == pin_order)) {
+        return false;
+    }
+    record->pinned = pinned;
+    record->pin_order = pinned ? pin_order : 0;
+    return true;
+}
+
+bool ContactBook::set_group_pin(std::string_view group_id, bool pinned, int pin_order) {
+    const std::string gid = trim_whitespace(group_id);
+    if (gid.empty()) {
+        return false;
+    }
+    pin_order = std::max(0, pin_order);
+    GroupUiMeta& meta = group_ui_[gid];
+    if (meta.pinned == pinned && (!pinned || meta.pin_order == pin_order)) {
+        return false;
+    }
+    meta.pinned = pinned;
+    meta.pin_order = pinned ? pin_order : 0;
+    if (!group_ui_worth_keeping(meta)) {
+        group_ui_.erase(gid);
+    }
+    return true;
+}
+
+bool ContactBook::set_peer_notifications_muted(std::string_view addr, bool muted) {
+    const std::string normalized = normalize_contact_address(addr);
+    if (normalized.empty()) {
+        return false;
+    }
+    ContactRecord* record = get(normalized);
+    if (record == nullptr) {
+        if (!muted) {
+            return false;
+        }
+        remember_peer(normalized);
+        record = get(normalized);
+    }
+    if (record == nullptr) {
+        return false;
+    }
+    if (record->notifications_muted == muted) {
+        return false;
+    }
+    record->notifications_muted = muted;
+    return true;
+}
+
+bool ContactBook::set_group_notifications_muted(std::string_view group_id, bool muted) {
+    const std::string gid = trim_whitespace(group_id);
+    if (gid.empty()) {
+        return false;
+    }
+    GroupUiMeta& meta = group_ui_[gid];
+    if (meta.notifications_muted == muted) {
+        return false;
+    }
+    meta.notifications_muted = muted;
+    if (!group_ui_worth_keeping(meta)) {
+        group_ui_.erase(gid);
+    }
+    return true;
+}
+
+bool ContactBook::touch_group_activity(std::string_view group_id, std::string_view ts_iso) {
+    const std::string gid = trim_whitespace(group_id);
+    const std::string ts = trim_whitespace(ts_iso);
+    if (gid.empty() || ts.empty()) {
+        return false;
+    }
+    GroupUiMeta& meta = group_ui_[gid];
+    if (meta.last_activity_ts == ts) {
+        return false;
+    }
+    meta.last_activity_ts = ts;
+    return true;
+}
+
 bool ContactBook::touch_peer_message_meta(std::string_view addr, std::string_view preview,
                                           std::string_view ts_iso) {
     const std::string normalized = normalize_contact_address(addr);
@@ -350,6 +472,35 @@ ContactBook parse_contact_book(const nlohmann::json& data) {
             book.set_last_active_peer(std::nullopt);
         }
     }
+    const auto group_ui = data.find("group_ui");
+    if (group_ui != data.end() && group_ui->is_object()) {
+        for (auto it = group_ui->begin(); it != group_ui->end(); ++it) {
+            if (!it.value().is_object()) {
+                continue;
+            }
+            GroupUiMeta meta;
+            const auto& obj = it.value();
+            if (obj.contains("pinned") && obj["pinned"].is_boolean()) {
+                meta.pinned = obj["pinned"].get<bool>();
+            }
+            if (obj.contains("pin_order") && obj["pin_order"].is_number_integer()) {
+                meta.pin_order =
+                    static_cast<int>(std::max(0LL, obj["pin_order"].get<long long>()));
+            }
+            if (obj.contains("last_activity_ts") && obj["last_activity_ts"].is_string()) {
+                meta.last_activity_ts = obj["last_activity_ts"].get<std::string>();
+            }
+            if (obj.contains("notifications_muted") && obj["notifications_muted"].is_boolean()) {
+                meta.notifications_muted = obj["notifications_muted"].get<bool>();
+            }
+            if (!meta.pinned) {
+                meta.pin_order = 0;
+            }
+            if (group_ui_worth_keeping(meta)) {
+                book.group_ui()[it.key()] = std::move(meta);
+            }
+        }
+    }
     return book;
 }
 
@@ -371,6 +522,27 @@ nlohmann::json contact_book_to_json(const ContactBook& book) {
         }
     }
     out["contacts"] = std::move(contacts);
+    nlohmann::json group_ui = nlohmann::json::object();
+    for (const auto& [gid, meta] : book.group_ui()) {
+        if (!group_ui_worth_keeping(meta)) {
+            continue;
+        }
+        nlohmann::json entry = nlohmann::json::object();
+        if (meta.pinned) {
+            entry["pinned"] = true;
+            entry["pin_order"] = meta.pin_order;
+        }
+        if (!meta.last_activity_ts.empty()) {
+            entry["last_activity_ts"] = meta.last_activity_ts;
+        }
+        if (meta.notifications_muted) {
+            entry["notifications_muted"] = true;
+        }
+        group_ui[gid] = std::move(entry);
+    }
+    if (!group_ui.empty()) {
+        out["group_ui"] = std::move(group_ui);
+    }
     return out;
 }
 

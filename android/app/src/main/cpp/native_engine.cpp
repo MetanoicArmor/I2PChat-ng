@@ -734,12 +734,25 @@ Java_org_i2pchat_android_NativeEngine_nativeStart(JNIEnv* env, jclass, jstring j
                                   std::string(i2pchat::session::transport_state_name(state)), reason);
         };
         events.on_transfer = [](const std::string& peer, const i2pchat::transfer::Progress& progress) {
+            const char* outcome = "active";
+            switch (progress.outcome) {
+                case i2pchat::transfer::Outcome::Completed:
+                    outcome = "completed";
+                    break;
+                case i2pchat::transfer::Outcome::Failed:
+                    outcome = "failed";
+                    break;
+                case i2pchat::transfer::Outcome::Active:
+                    outcome = "active";
+                    break;
+            }
             nlohmann::json json = {{"name", progress.name},
                                    {"path", progress.path.string()},
                                    {"size", progress.size},
                                    {"transferred", progress.transferred},
                                    {"incoming", progress.direction == i2pchat::transfer::Direction::Incoming},
-                                   {"image", progress.inline_image}};
+                                   {"image", progress.inline_image},
+                                   {"outcome", outcome}};
             g_engine.emit_2string("onTransfer", peer, json.dump());
         };
         events.on_file_received = [](const std::string& peer, const fs::path& path) {
@@ -1111,13 +1124,29 @@ Java_org_i2pchat_android_NativeEngine_nativeSnapshot(JNIEnv* env, jclass) {
                     {"lastPreview", record.last_preview},
                     {"lastActivityTs", record.last_activity_ts},
                     {"historyRetentionDays", record.history_retention_days},
+                    {"pinned", record.pinned},
+                    {"pinOrder", record.pin_order},
+                    {"notificationsMuted", record.notifications_muted},
                     {"live", service.live(record.addr)},
                     {"offlineReady", service.peer_offline_ready(record.addr)},
                 });
             }
             nlohmann::json groups = nlohmann::json::array();
             for (const auto& group : service.list_groups()) {
-                groups.push_back(group_state_json(group));
+                nlohmann::json row = group_state_json(group);
+                const auto found = service.contacts().group_ui().find(group.group_id());
+                if (found != service.contacts().group_ui().end()) {
+                    row["pinned"] = found->second.pinned;
+                    row["pinOrder"] = found->second.pin_order;
+                    row["lastActivityTs"] = found->second.last_activity_ts;
+                    row["notificationsMuted"] = found->second.notifications_muted;
+                } else {
+                    row["pinned"] = false;
+                    row["pinOrder"] = 0;
+                    row["lastActivityTs"] = "";
+                    row["notificationsMuted"] = false;
+                }
+                groups.push_back(std::move(row));
             }
             nlohmann::json snapshot = {
                 {"localAddr", service.local_addr()},
@@ -1212,6 +1241,60 @@ Java_org_i2pchat_android_NativeEngine_nativeSetPeerRetentionDays(JNIEnv* env, jc
     try {
         g_engine.on_core<void>([addr, value] {
             if (g_engine.service->contacts().set_peer_history_retention_days(addr, value)) {
+                g_engine.service->save_contacts();
+            }
+        });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetConversationPin(JNIEnv* env, jclass,
+                                                               jstring j_id, jboolean j_group,
+                                                               jboolean j_pinned, jint j_order) {
+    if (!g_engine.service) {
+        return;
+    }
+    const std::string id = jstring_to_utf8(env, j_id);
+    const bool is_group = j_group == JNI_TRUE;
+    const bool pinned = j_pinned == JNI_TRUE;
+    const int order = std::max(0, static_cast<int>(j_order));
+    try {
+        g_engine.on_core<void>([id, is_group, pinned, order] {
+            bool changed = false;
+            if (is_group) {
+                changed = g_engine.service->contacts().set_group_pin(id, pinned, order);
+            } else {
+                changed = g_engine.service->contacts().set_peer_pin(id, pinned, order);
+            }
+            if (changed) {
+                g_engine.service->save_contacts();
+            }
+        });
+    } catch (const std::exception& ex) {
+        g_engine.emit_string("onError", ex.what());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_i2pchat_android_NativeEngine_nativeSetConversationNotificationsMuted(
+    JNIEnv* env, jclass, jstring j_id, jboolean j_group, jboolean j_muted) {
+    if (!g_engine.service) {
+        return;
+    }
+    const std::string id = jstring_to_utf8(env, j_id);
+    const bool is_group = j_group == JNI_TRUE;
+    const bool muted = j_muted == JNI_TRUE;
+    try {
+        g_engine.on_core<void>([id, is_group, muted] {
+            bool changed = false;
+            if (is_group) {
+                changed = g_engine.service->contacts().set_group_notifications_muted(id, muted);
+            } else {
+                changed = g_engine.service->contacts().set_peer_notifications_muted(id, muted);
+            }
+            if (changed) {
                 g_engine.service->save_contacts();
             }
         });

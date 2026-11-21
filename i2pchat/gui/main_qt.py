@@ -64,9 +64,13 @@ from i2pchat.protocol.message_delivery import (
     normalize_loaded_delivery_state,
 )
 from i2pchat.presentation.reply_format import (
+    DELETED_REPLY_AUTHOR,
+    DELETED_REPLY_MARKER,
     ReplyQuoteLayout,
     format_reply_quote,
+    is_deleted_reply_quote,
     split_reply_quote,
+    summarize_for_reply,
 )
 from i2pchat.core.live_peer_session import max_concurrent_live_sessions
 from i2pchat.core.send_retry_policy import should_start_auto_connect_retry as _should_start_auto_connect_retry
@@ -181,19 +185,26 @@ from i2pchat.storage.compose_drafts_store import (
     save_compose_drafts,
 )
 from i2pchat.storage.sealed_json import is_sealed_json_file
+from i2pchat.presentation.chat_list_order import sort_chat_rows
 from i2pchat.storage.contact_book import (
     CONTACTS_STORE_MAGIC,
     ContactBook,
     ContactRecord,
+    GroupUiMeta,
     load_book,
     normalize_peer_address,
     remember_peer,
     remove_peer,
     same_i2p_destination,
     save_book,
+    set_group_notifications_muted,
+    set_group_pin,
     set_last_active_peer,
     set_peer_history_retention_days,
+    set_peer_notifications_muted,
+    set_peer_pin,
     set_peer_profile,
+    touch_group_activity,
     touch_peer_message_meta,
 )
 from i2pchat.storage.history_retention import peer_max_age_days
@@ -853,6 +864,14 @@ THEMES: dict[str, dict[str, object]] = {
                 border: 1px solid #ffffff;
                 border-radius: 10px;
             }
+            QFrame#ComposeReplyQuoteBar {
+                background: #e4e9f2;
+                border: 1px solid #c8d0de;
+                border-radius: 8px;
+            }
+            QLabel#ComposeReplyQuoteLabel {
+                color: #3a4150;
+            }
             QPushButton {
                 background-color: #f8f9fc;
                 border-radius: 9px;
@@ -940,6 +959,20 @@ THEMES: dict[str, dict[str, object]] = {
             }
             QToolButton#ThemeSwitchButton:pressed {
                 background-color: #eef1f6;
+            }
+            QToolButton#ChatJumpBottomButton {
+                background-color: #e2e7f0;
+                border: none;
+                border-radius: 18px;
+                color: #333845;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            QToolButton#ChatJumpBottomButton:hover {
+                background-color: #d5dce8;
+            }
+            QToolButton#ChatJumpBottomButton:pressed {
+                background-color: #c9d2e0;
             }
             QWidget#ContactsSidebar {
                 background: #f2f4f8;
@@ -1431,6 +1464,14 @@ THEMES: dict[str, dict[str, object]] = {
                 border: 1px solid #383f4c;
                 border-radius: 10px;
             }
+            QFrame#ComposeReplyQuoteBar {
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid #383f4c;
+                border-radius: 8px;
+            }
+            QLabel#ComposeReplyQuoteLabel {
+                color: rgba(245, 245, 247, 0.82);
+            }
             QPushButton {
                 background-color: rgba(255, 255, 255, 0.08);
                 border-radius: 9px;
@@ -1510,6 +1551,20 @@ THEMES: dict[str, dict[str, object]] = {
             }
             QToolButton#ThemeSwitchButton:pressed {
                 background-color: rgba(255, 255, 255, 0.18);
+            }
+            QToolButton#ChatJumpBottomButton {
+                background-color: rgba(255, 255, 255, 0.14);
+                border: none;
+                border-radius: 18px;
+                color: #e8edf5;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            QToolButton#ChatJumpBottomButton:hover {
+                background-color: rgba(255, 255, 255, 0.20);
+            }
+            QToolButton#ChatJumpBottomButton:pressed {
+                background-color: rgba(255, 255, 255, 0.26);
             }
             QWidget#ContactsSidebar {
                 background: rgba(34, 37, 45, 0.72);
@@ -2227,6 +2282,16 @@ class ChatItem:
     show_sender_label: bool = False
 
 
+@dataclass(frozen=True)
+class PendingReply:
+    """Compose-side reply target (read-only bar; not part of the editable draft)."""
+
+    author: str
+    summary: str
+    source_text: str = ""
+    message_id: Optional[str] = None
+
+
 def _chat_item_delivery_state(item: ChatItem) -> Optional[str]:
     state = (item.delivery_state or "").strip().lower()
     if state:
@@ -2429,7 +2494,7 @@ class ChatListView(QtWidgets.QListView):
     """
     cancelTransferRequested = QtCore.pyqtSignal()
     imageOpenRequested = QtCore.pyqtSignal(str)  # path to image
-    replyRequested = QtCore.pyqtSignal(str)  # quoted block for compose field
+    replyRequested = QtCore.pyqtSignal(object)  # PendingReply for compose quote bar
     quoteJumpRequested = QtCore.pyqtSignal(int, str)  # row of reply, quoted original text
     retryRequested = QtCore.pyqtSignal(int)
 
@@ -2531,6 +2596,25 @@ class ChatListView(QtWidgets.QListView):
             return resolver(item)
         return item.sender
 
+    def _pending_reply_for_item(self, item: ChatItem) -> PendingReply:
+        author = self._reply_author(item)
+        attachment_name: Optional[str] = None
+        if item.kind in ("transfer", "image_inline") or item.file_name:
+            attachment_name = (
+                (item.file_name or "").strip()
+                or os.path.basename(item.image_path or item.saved_file_path or "")
+                or (item.text or "").strip()
+            )
+        summary = summarize_for_reply(item.text, attachment_name=attachment_name)
+        if not summary:
+            summary = attachment_name or (item.text or "").strip() or "message"
+        return PendingReply(
+            author=author,
+            summary=summary,
+            source_text=item.text or "",
+            message_id=item.message_id,
+        )
+
     def set_theme(self, theme_id: str) -> None:
         self._theme_id = _resolve_theme(theme_id)
         self._apply_edge_fade_theme_colors()
@@ -2593,6 +2677,13 @@ class ChatListView(QtWidgets.QListView):
             if item.text.strip():
                 add_copy_text()
                 add_copy_timestamp()
+            self._context_popup.add_action(
+                "Reply",
+                lambda it=item: self.replyRequested.emit(
+                    self._pending_reply_for_item(it)
+                ),
+                tool_tip=menu_tt.TT_REPLY,
+            )
         elif k == "success":
             if item.saved_file_path and os.path.isfile(item.saved_file_path):
                 fp = item.saved_file_path
@@ -2630,6 +2721,14 @@ class ChatListView(QtWidgets.QListView):
             if item.text.strip():
                 add_copy_text()
                 add_copy_timestamp()
+            if item.saved_file_path or item.text.strip():
+                self._context_popup.add_action(
+                    "Reply",
+                    lambda it=item: self.replyRequested.emit(
+                        self._pending_reply_for_item(it)
+                    ),
+                    tool_tip=menu_tt.TT_REPLY,
+                )
         elif k in ("me", "peer"):
             add_copy_text()
             add_copy_timestamp()
@@ -2637,7 +2736,7 @@ class ChatListView(QtWidgets.QListView):
                 self._context_popup.add_action(
                     "Reply",
                     lambda it=item: self.replyRequested.emit(
-                        format_reply_quote(self._reply_author(it), it.text)
+                        self._pending_reply_for_item(it)
                     ),
                     tool_tip=menu_tt.TT_REPLY,
                 )
@@ -2648,6 +2747,13 @@ class ChatListView(QtWidgets.QListView):
                     tool_tip=menu_tt.TT_RETRY,
                 )
         elif k == "transfer" and item.text.strip():
+            self._context_popup.add_action(
+                "Reply",
+                lambda it=item: self.replyRequested.emit(
+                    self._pending_reply_for_item(it)
+                ),
+                tool_tip=menu_tt.TT_REPLY,
+            )
             fn = item.text.strip()
             self._context_popup.add_action(
                 "Copy filename",
@@ -3044,7 +3150,7 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
     def _bubble_width_for_item(
         self, cell_width: int, item: "ChatItem", font: QtGui.QFont
     ) -> int:
-        reply_layout = self._reply_layout(item)
+        reply_layout = self._reply_paint_layout(item)
         text = (reply_layout.display_text if reply_layout else item.text) or " "
         width = self._bubble_width(cell_width, text, font)
         if reply_layout is not None:
@@ -3065,6 +3171,39 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
             return None
         return split_reply_quote(item.text)
 
+    @staticmethod
+    def _reply_paint_layout(item: "ChatItem") -> Optional[ReplyQuoteLayout]:
+        """One-line quote preview for painting; deleted quotes hide author/content."""
+        layout = ChatItemDelegate._reply_layout(item)
+        if layout is None:
+            return None
+        deleted = (
+            layout.author == DELETED_REPLY_AUTHOR
+            or layout.quoted_text.strip() == DELETED_REPLY_MARKER
+        )
+        if deleted:
+            line = tr("ui.reply_quote_deleted")
+            answer_lines = layout.answer.split("\n") if layout.answer else []
+            return ReplyQuoteLayout(
+                display_text="\n".join([line] + answer_lines),
+                author="",
+                header_lines=0,
+                quote_lines=1,
+                quoted_text=layout.quoted_text,
+                answer=layout.answer,
+            )
+        preview = summarize_for_reply(layout.quoted_text)
+        head = [f"@{layout.author}"] if layout.author else []
+        answer_lines = layout.answer.split("\n") if layout.answer else []
+        return ReplyQuoteLayout(
+            display_text="\n".join(head + [preview] + answer_lines),
+            author=layout.author,
+            header_lines=1 if layout.author else 0,
+            quote_lines=1,
+            quoted_text=layout.quoted_text,
+            answer=layout.answer,
+        )
+
     def _build_message_doc(
         self,
         item: "ChatItem",
@@ -3073,7 +3212,7 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         width: float,
     ) -> QtGui.QTextDocument:
         """Документ бабла; для ответов `>`-строки превращаются в блок цитаты."""
-        layout = self._reply_layout(item)
+        layout = self._reply_paint_layout(item)
         doc = make_message_qtextdocument(
             layout.display_text if layout else (item.text or " "),
             font,
@@ -3093,7 +3232,8 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         font: QtGui.QFont,
     ) -> Optional[str]:
         """Текст исходного сообщения, если клик попал в блок цитаты; иначе None."""
-        if self._reply_layout(item) is None:
+        raw = self._reply_layout(item)
+        if raw is None or is_deleted_reply_quote(item.text):
             return None
         rect = cell_rect.adjusted(0, self.BUBBLE_SPACING_Y, 0, -self.BUBBLE_SPACING_Y)
         bubble_width = self._bubble_width_for_item(rect.width(), item, font)
@@ -3113,8 +3253,7 @@ class ChatItemDelegate(QtWidgets.QStyledItemDelegate):
         hit = QtCore.QRectF(text_left, text_top + bar.top(), text_width, bar.height())
         if not hit.contains(QtCore.QPointF(pos)):
             return None
-        layout = self._reply_layout(item)
-        return layout.quoted_text if layout else None
+        return raw.quoted_text
 
     def _bubble_inner_text_width_px(self, bubble_width: int) -> float:
         """Ширина для QTextDocument в бабле — как text_area.width() в paint() после двойных отступов."""
@@ -5552,6 +5691,8 @@ class ContactRowWidget(QtWidgets.QWidget):
         text_col = QtWidgets.QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(2)
+        self._chat_pinned = bool(getattr(record, "pinned", False))
+        self._chat_muted = bool(getattr(record, "notifications_muted", False))
         self._full_title = record.display_name.strip() or _contact_row_address_title(
             record.addr
         )
@@ -5575,11 +5716,23 @@ class ContactRowWidget(QtWidgets.QWidget):
         self._link_dot.setObjectName("ContactRowLinkDot")
         self._link_dot.setFixedWidth(12)
         self._link_dot.hide()
+        self._pin_mark = QtWidgets.QLabel("📌", self)
+        self._pin_mark.setObjectName("ContactRowChatPin")
+        self._pin_mark.setFixedWidth(14)
+        if not self._chat_pinned:
+            self._pin_mark.hide()
+        self._mute_mark = QtWidgets.QLabel("🔕", self)
+        self._mute_mark.setObjectName("ContactRowChatMute")
+        self._mute_mark.setFixedWidth(14)
+        if not self._chat_muted:
+            self._mute_mark.hide()
         title_row = QtWidgets.QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(4)
         title_row.addWidget(self._link_dot, 0)
         title_row.addWidget(self._title, 1)
+        title_row.addWidget(self._pin_mark, 0)
+        title_row.addWidget(self._mute_mark, 0)
         text_col.addLayout(title_row)
         text_col.addWidget(self._subtitle)
         root.addLayout(text_col, 1)
@@ -5643,6 +5796,10 @@ class ContactRowWidget(QtWidgets.QWidget):
         # −1: запас от субпиксельного клиппинга QLabel по горизонтали.
         w = max(1, self.width() - 2 * hm - avatar_w - 1)
         title_w = w - (16 if self._link_dot.isVisible() else 0)
+        if self._pin_mark.isVisible():
+            title_w -= 18
+        if self._mute_mark.isVisible():
+            title_w -= 18
         fm = self._title.fontMetrics()
         self._title.setText(
             fm.elidedText(self._full_title, QtCore.Qt.TextElideMode.ElideMiddle, max(1, title_w))
@@ -5660,6 +5817,16 @@ class ContactRowWidget(QtWidgets.QWidget):
     def set_record(self, record: ContactRecord) -> None:
         self._addr = record.addr
         self._display_name = record.display_name.strip()
+        self._chat_pinned = bool(getattr(record, "pinned", False))
+        if self._chat_pinned:
+            self._pin_mark.show()
+        else:
+            self._pin_mark.hide()
+        self._chat_muted = bool(getattr(record, "notifications_muted", False))
+        if self._chat_muted:
+            self._mute_mark.show()
+        else:
+            self._mute_mark.hide()
         self._base_sub = _sidebar_row_preview_one_line(
             (record.last_preview or record.note or "").strip()
         )
@@ -6756,19 +6923,21 @@ class _UpdateCheckThread(QtCore.QThread):
         )
 
 
-def _sidebar_group_rows_sort_key(state: GroupState) -> tuple[str, str]:
-    """Стабильный порядок групп в сайдбаре (не по last updated)."""
-    title = (state.title or "").strip()
-    gid = (state.group_id or "").strip()
-    primary = title.lower() if title else gid.lower()
-    return (primary, gid.lower())
+@dataclass
+class _SidebarGroupSortRow:
+    """Adapter so groups share :func:`sort_chat_rows` with contact records."""
+
+    state: GroupState
+    pinned: bool = False
+    pin_order: int = 0
+    last_activity_ts: str = ""
 
 
-def _sidebar_saved_peer_sort_key(rec: ContactRecord) -> tuple[str, str]:
-    """Стабильный порядок контактов: по отображаемому имени, затем по адресу (не MRU из файла)."""
-    name = (rec.display_name or "").strip()
-    primary = name.lower() if name else (rec.addr or "").lower()
-    return (primary, (rec.addr or "").lower())
+def _sidebar_saved_peer_sort_key(rec: ContactRecord) -> tuple[int, int, str]:
+    """Test/helper key: pinned (0) then pin_order; unpinned use sort_chat_rows for MRU."""
+    if rec.pinned:
+        return (0, int(rec.pin_order), "")
+    return (1, 0, rec.last_activity_ts or "")
 
 
 # Core service kinds routed to the Status page instead of the chat transcript.
@@ -6984,6 +7153,9 @@ class ChatWindow(QtWidgets.QMainWindow):
     _COMPOSE_SPLIT_MIN_CHAT_PX = 120
     _COMPOSE_SPLIT_MAX_AREA_FRAC = 0.78
     _COMPOSE_SPLIT_INPUT_MAX_LINES = 16
+    # Auto-grow with typed lines (manual drag may still go up to INPUT_MAX_LINES).
+    _COMPOSE_AUTO_GROW_MAX_LINES = 6
+    _CHAT_NEAR_BOTTOM_SLACK_PX = 48
 
     def __init__(self, profile: Optional[str] = None, theme_id: str = THEME_DEFAULT) -> None:
         super().__init__()
@@ -7131,6 +7303,10 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._compose_drafts_save_timer.setSingleShot(True)
         self._compose_drafts_save_timer.setInterval(COMPOSE_DRAFTS_DEBOUNCE_MS)
         self._compose_drafts_save_timer.timeout.connect(self._flush_compose_drafts_to_disk)
+        # Follow latest chat row unless the user scrolled the history away from the end.
+        self._chat_stick_to_bottom: bool = True
+        self._compose_height_sync_armed: bool = False
+        self._compose_height_sync_busy: bool = False
 
         self._contact_book = ContactBook()
         self._contacts_sidebar_collapsed = False
@@ -7164,6 +7340,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         chat_surface = QtWidgets.QWidget(self)
         chat_surface.setObjectName("ChatSurface")
+        self._chat_surface = chat_surface
         chat_surface_layout = QtWidgets.QVBoxLayout(chat_surface)
         g = self._UI_GRID_PX
         col_left = self._CONTACTS_STRIP_EDGE_EXPANDED_PX
@@ -7318,6 +7495,18 @@ class ChatWindow(QtWidgets.QMainWindow):
         chat_surface_layout.addWidget(self._chat_search_header)
         chat_surface_layout.addWidget(self._chat_search_console)
         chat_surface_layout.addWidget(self.chat_view, 1)
+        self._jump_bottom_btn = QtWidgets.QToolButton(self.chat_view)
+        self._jump_bottom_btn.setObjectName("ChatJumpBottomButton")
+        self._jump_bottom_btn.setText("↓")
+        self._jump_bottom_btn.setToolTip(tr("ui.scroll_to_bottom"))
+        self._jump_bottom_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._jump_bottom_btn.setFixedSize(36, 36)
+        self._jump_bottom_btn.hide()
+        self._jump_bottom_btn.clicked.connect(self._on_jump_chat_bottom_clicked)
+        self.chat_view.installEventFilter(self)
+        _chat_sb = self.chat_view.verticalScrollBar()
+        _chat_sb.valueChanged.connect(self._on_chat_scroll_changed)
+        _chat_sb.rangeChanged.connect(lambda *_: self._on_chat_scroll_changed())
 
         # панель ввода (нижняя зона вертикального сплиттера «чат / ввод»)
         self._compose_split_bottom = QtWidgets.QWidget(self)
@@ -7520,6 +7709,30 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         self._compose_resize_grip.setToolTip("Drag to resize the message field")
         _compose_col.addWidget(self._compose_resize_grip)
+        self._pending_reply: Optional[PendingReply] = None
+        self._reply_quote_bar = QtWidgets.QFrame(self._compose_split_bottom)
+        self._reply_quote_bar.setObjectName("ComposeReplyQuoteBar")
+        self._reply_quote_bar.setVisible(False)
+        _rq_lay = QtWidgets.QHBoxLayout(self._reply_quote_bar)
+        _rq_lay.setContentsMargins(g, g // 2, g, g // 2)
+        _rq_lay.setSpacing(self._UI_GRID_PX)
+        self._reply_quote_label = QtWidgets.QLabel(self._reply_quote_bar)
+        self._reply_quote_label.setObjectName("ComposeReplyQuoteLabel")
+        self._reply_quote_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.NoTextInteraction
+        )
+        self._reply_quote_label.setWordWrap(False)
+        self._reply_quote_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        self._reply_quote_clear = QtWidgets.QToolButton(self._reply_quote_bar)
+        self._reply_quote_clear.setText("×")
+        self._reply_quote_clear.setToolTip(tr("ui.reply_quote_clear"))
+        self._reply_quote_clear.clicked.connect(self._clear_pending_reply)
+        _rq_lay.addWidget(self._reply_quote_label, 1)
+        _rq_lay.addWidget(self._reply_quote_clear, 0)
+        _compose_col.addWidget(self._reply_quote_bar, 0)
         _compose_col.addWidget(input_container, 1)
 
         self._compose_vertical_splitter.addWidget(chat_surface)
@@ -7633,6 +7846,9 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.addr_edit.textEdited.connect(self._on_addr_text_edited)
         self.addr_edit.editingFinished.connect(self._on_addr_editing_finished_for_drafts)
         self.input_edit.composeTextChanged.connect(self._on_compose_text_changed)
+        self.input_edit.document().documentLayout().documentSizeChanged.connect(
+            lambda _size: self._schedule_compose_height_sync()
+        )
         self.more_actions_popup.add_action(
             "Load profile (.dat)",
             self.on_load_profile_clicked,
@@ -8211,9 +8427,19 @@ class ChatWindow(QtWidgets.QMainWindow):
             while lst.count() > 0:
                 lst.takeItem(lst.count() - 1)
             if self.core is not None:
-                group_states = list(self.core.list_group_states())
-                group_states.sort(key=_sidebar_group_rows_sort_key)
-                for state in group_states:
+                group_rows: list[_SidebarGroupSortRow] = []
+                for state in self.core.list_group_states():
+                    meta = self._contact_book.group_ui.get(state.group_id) or GroupUiMeta()
+                    group_rows.append(
+                        _SidebarGroupSortRow(
+                            state=state,
+                            pinned=bool(meta.pinned),
+                            pin_order=int(meta.pin_order),
+                            last_activity_ts=meta.last_activity_ts or "",
+                        )
+                    )
+                for g_row in sort_chat_rows(group_rows):
+                    state = g_row.state
                     conversation = self.core.load_group(state.group_id)
                     peer_count = max(0, len(state.members) - 1)
                     preview = (
@@ -8233,6 +8459,13 @@ class ChatWindow(QtWidgets.QMainWindow):
                                 title=state.title,
                             ),
                             note=preview,
+                            pinned=bool(g_row.pinned),
+                            pin_order=int(g_row.pin_order),
+                            last_activity_ts=g_row.last_activity_ts,
+                            notifications_muted=bool(
+                                (self._contact_book.group_ui.get(state.group_id) or GroupUiMeta())
+                                .notifications_muted
+                            ),
                         )
                     )
                     row.activate.connect(self._on_group_row_activated)
@@ -8249,10 +8482,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             lst.addItem(sec_item)
             lst.setItemWidget(sec_item, sec_w)
             sec_item.setSizeHint(sec_w.sizeHint())
-            for rec in sorted(
-                self._contact_book.contacts,
-                key=_sidebar_saved_peer_sort_key,
-            ):
+            for rec in sort_chat_rows(list(self._contact_book.contacts)):
                 item = QtWidgets.QListWidgetItem()
                 item.setData(_SIDEBAR_LIST_ROLE, "contact")
                 row = ContactRowWidget(rec)
@@ -9031,6 +9261,127 @@ class ChatWindow(QtWidgets.QMainWindow):
             min(cap, frac_cap),
         )
 
+    def _compose_auto_grow_bottom_height(self) -> int:
+        """Bottom splitter pane sized to document, capped like Android compose (~6 lines)."""
+        g = self._UI_GRID_PX
+        min_inner = _compose_bar_input_height_px(self.input_edit, lines=1)
+        max_inner = _compose_bar_input_height_px(
+            self.input_edit, lines=self._COMPOSE_AUTO_GROW_MAX_LINES
+        )
+        doc = self.input_edit.document()
+        doc_h = int(math.ceil(float(doc.size().height())))
+        dm = int(float(doc.documentMargin()) * 2.0)
+        vpad = 16
+        content_inner = max(min_inner, doc_h + dm + vpad + 4)
+        inner = max(min_inner, min(max_inner, content_inner))
+        return self._COMPOSE_SPLIT_GRIP_PX + 2 * g + inner
+
+    def _chat_is_near_bottom(self) -> bool:
+        bar = self.chat_view.verticalScrollBar()
+        if bar.maximum() <= 0:
+            return True
+        return bar.value() >= bar.maximum() - self._CHAT_NEAR_BOTTOM_SLACK_PX
+
+    def _clear_chat_model_items(self) -> None:
+        """Clear transcript rows and re-enable stick-to-bottom for the next fill."""
+        self.chat_model.clear_items()
+        self._chat_stick_to_bottom = True
+        self._update_jump_bottom_button()
+
+    def _scroll_chat_to_bottom(self) -> None:
+        row = self.chat_model.rowCount() - 1
+        if row < 0:
+            self._update_jump_bottom_button()
+            return
+        index = self.chat_model.index(row, 0)
+        self.chat_view.scrollTo(
+            index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtBottom
+        )
+        self._chat_stick_to_bottom = True
+        self._update_jump_bottom_button()
+
+    def _scroll_chat_to_bottom_if_sticky(self) -> None:
+        if self._chat_stick_to_bottom:
+            self._scroll_chat_to_bottom()
+        else:
+            self._update_jump_bottom_button()
+
+    def _on_chat_scroll_changed(self, *_args: object) -> None:
+        self._chat_stick_to_bottom = self._chat_is_near_bottom()
+        self._update_jump_bottom_button()
+
+    def _update_jump_bottom_button(self) -> None:
+        btn = getattr(self, "_jump_bottom_btn", None)
+        if btn is None:
+            return
+        show = (not self._chat_stick_to_bottom) and self.chat_model.rowCount() > 0
+        btn.setVisible(show)
+        if show:
+            self._layout_jump_bottom_button()
+
+    def _layout_jump_bottom_button(self) -> None:
+        btn = getattr(self, "_jump_bottom_btn", None)
+        if btn is None or not btn.isVisible():
+            return
+        vp = self.chat_view.viewport()
+        margin = 12
+        x = max(0, vp.width() - btn.width() - margin)
+        y = max(0, vp.height() - btn.height() - margin)
+        btn.move(x, y)
+        btn.raise_()
+
+    @QtCore.pyqtSlot()
+    def _on_jump_chat_bottom_clicked(self) -> None:
+        self._chat_stick_to_bottom = True
+        self._scroll_chat_to_bottom()
+
+    def _schedule_compose_height_sync(self) -> None:
+        """Coalesce documentSizeChanged storms into one deferred height pass."""
+        timer = getattr(self, "_compose_height_sync_timer", None)
+        if timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._sync_compose_height_to_document)
+            self._compose_height_sync_timer = timer
+        timer.start(0)
+
+    def _sync_compose_height_to_document(self) -> None:
+        """Grow/shrink the compose pane with typed lines (capped); sticky-scroll history."""
+        if not getattr(self, "_compose_height_sync_armed", False):
+            return
+        if getattr(self, "_compose_height_sync_busy", False):
+            return
+        sp = getattr(self, "_compose_vertical_splitter", None)
+        if sp is None:
+            return
+        sizes = sp.sizes()
+        if len(sizes) < 2:
+            return
+        total = int(sizes[0]) + int(sizes[1])
+        needed = self._compose_auto_grow_bottom_height()
+        current = int(sizes[1])
+        if abs(needed - current) <= 1:
+            return
+        # Leave a manually dragged pane alone if it is taller than the auto-grow cap.
+        g = self._UI_GRID_PX
+        auto_cap_h = (
+            self._COMPOSE_SPLIT_GRIP_PX
+            + 2 * g
+            + _compose_bar_input_height_px(
+                self.input_edit, lines=self._COMPOSE_AUTO_GROW_MAX_LINES
+            )
+        )
+        if needed < current and current > auto_cap_h + 4:
+            return
+        stick = self._chat_is_near_bottom()
+        self._compose_height_sync_busy = True
+        try:
+            self._compose_split_clamp_and_apply(total, needed)
+        finally:
+            self._compose_height_sync_busy = False
+        if stick:
+            QtCore.QTimer.singleShot(0, self._scroll_chat_to_bottom_if_sticky)
+
     def _compose_split_clamp_and_apply(self, total: int, target_bottom: int) -> None:
         sp = getattr(self, "_compose_vertical_splitter", None)
         if sp is None:
@@ -9060,7 +9411,10 @@ class ChatWindow(QtWidgets.QMainWindow):
         if len(sz) < 2:
             return
         total = int(sz[0]) + int(sz[1])
+        stick = self._chat_is_near_bottom()
         self._compose_split_clamp_and_apply(total, start_bottom + dy)
+        if stick:
+            QtCore.QTimer.singleShot(0, self._scroll_chat_to_bottom_if_sticky)
 
     def _balance_compose_splitter_initial(self) -> None:
         sp = getattr(self, "_compose_vertical_splitter", None)
@@ -9072,6 +9426,8 @@ class ChatWindow(QtWidgets.QMainWindow):
         default_b = self._compose_split_bottom_default_height()
         target = default_b if saved is None else int(saved)
         self._compose_split_clamp_and_apply(total, target)
+        self._compose_height_sync_armed = True
+        self._update_jump_bottom_button()
 
     def _sync_contacts_right_pack_left_margin(self) -> None:
         lay = self.contacts_right_pack.layout()
@@ -9283,7 +9639,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._history_loaded_for_peer = None
             self._history_entries = []
             self._history_dirty = False
-            self.chat_model.clear_items()
+            self._clear_chat_model_items()
         self.addr_edit.setText(norm)
         if self.core is not None:
             try:
@@ -9316,7 +9672,39 @@ class ChatWindow(QtWidgets.QMainWindow):
         popup = self.saved_peers_context_popup
         popup.clear_actions()
         popup.apply_theme(self.theme_id)
-        if role == "group":
+        is_group = role == "group"
+        chat_pinned = self._sidebar_chat_is_pinned(addr, is_group=is_group)
+        if chat_pinned:
+            popup.add_action(
+                "Unpin chat",
+                lambda a=addr, g=is_group: self._sidebar_set_chat_pin(a, g, False),
+            )
+            popup.add_action(
+                "Move up",
+                lambda a=addr, g=is_group: self._sidebar_move_chat_pin(a, g, -1),
+            )
+            popup.add_action(
+                "Move down",
+                lambda a=addr, g=is_group: self._sidebar_move_chat_pin(a, g, 1),
+            )
+        else:
+            popup.add_action(
+                "Pin chat",
+                lambda a=addr, g=is_group: self._sidebar_set_chat_pin(a, g, True),
+            )
+        chat_muted = self._sidebar_chat_is_muted(addr, is_group=is_group)
+        if chat_muted:
+            popup.add_action(
+                "Unmute notifications",
+                lambda a=addr, g=is_group: self._sidebar_set_chat_muted(a, g, False),
+            )
+        else:
+            popup.add_action(
+                "Mute notifications",
+                lambda a=addr, g=is_group: self._sidebar_set_chat_muted(a, g, True),
+            )
+        popup.add_separator()
+        if is_group:
             popup.add_action(
                 "Edit title & members…",
                 lambda g=addr: self._show_group_editor_dialog(existing_group_id=g),
@@ -9355,6 +9743,108 @@ class ChatWindow(QtWidgets.QMainWindow):
                 tool_tip=menu_tt.TT_REMOVE_SAVED_PEER,
             )
         popup.show_at_global(self.contacts_list.mapToGlobal(pos))
+
+    def _sidebar_chat_is_pinned(self, chat_id: str, *, is_group: bool) -> bool:
+        if is_group:
+            meta = self._contact_book.group_ui.get(chat_id)
+            return bool(meta and meta.pinned)
+        norm = normalize_peer_address(chat_id) or chat_id
+        rec = self._contact_book.get(norm)
+        return bool(rec and rec.pinned)
+
+    def _sidebar_chat_is_muted(self, chat_id: str, *, is_group: bool) -> bool:
+        if is_group:
+            meta = self._contact_book.group_ui.get(chat_id)
+            return bool(meta and meta.notifications_muted)
+        norm = normalize_peer_address(chat_id) or chat_id
+        rec = self._contact_book.get(norm)
+        return bool(rec and rec.notifications_muted)
+
+    def _sidebar_set_chat_muted(self, chat_id: str, is_group: bool, muted: bool) -> None:
+        if is_group:
+            changed = set_group_notifications_muted(
+                self._contact_book, chat_id, muted=muted
+            )
+        else:
+            changed = set_peer_notifications_muted(
+                self._contact_book, chat_id, muted=muted
+            )
+        if changed:
+            self._save_contacts_book()
+            self._refresh_contacts_sidebar_list()
+
+    def _sidebar_next_pin_order(self, *, is_group: bool) -> int:
+        if is_group:
+            orders = [
+                int(m.pin_order)
+                for m in self._contact_book.group_ui.values()
+                if m.pinned
+            ]
+        else:
+            orders = [int(r.pin_order) for r in self._contact_book.contacts if r.pinned]
+        return (max(orders) if orders else -1) + 1
+
+    def _sidebar_set_chat_pin(self, chat_id: str, is_group: bool, pinned: bool) -> None:
+        order = self._sidebar_next_pin_order(is_group=is_group) if pinned else 0
+        if is_group:
+            changed = set_group_pin(
+                self._contact_book, chat_id, pinned=pinned, pin_order=order
+            )
+        else:
+            changed = set_peer_pin(
+                self._contact_book, chat_id, pinned=pinned, pin_order=order
+            )
+        if changed:
+            self._save_contacts_book()
+            self._refresh_contacts_sidebar_list()
+
+    def _sidebar_move_chat_pin(self, chat_id: str, is_group: bool, delta: int) -> None:
+        if delta == 0:
+            return
+        if is_group:
+            pinned = [
+                (gid, meta)
+                for gid, meta in self._contact_book.group_ui.items()
+                if meta.pinned
+            ]
+            pinned.sort(key=lambda item: int(item[1].pin_order))
+            ids = [gid for gid, _ in pinned]
+            idx = ids.index(chat_id) if chat_id in ids else -1
+            if idx < 0:
+                return
+            target = max(0, min(len(ids) - 1, idx + delta))
+            if target == idx:
+                return
+            ids.pop(idx)
+            ids.insert(target, chat_id)
+            changed = False
+            for order, gid in enumerate(ids):
+                changed = (
+                    set_group_pin(self._contact_book, gid, pinned=True, pin_order=order)
+                    or changed
+                )
+        else:
+            pinned = [r for r in self._contact_book.contacts if r.pinned]
+            pinned.sort(key=lambda r: int(r.pin_order))
+            ids = [r.addr for r in pinned]
+            norm = normalize_peer_address(chat_id) or chat_id
+            idx = ids.index(norm) if norm in ids else -1
+            if idx < 0:
+                return
+            target = max(0, min(len(ids) - 1, idx + delta))
+            if target == idx:
+                return
+            ids.pop(idx)
+            ids.insert(target, norm)
+            changed = False
+            for order, addr in enumerate(ids):
+                changed = (
+                    set_peer_pin(self._contact_book, addr, pinned=True, pin_order=order)
+                    or changed
+                )
+        if changed:
+            self._save_contacts_book()
+            self._refresh_contacts_sidebar_list()
 
     def _saved_peer_edit_name_note(self, addr: str) -> None:
         norm = normalize_peer_address(addr)
@@ -9615,7 +10105,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._history_loaded_for_peer = None
             self._history_entries = []
             self._history_dirty = False
-            self.chat_model.clear_items()
+            self._clear_chat_model_items()
             self.addr_edit.clear()
             self._sync_compose_draft_to_peer_key(None)
         self._schedule_compose_drafts_persist()
@@ -9903,12 +10393,12 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
 
     def _append_item(self, item: ChatItem) -> None:
-        """Добавить элемент в модель и прокрутить к нему."""
+        """Добавить элемент в модель; прокрутка только если лента «приклеена» к низу."""
         self.chat_model.add_item(item)
-        row = self.chat_model.rowCount() - 1
-        if row >= 0:
-            index = self.chat_model.index(row, 0)
-            self.chat_view.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtBottom)
+        if self._chat_stick_to_bottom:
+            self._scroll_chat_to_bottom()
+        else:
+            self._update_jump_bottom_button()
         if not self._chat_search_sync_suppressed:
             self._sync_chat_search_after_model_change()
 
@@ -10302,6 +10792,8 @@ class ChatWindow(QtWidgets.QMainWindow):
         ):
             self._layout_contacts_sidebar_row_widths()
             self._apply_sidebar_list_selection_backgrounds()
+        if obj is getattr(self, "chat_view", None) and event.type() == QtCore.QEvent.Type.Resize:
+            self._layout_jump_bottom_button()
         if event.type() == QtCore.QEvent.Type.KeyPress:
             ke = event
             if isinstance(ke, QtGui.QKeyEvent):
@@ -10474,6 +10966,15 @@ class ChatWindow(QtWidgets.QMainWindow):
     def handle_message(self, msg: ChatMessage) -> None:
         if msg.conversation_kind == "group" and msg.conversation_id:
             group_key = make_group_conversation_key(msg.conversation_id)
+            ts_iso = ""
+            try:
+                ts_iso = msg.timestamp.isoformat()
+            except Exception:
+                ts_iso = ""
+            if ts_iso and touch_group_activity(
+                self._contact_book, msg.conversation_id, ts_iso
+            ):
+                self._save_contacts_book()
             if msg.kind == "peer":
                 bump_unread_for_incoming_peer_message(
                     self._unread_by_peer,
@@ -10761,6 +11262,14 @@ class ChatWindow(QtWidgets.QMainWindow):
         else:
             return
 
+        if msg.kind == "peer":
+            if msg.conversation_kind == "group" and msg.conversation_id:
+                if self._sidebar_chat_is_muted(msg.conversation_id, is_group=True):
+                    return
+            elif msg.source_peer:
+                if self._sidebar_chat_is_muted(msg.source_peer, is_group=False):
+                    return
+
         # Peer: не спамим, если фокус на этом же диалоге; иначе — тост даже при активном окне.
         # connect: как раньше — только если окно не в фокусе.
         app = QtWidgets.QApplication.instance()
@@ -10904,8 +11413,33 @@ class ChatWindow(QtWidgets.QMainWindow):
             # Только Send Pic (G) помечен как inline image; Send File (F/D) — обычный файл
             is_image = getattr(info, "is_inline_image", False)
 
-            # Создаём сообщение прогресса в чате (для картинок — "Uploading/Receiving image")
+            # Core already posts a system "Receiving file…" start marker for
+            # incoming transfers. Progress bar is a separate row so the final
+            # "File received" can append at the end instead of replacing mid-list.
             self._transfer_is_image = is_image
+            if not info.is_sending and not is_image:
+                shown = os.path.basename(info.filename)
+                # Explicit start notice when core system line is off-chat (rare);
+                # skip if the previous row is already the same receive marker.
+                prev = self.chat_model.item_at(self.chat_model.rowCount() - 1)
+                already = (
+                    prev is not None
+                    and prev.kind in ("system", "info")
+                    and "Receiving file:" in (prev.text or "")
+                    and shown in (prev.text or "")
+                )
+                if not already:
+                    self._append_item(
+                        ChatItem(
+                            kind="system",
+                            timestamp=_utc_hms_now(),
+                            sender="FILE",
+                            text=(
+                                f"Peer started sending file: {shown} "
+                                f"({info.size:,} bytes)"
+                            ),
+                        )
+                    )
             self._append_item(
                 ChatItem(
                     kind="transfer",
@@ -10989,21 +11523,12 @@ class ChatWindow(QtWidgets.QMainWindow):
                         ),
                     )
                 else:
-                    # Сначала 100%, затем сообщение об успехе — чтобы не зависало на 99%
-                    self.chat_model.update_item(
-                        self._transfer_row,
-                        ChatItem(
-                            kind="transfer",
-                            timestamp="",
-                            sender="FILE",
-                            text=info.filename,
-                            progress=1.0,
-                            file_size=info.size,
-                            is_sending=info.is_sending,
-                        ),
-                    )
                     done_action = "sent" if info.is_sending else "received"
                     if done_action == "received":
+                        # Drop the mid-list progress row; keep the start marker;
+                        # append the final file notice at the end of the transcript.
+                        self.chat_model.remove_item(self._transfer_row)
+                        self._transfer_row = None
                         downloads_dir = get_downloads_dir()
                         saved_fp: Optional[str] = None
                         abs_fn = os.path.abspath(info.filename)
@@ -11014,8 +11539,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                         ):
                             saved_fp = abs_fn
                         disp_name = os.path.basename(abs_fn)
-                        self.chat_model.update_item(
-                            self._transfer_row,
+                        self._append_item(
                             ChatItem(
                                 kind="success",
                                 timestamp=_utc_hms_now(),
@@ -11044,7 +11568,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                                 retry_source_path=info.source_path,
                             ),
                         )
-                    self._transfer_row = None
+                        self._transfer_row = None
 
     async def ask_incoming_file_accept(self, filename: str, size: int) -> bool:
         """Асинхронный запрос подтверждения входящего файла для core."""
@@ -12378,14 +12902,34 @@ class ChatWindow(QtWidgets.QMainWindow):
                 live = ""
             if live and self.core.is_secure_live_for_peer(live):
                 self._focus_secure_live_peer_in_ui(live)
-        text = self.input_edit.plainTextForSend().strip()
-        if not text:
+        answer = self.input_edit.plainTextForSend().strip()
+        pending = self._pending_reply
+        if pending is not None:
+            wire = format_reply_quote(pending.author, pending.summary) + answer
+        else:
+            wire = answer
+        if not wire.strip():
             return
-        asyncio.create_task(self._send_text_ui_flow(text))
+        asyncio.create_task(
+            self._send_text_ui_flow(
+                wire,
+                answer_for_retry=answer,
+                clear_pending_reply=True,
+            )
+        )
 
-    async def _send_text_ui_flow(self, text: str) -> None:
+    async def _send_text_ui_flow(
+        self,
+        text: str,
+        *,
+        answer_for_retry: Optional[str] = None,
+        clear_pending_reply: bool = False,
+    ) -> None:
         self._status_send_in_flight = True
         self.refresh_status_label()
+        compose_restore = (
+            answer_for_retry if answer_for_retry is not None else text
+        )
         try:
             draft_key = self._compose_peer_key_from_ui()
             if self._active_group_id:
@@ -12409,6 +12953,8 @@ class ChatWindow(QtWidgets.QMainWindow):
                 if draft_key:
                     self._compose_drafts.pop(draft_key, None)
                 self.input_edit.clear()
+                if clear_pending_reply:
+                    self._clear_pending_reply()
                 self._schedule_compose_drafts_persist()
                 if self._active_group_id == active_group_id:
                     self._refresh_group_conversation_display(force=True)
@@ -12427,11 +12973,12 @@ class ChatWindow(QtWidgets.QMainWindow):
                 if draft_key:
                     self._compose_drafts.pop(draft_key, None)
                 self.input_edit.clear()
+                if clear_pending_reply:
+                    self._clear_pending_reply()
                 self._schedule_compose_drafts_persist()
             else:
-                # Keep text in the input when blocked (especially await-live-root),
-                # so user can press Connect and retry without retyping.
-                self.input_edit.setPlainTextForCompose(text)
+                # Keep answer in the input when blocked; quote stays on the bar.
+                self.input_edit.setPlainTextForCompose(compose_restore)
                 self.input_edit.setFocus()
                 if result.delivery_state == DELIVERY_STATE_FAILED:
                     self._append_failed_text_message(
@@ -12447,15 +12994,22 @@ class ChatWindow(QtWidgets.QMainWindow):
                 ):
                     self._last_auto_retry_started_at = time.monotonic()
                     self._auto_retry_send_task = asyncio.create_task(
-                        self._auto_connect_and_retry_send(text)
+                        self._auto_connect_and_retry_send(
+                            text, answer_for_retry=compose_restore
+                        )
                     )
         finally:
             self._status_send_in_flight = False
             self.refresh_status_label()
             self._refresh_connection_buttons()
 
-    async def _auto_connect_and_retry_send(self, text: str) -> None:
+    async def _auto_connect_and_retry_send(
+        self, text: str, *, answer_for_retry: Optional[str] = None
+    ) -> None:
         """Single-click flow: try live connect, then retry send once."""
+        compose_restore = (
+            answer_for_retry if answer_for_retry is not None else text
+        )
         try:
             addr = self.addr_edit.text().strip() or self._resolved_peer_addr_for_actions()
             if not addr:
@@ -12494,10 +13048,11 @@ class ChatWindow(QtWidgets.QMainWindow):
                     if dk:
                         self._compose_drafts.pop(dk, None)
                     self.input_edit.clear()
+                    self._clear_pending_reply()
                     self._schedule_compose_drafts_persist()
                     self.handle_system("Auto-connect succeeded, message sent.")
                 else:
-                    self.input_edit.setPlainTextForCompose(text)
+                    self.input_edit.setPlainTextForCompose(compose_restore)
                     self.input_edit.setFocus()
                     self.handle_system("Auto-connect finished, but send is still blocked. Message kept.")
             else:
@@ -12697,6 +13252,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         if self._compose_draft_active_key is not None:
             self._compose_drafts[self._compose_draft_active_key] = self.input_edit.plainTextForSend()
         self._schedule_compose_drafts_persist()
+        self._sync_compose_height_to_document()
 
     @QtCore.pyqtSlot()
     def _on_addr_editing_finished_for_drafts(self) -> None:
@@ -12724,6 +13280,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._compose_drafts = out
         self._compose_draft_active_key = active
         self.input_edit.setPlainTextForCompose(text)
+        self._clear_pending_reply()
         self._schedule_compose_drafts_persist()
         clear_unread_for_peer(self._unread_by_peer, active)
         self._update_unread_chrome()
@@ -12805,7 +13362,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._history_loaded_for_peer = None
         self._history_entries = []
         self._history_dirty = False
-        self.chat_model.clear_items()
+        self._clear_chat_model_items()
 
         header_text = self._group_display_name(
             conversation.state.group_id,
@@ -12889,7 +13446,7 @@ class ChatWindow(QtWidgets.QMainWindow):
             # иначе пропадают системные строки и бабл «Online! My Address».
             # Чистим только если реально показывали вставку офлайн-истории с маркерами.
             if self._chat_contains_injected_history_block():
-                self.chat_model.clear_items()
+                self._clear_chat_model_items()
             return
         if not self.core.get_identity_key_bytes():
             if _identity_retry < 25:
@@ -12912,7 +13469,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         # Не сносим системные строки старта (профиль, keyring, контакт…): только полная
         # перезагрузка пира или замена уже вставленного блока истории.
         if prev_loaded is not None or self._chat_contains_injected_history_block():
-            self.chat_model.clear_items()
+            self._clear_chat_model_items()
         self._try_load_history()
 
     def _try_load_history(self) -> None:
@@ -13194,19 +13751,33 @@ class ChatWindow(QtWidgets.QMainWindow):
             return None
         return dlg.passphrase()
 
-    def _send_local_path(self, path: str) -> None:
-        self._send_local_paths([path])
+    def _send_local_path(self, path: str, *, as_image: bool | None = None) -> None:
+        self._send_local_paths([path], as_image=as_image)
 
-    def _send_local_paths(self, paths: list[str]) -> None:
-        """Queue one or more local files (images use send_image; others send_file)."""
+    def _send_local_paths(
+        self, paths: list[str], *, as_image: bool | None = None
+    ) -> None:
+        """Queue local files; ``as_image`` is Send picture / Send file intent.
+
+        ``True`` → always send_image (invalid non-images error out).
+        ``False`` → always send_file (PNG as document).
+        ``None`` → extension heuristic (drag-drop).
+        """
+        from i2pchat.presentation.media_kind import is_inline_image_path, route_send
+
         peer = self._outbound_peer_arg()
 
         async def _queue() -> None:
             for path in paths:
                 if not path:
                     continue
-                low = path.lower()
-                if low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                api = route_send(path, as_image=as_image)
+                if api == "send_image":
+                    if as_image is True and not is_inline_image_path(path):
+                        self.handle_error(
+                            f"Unsupported image type for Send picture: {path}"
+                        )
+                        continue
                     ok, err, _ = validate_image(path)
                     if not ok:
                         self.handle_error(err or "Invalid image file")
@@ -13980,7 +14551,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._active_group_id = None
         self._history_entries = []
         self._history_dirty = False
-        self.chat_model.clear_items()
+        self._clear_chat_model_items()
         self.profile = profile_resolved
         clean_profile = self.profile.rstrip(" •")
         self._window_title_base = f"I2PChat @ {clean_profile}"
@@ -14021,7 +14592,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         if not paths:
             return
-        self._send_local_paths(paths)
+        self._send_local_paths(paths, as_image=False)
 
     @QtCore.pyqtSlot()
     def on_send_pic_clicked(self) -> None:
@@ -14033,7 +14604,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         )
         if not paths:
             return
-        self._send_local_paths(paths)
+        self._send_local_paths(paths, as_image=True)
 
     @QtCore.pyqtSlot(str)
     def on_clipboard_image_ready(self, path: str) -> None:
@@ -14068,22 +14639,48 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _on_quote_jump_requested(self, row: int, quoted: str) -> None:
         """Прокрутить чат к исходному сообщению цитаты (сначала выше ответа, затем ниже)."""
         wanted = quoted.rstrip("\n")
-        if not wanted:
+        if not wanted or wanted.strip() == DELETED_REPLY_MARKER:
             return
         total = self.chat_model.rowCount()
         for r in [*range(row - 1, -1, -1), *range(row + 1, total)]:
             it = self.chat_model.item_at(r)
-            if it is not None and it.kind in ("me", "peer") and it.text.rstrip("\n") == wanted:
+            if it is None or it.kind not in ("me", "peer", "transfer", "image_inline", "success"):
+                continue
+            body = (it.text or "").rstrip("\n")
+            att = (it.file_name or "").strip() or os.path.basename(
+                it.image_path or it.saved_file_path or ""
+            )
+            if body == wanted or summarize_for_reply(body, attachment_name=att or None) == wanted:
                 self._scroll_chat_to_row(r)
                 return
 
-    @QtCore.pyqtSlot(str)
-    def _on_reply_requested(self, block: str) -> None:
-        """Вставить цитату в поле ввода (конец черновика)."""
-        cur = self.input_edit.plainTextForSend()
-        sep = "\n\n" if cur.strip() else ""
-        self.input_edit.setPlainTextForCompose(f"{cur}{sep}{block}")
+    def _clear_pending_reply(self) -> None:
+        self._pending_reply = None
+        bar = getattr(self, "_reply_quote_bar", None)
+        if bar is not None:
+            bar.setVisible(False)
+        label = getattr(self, "_reply_quote_label", None)
+        if label is not None:
+            label.clear()
+
+    def _set_pending_reply(self, pending: PendingReply) -> None:
+        self._pending_reply = pending
+        label = getattr(self, "_reply_quote_label", None)
+        bar = getattr(self, "_reply_quote_bar", None)
+        if label is not None:
+            who = pending.author.strip() or "message"
+            label.setText(f"{tr('ui.reply_quote_bar')} @{who}: {pending.summary}")
+            label.setToolTip(pending.source_text or pending.summary)
+        if bar is not None:
+            bar.setVisible(True)
         self.input_edit.setFocus()
+
+    @QtCore.pyqtSlot(object)
+    def _on_reply_requested(self, pending: object) -> None:
+        """Show a read-only one-line quote bar above compose (replaces any prior quote)."""
+        if not isinstance(pending, PendingReply):
+            return
+        self._set_pending_reply(pending)
         self._on_compose_text_changed()
 
     @QtCore.pyqtSlot(int)

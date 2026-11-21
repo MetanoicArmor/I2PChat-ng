@@ -337,8 +337,9 @@ private:
     void spawn_group_control(std::string group_id, nlohmann::json payload);
     asio::awaitable<void> deliver_group_control(std::string group_id, nlohmann::json payload);
     void on_established(PeerLink& link);
-    /// Redial a peer that already had a secure channel, 10s then 20… up to 60s.
-    void schedule_auto_reconnect(Peer& peer);
+    /// Redial a peer that already had a secure channel (20s…180s backoff).
+    /// ``immediate`` skips the first wait (channel desync / replay tear-down).
+    void schedule_auto_reconnect(Peer& peer, bool immediate = false);
     /// Offer the peer a BlindBox root if this side is the one that offers and
     /// the channel has none, or the current one is due for replacement.
     void offer_blindbox_root(const std::string& peer_addr);

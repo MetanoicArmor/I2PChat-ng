@@ -606,7 +606,10 @@ class TestImageTransferHardening(unittest.IsolatedAsyncioTestCase):
         )
         await core.receive_loop(conn, peer_id=k)
         self.assertFalse(
-            any("Replay protection" in e for e in errors),
+            any(
+                "Replay protection" in e or "Secure channel out of sync" in e
+                for e in errors
+            ),
             errors,
         )
         # The end marker is only handled after the stalled chunk. A dropped

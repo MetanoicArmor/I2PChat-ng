@@ -10,6 +10,12 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
+from i2pchat.presentation.media_kind import (
+    INLINE_IMAGE_EXTENSIONS,
+    is_inline_image_path,
+    route_send,
+)
+
 # DropAction literals
 SEND_FILE = "send_file"
 SEND_IMAGE = "send_image"
@@ -17,22 +23,19 @@ REJECT = "reject"
 
 DropAction = str  # one of the three constants above
 
-_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+_IMAGE_EXTENSIONS = INLINE_IMAGE_EXTENSIONS
 
 # 100 MB default limit
 _MAX_FILE_SIZE = 100 * 1024 * 1024
 
 
 def _is_image_path(path: str) -> bool:
-    _, ext = os.path.splitext(path)
-    return ext.lower() in _IMAGE_EXTENSIONS
+    return is_inline_image_path(path)
 
 
 def action_for_path(path: str) -> DropAction:
     """Image extensions → send_image; everything else → send_file."""
-    if _is_image_path(path):
-        return SEND_IMAGE
-    return SEND_FILE
+    return route_send(path, as_image=None)
 
 
 def classify_drop_paths(urls: Sequence[str]) -> list[tuple[str, DropAction]]:

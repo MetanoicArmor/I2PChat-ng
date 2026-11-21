@@ -75,6 +75,11 @@ class ContactRecord:
     last_activity_ts: str = ""
     # Per-peer auto-delete: drop messages older than N days. 0 = no override (use global policy).
     history_retention_days: int = 0
+    # Chats list: pinned rows stay above MRU; pin_order ranks among pinned (lower = higher).
+    pinned: bool = False
+    pin_order: int = 0
+    # Skip system notifications for this peer when True.
+    notifications_muted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -86,6 +91,11 @@ class ContactRecord:
         }
         if self.history_retention_days > 0:
             out["history_retention_days"] = self.history_retention_days
+        if self.pinned:
+            out["pinned"] = True
+            out["pin_order"] = int(self.pin_order)
+        if self.notifications_muted:
+            out["notifications_muted"] = True
         return out
 
     @staticmethod
@@ -99,6 +109,14 @@ class ContactRecord:
             v = d.get(key, "")
             return v if isinstance(v, str) else str(v) if v is not None else ""
 
+        pinned_raw = d.get("pinned", False)
+        pinned = pinned_raw is True or pinned_raw == 1 or pinned_raw == "true"
+        try:
+            pin_order = int(d.get("pin_order", 0) or 0)
+        except (TypeError, ValueError):
+            pin_order = 0
+        muted_raw = d.get("notifications_muted", False)
+        muted = muted_raw is True or muted_raw == 1 or muted_raw == "true"
         return ContactRecord(
             addr=addr,
             display_name=_s("display_name").strip(),
@@ -108,6 +126,50 @@ class ContactRecord:
             history_retention_days=coerce_peer_retention_days(
                 d.get("history_retention_days")
             ),
+            pinned=bool(pinned),
+            pin_order=max(0, pin_order),
+            notifications_muted=bool(muted),
+        )
+
+
+@dataclass
+class GroupUiMeta:
+    """Local Chats UI fields for a group (not part of the signed GroupState)."""
+
+    pinned: bool = False
+    pin_order: int = 0
+    last_activity_ts: str = ""
+    notifications_muted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.pinned:
+            out["pinned"] = True
+            out["pin_order"] = int(self.pin_order)
+        if self.last_activity_ts:
+            out["last_activity_ts"] = self.last_activity_ts
+        if self.notifications_muted:
+            out["notifications_muted"] = True
+        return out
+
+    @staticmethod
+    def from_dict(d: Any) -> "GroupUiMeta":
+        if not isinstance(d, dict):
+            return GroupUiMeta()
+        pinned_raw = d.get("pinned", False)
+        pinned = pinned_raw is True or pinned_raw == 1 or pinned_raw == "true"
+        try:
+            pin_order = int(d.get("pin_order", 0) or 0)
+        except (TypeError, ValueError):
+            pin_order = 0
+        ts = d.get("last_activity_ts", "")
+        muted_raw = d.get("notifications_muted", False)
+        muted = muted_raw is True or muted_raw == 1 or muted_raw == "true"
+        return GroupUiMeta(
+            pinned=bool(pinned),
+            pin_order=max(0, pin_order),
+            last_activity_ts=ts if isinstance(ts, str) else str(ts or ""),
+            notifications_muted=bool(muted),
         )
 
 
@@ -115,6 +177,8 @@ class ContactRecord:
 class ContactBook:
     contacts: list[ContactRecord] = field(default_factory=list)
     last_active_peer: Optional[str] = None
+    # group_id -> local pin / last-activity for the Chats list
+    group_ui: dict[str, GroupUiMeta] = field(default_factory=dict)
 
     def peer_index(self, addr: str) -> int:
         for i, r in enumerate(self.contacts):
@@ -167,7 +231,22 @@ def parse_book_from_json(data: Any) -> ContactBook:
     if lap is not None and lap not in seen:
         lap = None
 
-    return ContactBook(contacts=records, last_active_peer=lap)
+    group_ui: dict[str, GroupUiMeta] = {}
+    raw_groups = data.get("group_ui")
+    if isinstance(raw_groups, dict):
+        for gid, meta in raw_groups.items():
+            key = str(gid).strip()
+            if not key:
+                continue
+            parsed = GroupUiMeta.from_dict(meta)
+            if parsed.pinned or parsed.last_activity_ts or parsed.notifications_muted:
+                group_ui[key] = parsed
+
+    return ContactBook(contacts=records, last_active_peer=lap, group_ui=group_ui)
+
+
+def _group_ui_worth_keeping(meta: GroupUiMeta) -> bool:
+    return bool(meta.pinned or meta.last_activity_ts or meta.notifications_muted)
 
 
 def book_to_json_dict(book: ContactBook) -> dict[str, Any]:
@@ -175,11 +254,19 @@ def book_to_json_dict(book: ContactBook) -> dict[str, Any]:
     lap = book.last_active_peer
     if lap is not None:
         lap = normalize_peer_address(lap)
-    return {
+    out: dict[str, Any] = {
         "version": BOOK_VERSION,
         "last_active_peer": lap,
         "contacts": out_contacts,
     }
+    group_ui = {
+        gid: meta.to_dict()
+        for gid, meta in book.group_ui.items()
+        if _group_ui_worth_keeping(meta)
+    }
+    if group_ui:
+        out["group_ui"] = group_ui
+    return out
 
 
 def load_book(path: str, *, identity_key: bytes | None = None) -> ContactBook:
@@ -279,6 +366,94 @@ def set_peer_profile(
         return False
     rec.display_name = display_name
     rec.note = note
+    return True
+
+
+def set_peer_pin(book: ContactBook, addr: str, *, pinned: bool, pin_order: int = 0) -> bool:
+    """Pin or unpin a direct chat. Returns True if the book changed."""
+    addr = normalize_peer_address(addr) or ""
+    if not addr:
+        return False
+    pin_order = max(0, int(pin_order))
+    rec = book.get(addr)
+    if rec is None:
+        if not pinned:
+            return False
+        remember_peer(book, addr)
+        rec = book.get(addr)
+    if rec is None:
+        return False
+    if rec.pinned == pinned and (not pinned or rec.pin_order == pin_order):
+        return False
+    rec.pinned = bool(pinned)
+    rec.pin_order = pin_order if pinned else 0
+    return True
+
+
+def set_group_pin(
+    book: ContactBook, group_id: str, *, pinned: bool, pin_order: int = 0
+) -> bool:
+    gid = (group_id or "").strip()
+    if not gid:
+        return False
+    pin_order = max(0, int(pin_order))
+    meta = book.group_ui.get(gid) or GroupUiMeta()
+    if meta.pinned == pinned and (not pinned or meta.pin_order == pin_order):
+        return False
+    meta.pinned = bool(pinned)
+    meta.pin_order = pin_order if pinned else 0
+    if _group_ui_worth_keeping(meta):
+        book.group_ui[gid] = meta
+    else:
+        book.group_ui.pop(gid, None)
+    return True
+
+
+def set_peer_notifications_muted(book: ContactBook, addr: str, *, muted: bool) -> bool:
+    addr = normalize_peer_address(addr) or ""
+    if not addr:
+        return False
+    rec = book.get(addr)
+    if rec is None:
+        if not muted:
+            return False
+        remember_peer(book, addr)
+        rec = book.get(addr)
+    if rec is None:
+        return False
+    if rec.notifications_muted == bool(muted):
+        return False
+    rec.notifications_muted = bool(muted)
+    return True
+
+
+def set_group_notifications_muted(
+    book: ContactBook, group_id: str, *, muted: bool
+) -> bool:
+    gid = (group_id or "").strip()
+    if not gid:
+        return False
+    meta = book.group_ui.get(gid) or GroupUiMeta()
+    if meta.notifications_muted == bool(muted):
+        return False
+    meta.notifications_muted = bool(muted)
+    if _group_ui_worth_keeping(meta):
+        book.group_ui[gid] = meta
+    else:
+        book.group_ui.pop(gid, None)
+    return True
+
+
+def touch_group_activity(book: ContactBook, group_id: str, ts_iso: str) -> bool:
+    gid = (group_id or "").strip()
+    ts_iso = (ts_iso or "").strip()
+    if not gid or not ts_iso:
+        return False
+    meta = book.group_ui.get(gid) or GroupUiMeta()
+    if meta.last_activity_ts == ts_iso:
+        return False
+    meta.last_activity_ts = ts_iso
+    book.group_ui[gid] = meta
     return True
 
 

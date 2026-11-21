@@ -4,8 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -26,17 +24,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -51,6 +52,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -72,15 +74,20 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -95,6 +102,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.PlatformTextStyle
@@ -106,7 +114,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -125,6 +132,7 @@ import org.i2pchat.android.ui.MediaViewerDialog
 import org.i2pchat.android.ui.MediaViewerRequest
 import org.i2pchat.android.ui.MediaViewerRequestSaver
 import org.i2pchat.android.ui.PeerAvatar
+import org.i2pchat.android.ui.TransferProgressBars
 import org.i2pchat.android.ui.insertAtCaret
 import org.i2pchat.android.ui.theme.ChatConversationBackground
 import org.i2pchat.android.ui.theme.I2PChatTheme
@@ -142,18 +150,19 @@ class MainActivity : ComponentActivity() {
             application as I2PChatApp,
             ViewModelProvider.AndroidViewModelFactory.getInstance(application),
         )[ChatBridge::class.java]
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-        }
         bridge.consumeOpenIntent(intent)
         setContent {
             val state by bridge.state.collectAsStateWithLifecycle()
             I2PChatTheme(theme = state.theme) {
                 I2PChatRoot(bridge)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::bridge.isInitialized) {
+            bridge.refreshBackgroundAccess()
         }
     }
 
@@ -168,12 +177,65 @@ class MainActivity : ComponentActivity() {
 fun I2PChatRoot(bridge: ChatBridge) {
     val state by bridge.state.collectAsStateWithLifecycle()
     val nav = rememberNavController()
+    val context = LocalContext.current
+    val activity = context as? Activity
+    LaunchedEffect(Unit) {
+        bridge.refreshBackgroundAccess()
+    }
     LaunchedEffect(state.openChatNonce) {
         if (state.openChatNonce == 0L || !state.running) return@LaunchedEffect
         nav.navigate("conversation") { launchSingleTop = true }
     }
+    val requestBattery = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        bridge.refreshBackgroundAccess()
+    }
+    val requestNotifications = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        bridge.refreshBackgroundAccess()
+        if (activity != null && BackgroundAccess.needsBatteryExemption(context)) {
+            runCatching { requestBattery.launch(BackgroundAccess.batteryExemptionIntent(context)) }
+                .onFailure {
+                    runCatching { requestBattery.launch(BackgroundAccess.batterySettingsIntent()) }
+                }
+        }
+    }
+    fun requestBackgroundAccess() {
+        bridge.markBackgroundPromptSeen()
+        when {
+            BackgroundAccess.needsNotificationPermission(context) -> {
+                requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            BackgroundAccess.needsBatteryExemption(context) -> {
+                runCatching { requestBattery.launch(BackgroundAccess.batteryExemptionIntent(context)) }
+                    .onFailure {
+                        runCatching { requestBattery.launch(BackgroundAccess.batterySettingsIntent()) }
+                    }
+            }
+            else -> bridge.refreshBackgroundAccess()
+        }
+    }
     if (state.tofu != null) {
         TofuDialog(state.tofu!!, onAccept = { bridge.answerTofu(true) }, onReject = { bridge.answerTofu(false) })
+    }
+    if (!state.uiPrefs.backgroundPromptSeen && state.nativeLoaded) {
+        AlertDialog(
+            onDismissRequest = { bridge.markBackgroundPromptSeen() },
+            title = { Text(stringResource(R.string.background_access_title)) },
+            text = { Text(stringResource(R.string.background_access_body)) },
+            confirmButton = {
+                TextButton(onClick = { requestBackgroundAccess() }) {
+                    Text(stringResource(R.string.background_access_allow))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { bridge.markBackgroundPromptSeen() }) {
+                    Text(stringResource(R.string.background_access_later))
+                }
+            },
+        )
     }
     if (!state.nativeLoaded) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
@@ -401,15 +463,6 @@ fun openReceivedFolder(context: android.content.Context, path: String) {
     runCatching { context.startActivity(Intent.createChooser(intent, dir.name)) }
 }
 
-/** Same quote block the desktop client inserts into the compose field. */
-fun formatReplyQuote(sender: String, text: String): String {
-    val who = sender.trim().ifBlank { "message" }
-    val quoted = text.trimEnd('\n').lines().joinToString("\n") { line ->
-        if (line.isEmpty()) ">" else "> $line"
-    }
-    return "@$who wrote:\n$quoted\n\n"
-}
-
 @Composable
 fun MessageActionsDialog(
     msg: MessageUi,
@@ -424,14 +477,15 @@ fun MessageActionsDialog(
     onSaveFile: ((String) -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
 ) {
-    val path = msg.imagePath.ifBlank { msg.filePath }
+    val att = msg.attachment
+    val path = att?.path.orEmpty().ifBlank { msg.imagePath.ifBlank { msg.filePath } }
+    val memoryKey = att?.memoryKey.orEmpty().ifBlank { msg.memoryImage }
+    val sealedId = att?.sealedId.orEmpty().ifBlank { msg.sealedFile }
     val folder = path.takeIf { it.isNotBlank() }?.let { File(it).parentFile }?.takeIf {
         it.isDirectory && (it.name == "downloads" || it.name == "images")
     }
-    val plain = msg.text.isNotBlank() &&
-        msg.imagePath.isBlank() &&
-        msg.memoryImage.isBlank() &&
-        !msg.text.startsWith("[file] ")
+    val plain = msg.text.isNotBlank() && att == null
+    val canReply = plain || att != null || msg.fileCaption.isNotBlank()
     val detail = msg.deliveryHint.ifBlank { msg.deliveryReason }.trim()
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -445,13 +499,13 @@ fun MessageActionsDialog(
                     }
                     TextButton(onClick = { onCopy(path) }) { Text(stringResource(R.string.menu_copy_path)) }
                 }
-                if (msg.memoryImage.isNotBlank() && onSaveMemoryImage != null) {
-                    TextButton(onClick = { onSaveMemoryImage(msg.memoryImage) }) {
+                if (memoryKey.isNotBlank() && onSaveMemoryImage != null) {
+                    TextButton(onClick = { onSaveMemoryImage(memoryKey) }) {
                         Text(stringResource(R.string.action_save_as))
                     }
                 }
-                if (msg.sealedFile.isNotBlank() && onSaveSealed != null) {
-                    TextButton(onClick = { onSaveSealed(msg.sealedFile) }) {
+                if (sealedId.isNotBlank() && onSaveSealed != null) {
+                    TextButton(onClick = { onSaveSealed(sealedId) }) {
                         Text(stringResource(R.string.action_save_as))
                     }
                 }
@@ -470,7 +524,7 @@ fun MessageActionsDialog(
                         }
                     }
                 }
-                if (plain) {
+                if (canReply) {
                     TextButton(onClick = onReply) { Text(stringResource(R.string.menu_reply)) }
                 }
                 if (msg.retryable && plain) {
@@ -1163,6 +1217,14 @@ fun StatusScreen(bridge: ChatBridge, nav: NavHostController) {
 }
 
 
+/** True when the last list item is in view (1-item slack for partial last rows). */
+private fun LazyListState.isNearBottom(slack: Int = 1): Boolean {
+    val info = layoutInfo
+    val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return true
+    if (info.totalItemsCount <= 0) return true
+    return lastVisible.index >= info.totalItemsCount - 1 - slack
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
@@ -1170,16 +1232,20 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
     val id = state.selectedId
     val group = state.selectedIsGroup
     val context = LocalContext.current
+    val density = LocalDensity.current
     var emoji by remember { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
     val composeFocus = remember { FocusRequester() }
-    // Track caret explicitly so emoji inserts land at the selection and leave the caret after.
+    // Local TextFieldValue is the source of truth while typing. Feeding StateFlow
+    // compose back through LaunchedEffect drops IME composition and on some keyboards
+    // (notably Gboard) re-commits the last word when Enter inserts a newline.
     var composeField by remember(id) {
         mutableStateOf(TextFieldValue(state.compose, TextRange(state.compose.length)))
     }
     LaunchedEffect(state.compose) {
-        if (composeField.text != state.compose) {
-            composeField = TextFieldValue(state.compose, TextRange(state.compose.length))
+        // External clears only (send / draft wipe). Never clobber an in-progress edit.
+        if (state.compose.isEmpty() && composeField.text.isNotEmpty()) {
+            composeField = TextFieldValue()
         }
     }
     val scope = rememberCoroutineScope()
@@ -1200,6 +1266,8 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         mutableStateOf(null)
     }
     val list = rememberLazyListState()
+    // Follow the latest message unless the user scrolled the history away from the bottom.
+    var stickToBottom by remember(id) { mutableStateOf(true) }
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
@@ -1232,8 +1300,18 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
         if (uri != null && id != null && peer.isNotBlank()) bridge.saveSealedFile(peer, id, uri)
     }
     LaunchedEffect(id, group) { bridge.selectConversation(id, group) }
-    LaunchedEffect(state.messages.size) {
-        if (state.messages.isNotEmpty()) list.scrollToItem(state.messages.lastIndex)
+    DisposableEffect(id, group) {
+        bridge.setConversationVisible(true)
+        onDispose { bridge.setConversationVisible(false) }
+    }
+    LaunchedEffect(list, id) {
+        snapshotFlow { list.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { scrolling ->
+                if (!scrolling) {
+                    stickToBottom = list.isNearBottom()
+                }
+            }
     }
     val conversation = state.conversations.firstOrNull { it.addr == id }
     val title = conversation?.title ?: id.take(18)
@@ -1382,11 +1460,27 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
             val shown = if (!finding || search.isBlank()) state.messages else state.messages.filter {
                 it.text.contains(search, true) || it.sender.contains(search, true)
             }
+            val imeBottomPx = WindowInsets.ime.getBottom(density)
+            suspend fun scrollToBottomIfSticky() {
+                if (!stickToBottom || shown.isEmpty() || search.isNotBlank()) return
+                list.animateScrollToItem(shown.lastIndex)
+            }
             LaunchedEffect(shown.size) {
-                if (shown.isEmpty() || search.isNotBlank()) return@LaunchedEffect
-                val lastVisible = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-                val atBottom = lastVisible == null || lastVisible >= shown.lastIndex - 1
-                if (atBottom) list.animateScrollToItem(shown.lastIndex)
+                scrollToBottomIfSticky()
+            }
+            // IME open/close and emoji↔keyboard swap resize the list; keep the end in frame when sticky.
+            LaunchedEffect(imeBottomPx, emoji) {
+                if (!stickToBottom || shown.isEmpty() || search.isNotBlank()) return@LaunchedEffect
+                delay(32)
+                list.animateScrollToItem(shown.lastIndex)
+            }
+            // Multiline compose growth shrinks the history viewport the same way IME does.
+            var composerHeightPx by remember(id) { mutableIntStateOf(0) }
+            LaunchedEffect(composerHeightPx) {
+                if (composerHeightPx <= 0) return@LaunchedEffect
+                if (!stickToBottom || shown.isEmpty() || search.isNotBlank()) return@LaunchedEffect
+                delay(16)
+                list.animateScrollToItem(shown.lastIndex)
             }
             messageMenu?.let { msg ->
                 MessageActionsDialog(
@@ -1404,9 +1498,17 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                             msg.sender.isNotBlank() -> msg.sender
                             else -> title
                         }
-                        val quote = formatReplyQuote(author, msg.text)
-                        val draft = state.compose
-                        bridge.setCompose(if (draft.isBlank()) quote else "$draft\n\n$quote")
+                        val attachmentName = msg.attachment?.displayName?.ifBlank { null }
+                            ?: msg.fileCaption.ifBlank { null }
+                        val summary = summarizeForReply(msg.text, attachmentName)
+                        bridge.setPendingReply(
+                            PendingReply(
+                                author = author,
+                                summary = summary.ifBlank { attachmentName ?: "message" },
+                                sourceText = msg.text,
+                                messageId = msg.messageId,
+                            ),
+                        )
                         messageMenu = null
                     },
                     onRetry = {
@@ -1492,6 +1594,26 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
                 }
+                if (!stickToBottom && shown.isNotEmpty()) {
+                    SmallFloatingActionButton(
+                        onClick = {
+                            stickToBottom = true
+                            scope.launch {
+                                list.animateScrollToItem(shown.lastIndex)
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp),
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = stringResource(R.string.cd_scroll_to_bottom),
+                        )
+                    }
+                }
             }
             if (emoji) {
                 LazyVerticalGrid(columns = GridCells.Adaptive(44.dp), modifier = Modifier.height(180.dp)) {
@@ -1510,11 +1632,15 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     }
                 }
             }
+            TransferProgressBars(
+                transfers = state.transfers.filter { it.peer == id },
+            )
             KeetComposer(
                 value = composeField,
                 onValueChange = { next ->
+                    // Apply synchronously first so the IME feedback loop never sees a stale value.
                     composeField = next
-                    if (next.text != state.compose) bridge.setCompose(next.text)
+                    bridge.setCompose(next.text)
                 },
                 onSend = { bridge.send() },
                 onToggleEmoji = {
@@ -1535,6 +1661,11 @@ fun ConversationScreen(bridge: ChatBridge, nav: NavHostController) {
                     if (emoji) emoji = false
                     keyboard?.show()
                 },
+                onHeightChanged = { height ->
+                    if (height != composerHeightPx) composerHeightPx = height
+                },
+                pendingReply = state.pendingReply,
+                onClearPendingReply = { bridge.clearPendingReply() },
             )
             LaunchedEffect(state.inviteToken) {
                 if (state.inviteToken.isNotBlank()) {
@@ -1553,6 +1684,39 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
     val context = LocalContext.current
     var maxMessages by remember { mutableStateOf(state.uiPrefs.historyMaxMessages.toString()) }
     var days by remember { mutableStateOf(state.uiPrefs.historyRetentionDays.toString()) }
+    val requestBattery = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { bridge.refreshBackgroundAccess() }
+    val requestNotifications = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        bridge.refreshBackgroundAccess()
+        if (BackgroundAccess.needsBatteryExemption(context)) {
+            runCatching { requestBattery.launch(BackgroundAccess.batteryExemptionIntent(context)) }
+                .onFailure {
+                    runCatching { requestBattery.launch(BackgroundAccess.batterySettingsIntent()) }
+                }
+        }
+    }
+    fun requestBackgroundAccess() {
+        when {
+            BackgroundAccess.needsNotificationPermission(context) -> {
+                requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            BackgroundAccess.needsBatteryExemption(context) -> {
+                runCatching { requestBattery.launch(BackgroundAccess.batteryExemptionIntent(context)) }
+                    .onFailure {
+                        runCatching { requestBattery.launch(BackgroundAccess.batterySettingsIntent()) }
+                    }
+            }
+            else -> {
+                bridge.refreshBackgroundAccess()
+                if (!BackgroundAccess.notificationsGranted(context)) {
+                    BackgroundAccess.openAppNotificationSettings(context)
+                }
+            }
+        }
+    }
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         bridge.setOwnAvatarFromUri(uri) { ok ->
@@ -1740,6 +1904,33 @@ fun SettingsScreen(bridge: ChatBridge, nav: NavHostController) {
                     bridge.saveRetention(maxMessages.toIntOrNull() ?: 1000, days.toIntOrNull() ?: 0)
                 }) { Text(stringResource(R.string.save_retention)) }
                 Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.background_access_title), fontWeight = FontWeight.SemiBold)
+                Text(
+                    stringResource(
+                        R.string.background_access_status,
+                        stringResource(
+                            if (state.uiPrefs.backgroundAllowed) {
+                                R.string.background_access_granted
+                            } else {
+                                R.string.background_access_denied
+                            },
+                        ),
+                    ),
+                )
+                Text(
+                    stringResource(R.string.background_access_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (!state.uiPrefs.backgroundAllowed) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { requestBackgroundAccess() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.background_access_enable))
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
                 Text(stringResource(R.string.foreground_note))
         }
     }

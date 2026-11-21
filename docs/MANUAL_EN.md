@@ -66,8 +66,8 @@ After you choose a profile, the main chat window opens:
   On important network/security changes and errors, the status row is temporarily expanded for readability, then returns to normal compact behavior.
 - **Theme switch** — to the right of the status row (sun/moon icon). Toggles `ligth` and `night`.
 - **Saved peers** — optional **left** sidebar with the per-profile contact book; details in **§3.1**.
-- **Chat area** — shows your and peer messages, feedback on your actions, and file transfer progress. Network service messages (tunnels, handshakes, connects/disconnects) live on the **Status** page (see **§3.2**). You can select and copy message text (right‑click or context menu).
-- **Message input** — below the chat: type your text. **By default**, **macOS** uses **Enter** to send and **Shift+Enter** for a new line; **Windows/Linux** use **Enter** for a new line and **Ctrl+Enter** to send. On **macOS**, **Command+Enter** and **Ctrl+Enter** both send in either mode. In the **`⋯`** menu you can turn **Enter sends message: ON/OFF** for your preference — when ON, **Enter** sends and **Shift+Enter** inserts a new line; when OFF, **Enter** inserts a new line. The placeholder hint under the field matches the active mode. Setting is saved in **`ui_prefs.json`**. You can **paste a raster image** from the clipboard (**Ctrl+V** / **⌘V** or **Paste** in the field’s menu); it is sent like **Send picture** (PNG/JPEG/WebP).
+- **Chat area** — shows your and peer messages, feedback on your actions, and file transfer progress. Network service messages (tunnels, handshakes, connects/disconnects) live on the **Status** page (see **§3.2**). You can select and copy message text (right‑click or context menu). While you stay near the bottom, new messages keep the view pinned there; if you scroll up to read history, pinning pauses and a **↓** button (tooltip: scroll to latest) jumps back and resumes follow mode.
+- **Message input** — below the chat: type your text. The compose pane grows with wrapped lines up to a modest cap (about six lines) and keeps the transcript pinned when you were already at the bottom. **By default**, **macOS** uses **Enter** to send and **Shift+Enter** for a new line; **Windows/Linux** use **Enter** for a new line and **Ctrl+Enter** to send. On **macOS**, **Command+Enter** and **Ctrl+Enter** both send in either mode. In the **`⋯`** menu you can turn **Enter sends message: ON/OFF** for your preference — when ON, **Enter** sends and **Shift+Enter** inserts a new line; when OFF, **Enter** inserts a new line. The placeholder hint under the field matches the active mode. Setting is saved in **`ui_prefs.json`**. You can **paste a raster image** from the clipboard (**Ctrl+V** / **⌘V** or **Paste** in the field’s menu); it is sent like **Send picture** (PNG/JPEG/WebP).
 - **Actions bar** — at the bottom: peer address, connection buttons, and the **`⋯`** menu (see section 4).
 
 Use **Connect** for live chat and the first BlindBox bootstrap session. If BlindBox is already ready, sending text can go straight to the offline queue even without an active live connection.
@@ -93,7 +93,7 @@ The app opens on the **Status** page so you can see whether the messenger is rea
 
 The link state of each contact is shown next to the contact instead of chat messages: a green dot means connected, yellow means connecting. In the TUI it appears in the status bar next to the peer address.
 
-**TUI input:** **Enter** sends; a new line is **Shift+Enter**, **Alt+Enter**, or **Ctrl+J**. **Ctrl+Enter** also inserts a new line, but only in terminals that report it separately from Enter (kitty keyboard protocol); most terminals send it as a plain Enter. **Ctrl+S** still sends.
+**TUI input:** **Enter** sends; a new line is **Shift+Enter**, **Alt+Enter**, or **Ctrl+J**. **Ctrl+Enter** also inserts a new line, but only in terminals that report it separately from Enter (kitty keyboard protocol); most terminals send it as a plain Enter. **Ctrl+S** still sends. The compose box grows with text up to about six lines. The transcript follows new lines while you stay at the bottom; scroll up to pause follow mode, then **Ctrl+End** (footer: **Bottom**) jumps to the latest line and resumes it.
 
 ### 4. Actions bar (connection and profiles)
 
@@ -129,8 +129,8 @@ Click the **`⋯`** button or press **Ctrl+.** (Windows/Linux) / **⌘+.** (macO
 <img src="../screenshots/2.png" alt="More actions menu (⋯): load profile, send picture/file, BlindBox diagnostics, profile and history backup, lock and trust, history and privacy, notification toggles" width="320" />
 
 - **Load profile (.dat)** — open a file dialog to load a profile from a `.dat` file.
-- **Send picture** — send an image file to the connected peer.
-- **Send file** — send any file to the connected peer.
+- **Send picture** — send an image (PNG/JPEG/WebP) to the connected peer; shown inline.
+- **Send file** — send any file as a document (including images); not shown as an inline picture.
 - **BlindBox diagnostics** — opens a textual summary of BlindBox/offline routing and replica health (complements the status row and section 4.9).
 - **Export profile backup…** / **Import profile backup…** — password-protected bundles of the current profile (`.dat` and supported sidecar data); import avoids name collisions by choosing a free profile name when needed.
 - **Export history backup…** / **Import history backup…** — export or restore encrypted per-peer history files only; the import flow asks whether to overwrite matching files or add only missing ones.
@@ -274,7 +274,7 @@ On the receiving side:
   ```
 - if a file with the same name already exists in `downloads`, the new file is saved as `<name> (1).<ext>`, `<name> (2).<ext>`, etc. without overwriting.
 
-The **`Send picture`** item works the same way but is intended for images (PNG, JPEG, or WebP) and is shown inline in the chat.
+The **`Send picture`** item works the same way but is intended for images (PNG, JPEG, or WebP) and is shown inline in the chat. **`Send file`** always sends as a document (even PNG/JPEG/WebP): the peer sees a file attachment, not an inline picture. Drag-and-drop and clipboard paste of images still use the picture path.
 
 <img src="../screenshots/5.png" alt="Emoji picker (smiley grid) next to the compose field" width="380" />
 

@@ -9,6 +9,9 @@ import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,10 +42,77 @@ data class ContactUi(
     val isGroup: Boolean = false,
     val members: List<String> = emptyList(),
     val epoch: Long = 0,
+    /** Pinned chats stay above MRU; [pinOrder] is only meaningful when pinned. */
+    val pinned: Boolean = false,
+    val pinOrder: Int = 0,
+    /** When true, skip system notifications for this conversation. */
+    val notificationsMuted: Boolean = false,
 ) {
     val title: String
         get() = displayName.ifBlank { if (isGroup) "Group" else addr.take(18) }
 }
+
+/** Sort: pinned (by pinOrder) first, then unpinned by lastActivityTs descending. */
+fun sortConversations(items: List<ContactUi>): List<ContactUi> =
+    items.sortedWith(
+        compareBy<ContactUi> { if (it.pinned) 0 else 1 }
+            .thenBy { if (it.pinned) it.pinOrder else 0 }
+            .thenByDescending { it.lastActivityTs },
+    )
+
+/**
+ * True when the user is looking at this conversation right now (app in
+ * foreground and ConversationScreen visible for the same peer/group).
+ */
+fun isViewingConversation(
+    conversationId: String,
+    isGroup: Boolean,
+    selectedId: String,
+    selectedIsGroup: Boolean,
+    conversationVisible: Boolean,
+    appInForeground: Boolean,
+): Boolean =
+    appInForeground &&
+        conversationVisible &&
+        conversationId == selectedId &&
+        isGroup == selectedIsGroup
+
+/** True when an incoming message should bump the Chats unread badge. */
+fun shouldBumpUnread(
+    conversationId: String,
+    isGroup: Boolean,
+    selectedId: String,
+    selectedIsGroup: Boolean,
+    conversationVisible: Boolean,
+    appInForeground: Boolean,
+): Boolean = !isViewingConversation(
+    conversationId,
+    isGroup,
+    selectedId,
+    selectedIsGroup,
+    conversationVisible,
+    appInForeground,
+)
+
+/** True when a system notification should be posted for an incoming message. */
+fun shouldNotifyMessage(
+    conversationId: String,
+    isGroup: Boolean,
+    selectedId: String,
+    selectedIsGroup: Boolean,
+    conversationVisible: Boolean,
+    appInForeground: Boolean,
+    notificationsMuted: Boolean,
+): Boolean =
+    !notificationsMuted &&
+        shouldBumpUnread(
+            conversationId,
+            isGroup,
+            selectedId,
+            selectedIsGroup,
+            conversationVisible,
+            appInForeground,
+        )
 
 data class MessageUi(
     val kind: String,
@@ -69,15 +139,26 @@ data class MessageUi(
      */
     val sealedFile: String = "",
 ) {
+    /** Unified attachment view-model for bubble rendering. */
+    val attachment: ChatAttachment?
+        get() = buildChatAttachment(
+            text = text,
+            imagePath = imagePath,
+            filePath = filePath,
+            memoryImage = memoryImage,
+            sealedFile = sealedFile,
+        )
+
     val fileCaption: String
-        get() = when {
-            imagePath.isNotBlank() -> File(imagePath).name
-            filePath.isNotBlank() -> File(filePath).name
-            parseSealedFileHistory(text) != null -> parseSealedFileHistory(text)!!.displayName
-            text.startsWith("[file] ") -> File(text.removePrefix("[file] ").trim()).name
-            // A picture whose file is no longer there still has a name to show.
-            text.startsWith("[image] ") -> File(text.removePrefix("[image] ").trim()).name
-            else -> ""
+        get() = attachment?.displayName.orEmpty().ifBlank {
+            when {
+                imagePath.isNotBlank() -> File(imagePath).name
+                filePath.isNotBlank() -> File(filePath).name
+                parseSealedFileHistory(text) != null -> parseSealedFileHistory(text)!!.displayName
+                text.startsWith("[file] ") -> File(text.removePrefix("[file] ").trim()).name
+                text.startsWith("[image] ") -> File(text.removePrefix("[image] ").trim()).name
+                else -> ""
+            }
         }
 }
 
@@ -192,6 +273,28 @@ data class FileOfferPrompt(
     val size: Long,
 )
 
+/** Live file/image transfer progress for the conversation UI. */
+data class TransferProgressUi(
+    val peer: String,
+    val name: String,
+    val size: Long,
+    val transferred: Long,
+    val incoming: Boolean,
+    val image: Boolean = false,
+    /** active | completed | failed */
+    val outcome: String = "active",
+) {
+    val key: String
+        get() = "$peer|${if (incoming) "in" else "out"}|$name"
+
+    val percent: Int
+        get() = when {
+            outcome == "completed" -> 100
+            size <= 0L -> 0
+            else -> ((transferred * 100L) / size).toInt().coerceIn(0, 100)
+        }
+}
+
 data class ProfileOp(
     val ok: Boolean,
     val code: String = "",
@@ -235,12 +338,23 @@ data class ChatUiState(
     val routerIssue: RouterIssue? = null,
     val selectedId: String = "",
     val selectedIsGroup: Boolean = false,
+    /**
+     * True only while [ConversationScreen] is on screen. Leaving the chat keeps
+     * [selectedId] but clears this so unread badges keep working.
+     */
+    val conversationVisible: Boolean = false,
+    /** Process-level foreground via [ProcessLifecycleOwner]; false when the app is backgrounded. */
+    val appInForeground: Boolean = true,
     /** Changes when a notification should open the current chat. Zero means no request. */
     val openChatNonce: Long = 0,
     val compose: String = "",
+    /** Read-only reply target shown above the composer (not part of [compose]). */
+    val pendingReply: PendingReply? = null,
     val drafts: Map<String, String> = emptyMap(),
     val tofu: TofuPrompt? = null,
     val fileOffer: FileOfferPrompt? = null,
+    /** Active / recently finished file transfers keyed for UI updates. */
+    val transfers: List<TransferProgressUi> = emptyList(),
     val error: String = "",
     val theme: String = "dark",
     val router: RouterPrefs = RouterPrefs().normalized(),
@@ -257,7 +371,7 @@ data class ChatUiState(
     val resuming: Boolean = false,
 ) {
     val conversations: List<ContactUi>
-        get() = (groups + contacts).sortedByDescending { it.lastActivityTs }
+        get() = sortConversations(groups + contacts)
 
     val tunnelsReady: Boolean
         get() = running && transport == "ready"
@@ -298,10 +412,43 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     @Volatile private var activeImagesDir: File? = null
     @Volatile private var activeFilesDir: File? = null
 
+    private val processLifecycleObserver = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) {
+            _state.update { state ->
+                val clearId = state.selectedId
+                val clearUnread = state.conversationVisible && clearId.isNotBlank()
+                state.copy(
+                    appInForeground = true,
+                    contacts = if (clearUnread) {
+                        state.contacts.map { c ->
+                            if (c.addr == clearId && !state.selectedIsGroup) c.copy(unread = 0) else c
+                        }
+                    } else {
+                        state.contacts
+                    },
+                    groups = if (clearUnread) {
+                        state.groups.map { c ->
+                            if (c.addr == clearId && state.selectedIsGroup) c.copy(unread = 0) else c
+                        }
+                    } else {
+                        state.groups
+                    },
+                )
+            }
+        }
+
+        override fun onStop(owner: LifecycleOwner) {
+            _state.update { it.copy(appInForeground = false) }
+        }
+    }
+
     init {
         // A crash or a kill in the middle of a send or a backup leaves its
         // staged copy behind; nothing is in flight when the app starts.
         runCatching { stagingDir().deleteRecursively() }
+        main.post {
+            ProcessLifecycleOwner.get().lifecycle.addObserver(processLifecycleObserver)
+        }
         if (!NativeEngine.available) {
             _state.update {
                 it.copy(
@@ -323,6 +470,48 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                 }
             }
         }
+    }
+
+    private fun notificationsMutedFor(id: String, group: Boolean): Boolean {
+        val rows = if (group) _state.value.groups else _state.value.contacts
+        return rows.firstOrNull { it.addr == id }?.notificationsMuted == true
+    }
+
+    private fun shouldNotifyIncoming(id: String, group: Boolean): Boolean {
+        val state = _state.value
+        return shouldNotifyMessage(
+            conversationId = id,
+            isGroup = group,
+            selectedId = state.selectedId,
+            selectedIsGroup = state.selectedIsGroup,
+            conversationVisible = state.conversationVisible,
+            appInForeground = state.appInForeground,
+            notificationsMuted = notificationsMutedFor(id, group),
+        )
+    }
+
+    private fun shouldBumpIncoming(id: String, group: Boolean): Boolean {
+        val state = _state.value
+        return shouldBumpUnread(
+            conversationId = id,
+            isGroup = group,
+            selectedId = state.selectedId,
+            selectedIsGroup = state.selectedIsGroup,
+            conversationVisible = state.conversationVisible,
+            appInForeground = state.appInForeground,
+        )
+    }
+
+    private fun isViewingIncoming(id: String, group: Boolean): Boolean {
+        val state = _state.value
+        return isViewingConversation(
+            conversationId = id,
+            isGroup = group,
+            selectedId = state.selectedId,
+            selectedIsGroup = state.selectedIsGroup,
+            conversationVisible = state.conversationVisible,
+            appInForeground = state.appInForeground,
+        )
     }
 
     fun refreshProfiles() {
@@ -464,6 +653,24 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
 
     fun setVerboseLog(enabled: Boolean) {
         val prefs = _state.value.uiPrefs.copy(verboseLog = enabled)
+        prefs.save(appRoot)
+        _state.update { it.copy(uiPrefs = prefs) }
+    }
+
+    /** Sync notification + battery-exemption status into [UiPrefs] for Settings. */
+    fun refreshBackgroundAccess() {
+        val allowed = BackgroundAccess.status(getApplication()).allowed
+        val current = _state.value.uiPrefs
+        if (current.backgroundAllowed == allowed) return
+        val prefs = current.copy(backgroundAllowed = allowed)
+        prefs.save(appRoot)
+        _state.update { it.copy(uiPrefs = prefs) }
+    }
+
+    fun markBackgroundPromptSeen() {
+        val current = _state.value.uiPrefs
+        val allowed = BackgroundAccess.status(getApplication()).allowed
+        val prefs = current.copy(backgroundPromptSeen = true, backgroundAllowed = allowed)
         prefs.save(appRoot)
         _state.update { it.copy(uiPrefs = prefs) }
     }
@@ -1028,6 +1235,24 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    fun setConversationVisible(visible: Boolean) {
+        _state.update { state ->
+            val clearId = state.selectedId
+            if (!visible) {
+                return@update state.copy(conversationVisible = false)
+            }
+            state.copy(
+                conversationVisible = true,
+                contacts = state.contacts.map { c ->
+                    if (c.addr == clearId) c.copy(unread = 0) else c
+                },
+                groups = state.groups.map { c ->
+                    if (c.addr == clearId) c.copy(unread = 0) else c
+                },
+            )
+        }
+    }
+
     fun selectConversation(id: String, group: Boolean) {
         persistDraft(_state.value.selectedId, _state.value.compose)
         val draft = _state.value.drafts[id].orEmpty()
@@ -1043,7 +1268,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             it.copy(
                 selectedId = id,
                 selectedIsGroup = group,
+                conversationVisible = true,
                 compose = draft,
+                pendingReply = null,
                 contacts = contacts.map { c -> if (c.addr == id) c.copy(unread = 0) else c },
                 groups = it.groups.map { c -> if (c.addr == id) c.copy(unread = 0) else c },
             )
@@ -1102,11 +1329,25 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    fun setPendingReply(reply: PendingReply?) {
+        _state.update { it.copy(pendingReply = reply) }
+    }
+
+    fun clearPendingReply() {
+        _state.update { it.copy(pendingReply = null) }
+    }
+
     fun send() {
         val id = _state.value.selectedId
-        val text = _state.value.compose.trim()
+        val answer = _state.value.compose.trim()
+        val pending = _state.value.pendingReply
+        val text = if (pending != null) {
+            formatReplyQuote(pending.author, pending.summary) + answer
+        } else {
+            answer
+        }
         if (id.isBlank() || text.isBlank()) return
-        _state.update { it.copy(compose = "") }
+        _state.update { it.copy(compose = "", pendingReply = null) }
         persistDraft(id, "")
         viewModelScope.launch(Dispatchers.IO) {
             if (!_state.value.selectedIsGroup) {
@@ -1304,6 +1545,44 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         }
     }
 
+    /** Pin or unpin a chat; new pins go to the end of the pinned block. */
+    fun setConversationPinned(id: String, group: Boolean, pinned: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val order = if (pinned) {
+                (_state.value.conversations.filter { it.pinned }.maxOfOrNull { it.pinOrder } ?: -1) + 1
+            } else {
+                0
+            }
+            NativeEngine.nativeSetConversationPin(id, group, pinned, order)
+            refreshSnapshot()
+        }
+    }
+
+    fun setConversationNotificationsMuted(id: String, group: Boolean, muted: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            NativeEngine.nativeSetConversationNotificationsMuted(id, group, muted)
+            refreshSnapshot()
+        }
+    }
+
+    /** Move a pinned chat up (-1) or down (+1) among pinned rows; renumbers pinOrder. */
+    fun movePinnedConversation(id: String, delta: Int) {
+        if (delta == 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val pinned = _state.value.conversations.filter { it.pinned }.toMutableList()
+            val idx = pinned.indexOfFirst { it.addr == id }
+            if (idx < 0) return@launch
+            val target = (idx + delta).coerceIn(0, pinned.lastIndex)
+            if (target == idx) return@launch
+            val item = pinned.removeAt(idx)
+            pinned.add(target, item)
+            pinned.forEachIndexed { order, row ->
+                NativeEngine.nativeSetConversationPin(row.addr, row.isGroup, true, order)
+            }
+            refreshSnapshot()
+        }
+    }
+
     fun removePeer(addr: String) {
         viewModelScope.launch(Dispatchers.IO) {
             NativeEngine.nativeRemovePeer(addr)
@@ -1333,8 +1612,18 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     fun deleteMessage(msg: MessageUi) {
         val peer = _state.value.selectedId
         if (peer.isBlank() || _state.value.selectedIsGroup) return
-        _state.update { s -> s.copy(messages = s.messages.filterNot { it === msg }) }
+        val deletedText = msg.text
+        val attachmentName = msg.attachment?.displayName?.ifBlank { null }
+            ?: msg.fileCaption.ifBlank { null }
+        _state.update { s ->
+            val remaining = s.messages.filterNot { it === msg }.map { row ->
+                val scrubbed = scrubReplyTextIfMatches(row.text, deletedText, attachmentName)
+                if (scrubbed != null) row.copy(text = scrubbed) else row
+            }
+            s.copy(messages = remaining)
+        }
         viewModelScope.launch(Dispatchers.IO) {
+            // Native delete also scrubs quoting replies in the persisted history.
             NativeEngine.nativeDeleteMessage(peer, msg.messageId, msg.kind, msg.ts, msg.text)
             loadHistory()
             refreshSnapshot()
@@ -1572,6 +1861,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     historyRetentionDays = o.optInt("historyRetentionDays", 0),
                     live = o.optBoolean("live"),
                     offlineReady = o.optBoolean("offlineReady"),
+                    pinned = o.optBoolean("pinned"),
+                    pinOrder = o.optInt("pinOrder", 0).coerceAtLeast(0),
+                    notificationsMuted = o.optBoolean("notificationsMuted"),
                 ),
             )
         }
@@ -1589,9 +1881,13 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     addr = o.getString("groupId"),
                     displayName = o.optString("title"),
                     lastPreview = str(R.string.group_members, members.size),
+                    lastActivityTs = o.optString("lastActivityTs"),
                     isGroup = true,
                     members = members,
                     epoch = o.optLong("epoch"),
+                    pinned = o.optBoolean("pinned"),
+                    pinOrder = o.optInt("pinOrder", 0).coerceAtLeast(0),
+                    notificationsMuted = o.optBoolean("notificationsMuted"),
                 ),
             )
         }
@@ -1913,21 +2209,30 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     override fun onHistory(peer: String, json: String) = onMain {
         val entry = runCatching { JSONObject(json) }.getOrNull() ?: return@onMain
         val kind = entry.optString("kind")
-        if ((kind == "in" || kind == "peer") && peer != _state.value.selectedId) {
+        val viewingThisChat = isViewingIncoming(peer, false)
+        if ((kind == "in" || kind == "peer") && shouldBumpIncoming(peer, false)) {
+            val preview = entry.optString("text")
+            val ts = entry.optString("ts").ifBlank { java.time.Instant.now().toString() }
             _state.update {
                 it.copy(
                     contacts = it.contacts.map { c ->
-                        if (c.addr == peer) c.copy(unread = c.unread + 1, lastPreview = entry.optString("text")) else c
+                        if (c.addr == peer) {
+                            c.copy(
+                                unread = c.unread + 1,
+                                lastPreview = preview,
+                                lastActivityTs = ts.ifBlank { c.lastActivityTs },
+                            )
+                        } else {
+                            c
+                        }
                     },
                 )
             }
-            NotificationHelper.notifyMessage(
-                getApplication(),
-                peer,
-                entry.optString("text"),
-            )
+            if (shouldNotifyIncoming(peer, false)) {
+                NotificationHelper.notifyMessage(getApplication(), peer, preview)
+            }
         }
-        if (peer == _state.value.selectedId && !_state.value.selectedIsGroup) {
+        if (viewingThisChat) {
             loadHistory()
         }
         viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
@@ -1966,7 +2271,54 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
     }
 
-    override fun onTransfer(peer: String, json: String) = onMain { }
+    override fun onTransfer(peer: String, json: String) = onMain {
+        val o = runCatching { JSONObject(json) }.getOrNull() ?: return@onMain
+        val update = TransferProgressUi(
+            peer = peer,
+            name = o.optString("name").ifBlank { str(R.string.transfer_unnamed) },
+            size = o.optLong("size"),
+            transferred = o.optLong("transferred"),
+            incoming = o.optBoolean("incoming"),
+            image = o.optBoolean("image"),
+            outcome = o.optString("outcome", "active").ifBlank { "active" },
+        )
+        // Start-of-receive notice; durable chat row comes from C++ history (system + final [file]).
+        val incomingStart =
+            update.incoming &&
+                update.outcome == "active" &&
+                update.transferred == 0L &&
+                !update.image &&
+                !AvatarStore.isWireFilename(update.name)
+        if (incomingStart) {
+            appendNotice(
+                "transfer.incoming_start",
+                NoticeUi.LEVEL_USER,
+                peer,
+                text = str(R.string.transfer_peer_started_file, update.name, update.size),
+            )
+            if (isViewingIncoming(peer, false)) {
+                loadHistory()
+            }
+        }
+        _state.update { state ->
+            val without = state.transfers.filterNot { it.key == update.key }
+            val next = when (update.outcome) {
+                "completed", "failed" -> without + update
+                else -> without + update
+            }
+            state.copy(transfers = next)
+        }
+        if (update.outcome == "completed" || update.outcome == "failed") {
+            viewModelScope.launch {
+                delay(2_500)
+                _state.update { state ->
+                    state.copy(transfers = state.transfers.filterNot {
+                        it.key == update.key && it.outcome == update.outcome
+                    })
+                }
+            }
+        }
+    }
 
     override fun onFileReceived(peer: String, path: String) {
         if (AvatarStore.isWireFilename(path)) {
@@ -1985,8 +2337,32 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
                     }
                 }
             }
-            NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, File(path).name))
-            if (peer == _state.value.selectedId) loadHistory()
+            if (shouldNotifyIncoming(peer, false)) {
+                NotificationHelper.notifyMessage(
+                    getApplication(),
+                    peer,
+                    str(R.string.notify_file, File(path).name),
+                )
+            }
+            if (shouldBumpIncoming(peer, false)) {
+                val now = java.time.Instant.now().toString()
+                _state.update {
+                    it.copy(
+                        contacts = it.contacts.map { c ->
+                            if (c.addr == peer) {
+                                c.copy(
+                                    unread = c.unread + 1,
+                                    lastPreview = str(R.string.notify_file, File(path).name),
+                                    lastActivityTs = now,
+                                )
+                            } else {
+                                c
+                            }
+                        },
+                    )
+                }
+            }
+            if (isViewingIncoming(peer, false)) loadHistory()
         }
     }
 
@@ -2004,8 +2380,32 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
             }
         }
         onMain {
-            NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_file, displayName))
-            if (peer == _state.value.selectedId) loadHistory()
+            if (shouldNotifyIncoming(peer, false)) {
+                NotificationHelper.notifyMessage(
+                    getApplication(),
+                    peer,
+                    str(R.string.notify_file, displayName),
+                )
+            }
+            if (shouldBumpIncoming(peer, false)) {
+                val now = java.time.Instant.now().toString()
+                _state.update {
+                    it.copy(
+                        contacts = it.contacts.map { c ->
+                            if (c.addr == peer) {
+                                c.copy(
+                                    unread = c.unread + 1,
+                                    lastPreview = str(R.string.notify_file, displayName),
+                                    lastActivityTs = now,
+                                )
+                            } else {
+                                c
+                            }
+                        },
+                    )
+                }
+            }
+            if (isViewingIncoming(peer, false)) loadHistory()
         }
     }
 
@@ -2122,13 +2522,25 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onImageReceived(peer: String, path: String) = onMain {
-        NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_image))
-        if (peer == _state.value.selectedId) loadHistory()
-        else {
+        if (shouldNotifyIncoming(peer, false)) {
+            NotificationHelper.notifyMessage(getApplication(), peer, str(R.string.notify_image))
+        }
+        if (isViewingIncoming(peer, false)) {
+            loadHistory()
+        } else if (shouldBumpIncoming(peer, false)) {
+            val now = java.time.Instant.now().toString()
             _state.update {
                 it.copy(
                     contacts = it.contacts.map { c ->
-                        if (c.addr == peer) c.copy(unread = c.unread + 1, lastPreview = str(R.string.image_preview)) else c
+                        if (c.addr == peer) {
+                            c.copy(
+                                unread = c.unread + 1,
+                                lastPreview = str(R.string.image_preview),
+                                lastActivityTs = now,
+                            )
+                        } else {
+                            c
+                        }
                     },
                 )
             }
@@ -2136,7 +2548,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onImageText(peer: String, text: String) = onMain {
-        if (peer == _state.value.selectedId) loadHistory()
+        if (isViewingIncoming(peer, false)) {
+            loadHistory()
+        }
     }
 
     override fun onContactsChanged() = onMain {
@@ -2144,16 +2558,30 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onGroupMessage(groupId: String) = onMain {
-        if (groupId != _state.value.selectedId) {
+        if (isViewingIncoming(groupId, true)) {
+            loadHistory()
+        } else if (shouldBumpIncoming(groupId, true)) {
+            val now = java.time.Instant.now().toString()
             _state.update {
                 it.copy(
                     groups = it.groups.map { g ->
-                        if (g.addr == groupId) g.copy(unread = g.unread + 1) else g
+                        if (g.addr == groupId) {
+                            g.copy(unread = g.unread + 1, lastActivityTs = now)
+                        } else {
+                            g
+                        }
                     },
                 )
             }
-        } else {
-            loadHistory()
+            if (shouldNotifyIncoming(groupId, true)) {
+                val title = _state.value.groups.firstOrNull { it.addr == groupId }?.title
+                    ?: groupId.take(18)
+                NotificationHelper.notifyMessage(
+                    getApplication(),
+                    groupId,
+                    str(R.string.notify_group_message, title),
+                )
+            }
         }
         viewModelScope.launch(Dispatchers.IO) { refreshSnapshot() }
     }
@@ -2215,6 +2643,9 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
     }
 
     override fun onCleared() {
+        main.post {
+            ProcessLifecycleOwner.get().lifecycle.removeObserver(processLifecycleObserver)
+        }
         clearIncomingCache()
         MemoryImages.clear()
         SealedFiles.clear()

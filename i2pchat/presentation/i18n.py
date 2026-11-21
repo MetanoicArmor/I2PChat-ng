@@ -48,6 +48,15 @@ _EN: dict[str, str] = {
         "Could not connect to the contact. They may be offline, or the I2P "
         "tunnels are not ready yet. Messages will be sent offline when possible."
     ),
+    "notice.peer.channel_desync": (
+        "The encrypted channel lost sync (often a network glitch). "
+        "Reconnecting automatically. Delivery confirmation may be delayed — "
+        "the peer may already have the message."
+    ),
+    "notice.peer.integrity_failed": (
+        "A message failed the integrity check and was discarded. "
+        "The live link was closed — reconnect if the chat stays quiet."
+    ),
     "notice.router.sam_unreachable": "Cannot reach the I2P router (SAM at {addr}).",
     # Contact link state
     "peer_link.secure": "online",
@@ -83,6 +92,7 @@ _EN: dict[str, str] = {
     "menu.language": "Language: English",
     "menu.language.hint": "Switches this window between English and Russian.",
     "ui.send": "Send",
+    "ui.scroll_to_bottom": "Scroll to bottom",
     "ui.connect": "Connect",
     "ui.disconnect": "Disconnect",
     "ui.groups": "Groups",
@@ -100,6 +110,9 @@ _EN: dict[str, str] = {
         "Type message. Enter = new line; Shift+Enter = new line; {send_mod} = send. "
         "Drag and drop images or files to send."
     ),
+    "ui.reply_quote_deleted": "Original message deleted",
+    "ui.reply_quote_clear": "Clear reply quote",
+    "ui.reply_quote_bar": "Replying to",
     "menu.load_profile": "Load profile (.dat)",
     "menu.send_picture": "Send picture",
     "menu.send_file": "Send file",
@@ -200,6 +213,15 @@ _RU: dict[str, str] = {
         "Не удалось подключиться к собеседнику. Возможно, он не в сети или туннели "
         "I2P ещё не готовы. Сообщения будут доставлены офлайн, когда это возможно."
     ),
+    "notice.peer.channel_desync": (
+        "Зашифрованный канал сбился с синхронизации (часто из‑за сбоя сети). "
+        "Переподключение выполняется автоматически. Подтверждение доставки могло "
+        "не успеть прийти — у собеседника сообщение уже могло быть."
+    ),
+    "notice.peer.integrity_failed": (
+        "Сообщение не прошло проверку целостности и отброшено. "
+        "Живое соединение закрыто — переподключитесь, если чат замолчал."
+    ),
     "notice.router.sam_unreachable": "Нет связи с роутером I2P (SAM по адресу {addr}).",
     "peer_link.secure": "на связи",
     "peer_link.connecting": "подключаюсь…",
@@ -233,6 +255,7 @@ _RU: dict[str, str] = {
     "menu.language": "Язык: Русский",
     "menu.language.hint": "Переключает это окно между русским и английским.",
     "ui.send": "Отправить",
+    "ui.scroll_to_bottom": "К последним сообщениям",
     "ui.connect": "Подключить",
     "ui.disconnect": "Отключить",
     "ui.groups": "Группы",
@@ -250,6 +273,9 @@ _RU: dict[str, str] = {
         "Сообщение. Enter — новая строка, Shift+Enter — новая строка, {send_mod} — отправить. "
         "Картинки и файлы можно перетащить сюда."
     ),
+    "ui.reply_quote_deleted": "Исходное сообщение удалено",
+    "ui.reply_quote_clear": "Убрать цитату",
+    "ui.reply_quote_bar": "Ответ на",
     "menu.load_profile": "Загрузить профиль (.dat)",
     "menu.send_picture": "Отправить картинку",
     "menu.send_file": "Отправить файл",

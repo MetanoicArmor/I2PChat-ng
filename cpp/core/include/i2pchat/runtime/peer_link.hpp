@@ -132,7 +132,9 @@ private:
     /// Applies the session's actions: writes, deliveries, teardown. Returns
     /// false once the link is finished.
     bool apply(const session::SessionActions& actions);
-    void enqueue(Bytes bytes);
+    /// Queues a wire frame. `high_priority` frames (U text / S signals) drain
+    /// ahead of normal file/image chunks so chat stays responsive mid-transfer.
+    void enqueue(Bytes bytes, bool high_priority = false);
     void finish(std::string reason);
 
     asio::ip::tcp::socket socket_;
@@ -142,7 +144,8 @@ private:
     session::PeerSession peer_;
     asio::steady_timer keepalive_timer_;
     asio::steady_timer handshake_timer_;
-    std::deque<Bytes> outbox_;
+    std::deque<Bytes> outbox_high_;
+    std::deque<Bytes> outbox_normal_;
     std::chrono::steady_clock::time_point last_seen_;
     std::uint64_t next_keepalive_id_ = 1;
     bool started_ = false;

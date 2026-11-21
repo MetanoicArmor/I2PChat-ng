@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -43,6 +44,19 @@ struct ContactRecord {
     std::string last_activity_ts;
     /// Per-peer auto-delete age in days; 0 = no override (use the global policy).
     unsigned history_retention_days = 0;
+    /// Chats list pin; ``pin_order`` ranks among pinned rows (lower = higher).
+    bool pinned = false;
+    int pin_order = 0;
+    /// Skip system notifications for this peer when true.
+    bool notifications_muted = false;
+};
+
+/// Local Chats UI fields for a group (not part of the signed GroupState).
+struct GroupUiMeta {
+    bool pinned = false;
+    int pin_order = 0;
+    std::string last_activity_ts;
+    bool notifications_muted = false;
 };
 
 class ContactBook {
@@ -55,6 +69,11 @@ public:
     [[nodiscard]] const std::optional<std::string>& last_active_peer() const noexcept {
         return last_active_peer_;
     }
+
+    [[nodiscard]] const std::map<std::string, GroupUiMeta>& group_ui() const noexcept {
+        return group_ui_;
+    }
+    [[nodiscard]] std::map<std::string, GroupUiMeta>& group_ui() noexcept { return group_ui_; }
 
     /// Index of `addr` in most-recently-used order, or -1.
     [[nodiscard]] std::ptrdiff_t peer_index(std::string_view addr) const;
@@ -70,6 +89,11 @@ public:
     bool set_peer_profile(std::string_view addr, std::string_view display_name,
                           std::string_view note);
     bool set_peer_history_retention_days(std::string_view addr, unsigned days);
+    bool set_peer_pin(std::string_view addr, bool pinned, int pin_order = 0);
+    bool set_group_pin(std::string_view group_id, bool pinned, int pin_order = 0);
+    bool set_peer_notifications_muted(std::string_view addr, bool muted);
+    bool set_group_notifications_muted(std::string_view group_id, bool muted);
+    bool touch_group_activity(std::string_view group_id, std::string_view ts_iso);
     bool touch_peer_message_meta(std::string_view addr, std::string_view preview,
                                  std::string_view ts_iso);
     bool remove_peer(std::string_view addr);
@@ -84,6 +108,7 @@ private:
 
     std::vector<ContactRecord> contacts_;
     std::optional<std::string> last_active_peer_;
+    std::map<std::string, GroupUiMeta> group_ui_;
 };
 
 /// Parse a decoded payload. Unreadable entries are dropped rather than fatal:

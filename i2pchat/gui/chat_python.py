@@ -226,6 +226,17 @@ class ComposeTextArea(TextArea):
         await super()._on_key(event)
 
 
+class ChatRichLog(RichLog):
+    """RichLog that keeps the app's stick-to-bottom flag in sync with scroll position."""
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        app = self.app
+        sync = getattr(app, "_sync_chat_stick_from_scroll", None)
+        if callable(sync):
+            sync()
+
+
 class I2PChat(App):
     """Textual TUI frontend for I2PChatCore with command-driven parity features."""
 
@@ -233,6 +244,7 @@ class I2PChat(App):
         ("q", "quit", "Quit"),
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+s", "send_message", "Send"),
+        ("ctrl+end", "scroll_chat_bottom", "Bottom"),
         ("f1", "show_actions", "Actions"),
         ("f2", "show_contacts", "Contacts"),
         ("f3", "show_media", "Media"),
@@ -261,8 +273,10 @@ class I2PChat(App):
         height: auto;
         background: $surface;
     }
-    TextArea {
-        height: 8;
+    #compose_box {
+        height: auto;
+        min-height: 3;
+        max-height: 6;
         border: solid white;
         background: $surface;
     }
@@ -294,6 +308,8 @@ class I2PChat(App):
         self._contact_book = ContactBook()
         self._compose_drafts: dict[str, str] = {}
         self._compose_draft_active_key: Optional[str] = None
+        # Follow RichLog end unless the user scrolled the transcript away.
+        self._chat_stick_to_bottom: bool = True
         self._history_loaded_for_peer: Optional[str] = None
         self._history_entries: list[HistoryEntry] = []
         self._history_dirty = False
@@ -351,7 +367,7 @@ class I2PChat(App):
 
     def compose(self) -> ComposeResult:
         yield Static(id="status_bar")
-        yield RichLog(id="chat_window", highlight=False, markup=True)
+        yield ChatRichLog(id="chat_window", highlight=False, markup=True, auto_scroll=True)
         with Vertical(id="compose_wrap"):
             yield ComposeTextArea(
                 "",
@@ -362,8 +378,8 @@ class I2PChat(App):
         yield Footer()
 
     @property
-    def chat_log(self) -> RichLog:
-        return self.query_one("#chat_window", RichLog)
+    def chat_log(self) -> ChatRichLog:
+        return self.query_one("#chat_window", ChatRichLog)
 
     @property
     def compose_box(self) -> TextArea:
@@ -380,7 +396,43 @@ class I2PChat(App):
         return box.text if box is not None else ""
 
     def action_send_message(self) -> None:
-        self.run_worker(self._submit_compose(), exclusive=True)
+        # Exclusive only within "compose" so a Send does not cancel file transfer
+        # workers (Textual exclusive cancels the whole group on the same node).
+        self.run_worker(self._submit_compose(), group="compose", exclusive=True)
+
+    def action_scroll_chat_bottom(self) -> None:
+        """Jump the transcript to the latest line and re-enable follow mode."""
+        self._chat_stick_to_bottom = True
+        try:
+            log = self.chat_log
+        except Exception:
+            return
+        log.auto_scroll = True
+        log.scroll_end(animate=False, immediate=True)
+
+    def _sync_chat_stick_from_scroll(self) -> None:
+        try:
+            log = self.chat_log
+        except Exception:
+            return
+        self._chat_stick_to_bottom = bool(log.is_vertical_scroll_end)
+        log.auto_scroll = self._chat_stick_to_bottom
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.call_after_refresh(self._sync_chat_stick_from_scroll)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.call_after_refresh(self._sync_chat_stick_from_scroll)
+
+    def _scroll_chat_to_bottom_if_sticky(self) -> None:
+        if not self._chat_stick_to_bottom:
+            return
+        try:
+            log = self.chat_log
+        except Exception:
+            return
+        log.auto_scroll = True
+        log.scroll_end(animate=False, immediate=True)
 
     def on_compose_text_area_submitted(self, event: ComposeTextArea.Submitted) -> None:
         event.stop()
@@ -483,6 +535,8 @@ class I2PChat(App):
             return
         if self._compose_draft_active_key is not None:
             self._compose_drafts[self._compose_draft_active_key] = self._compose_text_snapshot()
+        # Growing soft-wrapped compose can push the transcript; keep end in view if sticky.
+        self.call_after_refresh(self._scroll_chat_to_bottom_if_sticky)
 
     # ----- ui prefs / profile-sidecar files -----
 
@@ -881,11 +935,11 @@ class I2PChat(App):
         )
 
     def _media_summary_text(self) -> str:
-        snap = self._build_status_snapshot()
+        peer = self._current_target_peer() or "—"
+        received = sum(1 for item in self._recent_transfers if item.path)
         return (
-            f"Current peer: {self._current_target_peer() or '—'}\n"
-            f"{snap.full}\n"
-            f"{snap.blindbox_bar}"
+            f"Current peer: {peer}\n"
+            f"Received items available to save: {received}"
         )
 
     def _refresh_status_bar(self) -> None:
@@ -1207,8 +1261,11 @@ class I2PChat(App):
         """Drop the on-screen transcript so the next chat does not append under it."""
         self._recent_messages.clear()
         self._message_ref_by_id.clear()
+        self._chat_stick_to_bottom = True
         try:
-            self.chat_log.clear()
+            log = self.chat_log
+            log.auto_scroll = True
+            log.clear()
         except Exception:
             return
 
@@ -1595,6 +1652,7 @@ class I2PChat(App):
         percent = int((info.received / info.size) * 100) if info.size > 0 else 0
         bucket = min(100, (percent // 10) * 10)
         last_bucket = self._transfer_progress_buckets.get(key)
+        # Progress % stays in the chat log only; Media lists completed items, not ticks.
         if info.received == 0 or info.received >= info.size or last_bucket != bucket:
             direction = "sending" if info.is_sending else "receiving"
             self.post(
@@ -1602,22 +1660,22 @@ class I2PChat(App):
                 f"{label} {direction}: {os.path.basename(info.filename)} ({info.received}/{info.size} bytes, {percent}%)",
             )
             self._transfer_progress_buckets[key] = bucket
+        if info.received >= info.size:
             # A finished incoming file reports the full path it was written to.
             saved_path = (
                 info.filename
                 if not info.is_sending
                 and not info.is_inline_image
-                and info.received >= info.size
                 and os.path.isabs(info.filename)
                 else ""
             )
+            detail = "sent" if info.is_sending else "received"
             self._record_transfer_event(
                 label.lower(),
                 info.filename,
-                f"{direction} {percent}%",
+                detail,
                 path=saved_path,
             )
-        if info.received >= info.size:
             self._transfer_progress_buckets.pop(key, None)
 
     def handle_image_received(self, art: str) -> None:
@@ -1690,11 +1748,10 @@ class I2PChat(App):
         self._refresh_status_bar()
 
     def handle_image_delivered(self, filename: str) -> None:
-        self._record_transfer_event("image", filename, "delivered")
+        # Delivery ACKs belong in the chat log, not the Media received/sent list.
         self.post("success", f"Image delivered: {filename}")
 
     def handle_file_delivered(self, filename: str) -> None:
-        self._record_transfer_event("file", filename, "delivered")
         self.post("success", f"File delivered: {filename}")
 
     # ----- lifecycle -----
@@ -2242,6 +2299,26 @@ class I2PChat(App):
             )
         )
 
+    @staticmethod
+    def _is_media_list_noise(detail: str) -> bool:
+        """True for progress/delivery ticks that must not appear in F3 Media."""
+        text = (detail or "").strip().lower()
+        if text == "delivered":
+            return True
+        # Legacy rows from older builds: "receiving 40%", "sending 100%", …
+        return bool(re.fullmatch(r"(receiving|sending)\s+\d+%", text))
+
+    def _media_transfer_rows(self, limit: int = 20) -> list[TransferEventRef]:
+        """Recent transfer milestones for Media — no % progress or delivery spam."""
+        rows: list[TransferEventRef] = []
+        for item in self._recent_transfers:
+            if self._is_media_list_noise(item.detail):
+                continue
+            rows.append(item)
+            if len(rows) >= limit:
+                break
+        return rows
+
     def _last_received_path(self) -> Optional[str]:
         """Newest received file or picture that is still on disk."""
         for item in self._recent_transfers:
@@ -2681,7 +2758,7 @@ class I2PChat(App):
                 for p in paths:
                     await self.core.send_file(p)
 
-            self.run_worker(_send_many())
+            self.run_worker(_send_many(), group="transfer")
 
         elif cmd == "savefile":
             if not args:
@@ -2719,7 +2796,7 @@ class I2PChat(App):
                 for p in paths:
                     await self.core.send_image(p)
 
-            self.run_worker(_send_pics())
+            self.run_worker(_send_pics(), group="transfer")
 
         elif cmd == "img":
             if not args:
@@ -2733,7 +2810,7 @@ class I2PChat(App):
             if lines is None:
                 return
             await self._send_image_me(lines)
-            self.run_worker(self.core.send_image_lines(lines))
+            self.run_worker(self.core.send_image_lines(lines), group="transfer")
 
         elif cmd == "img-bw":
             if not args:
@@ -2747,7 +2824,7 @@ class I2PChat(App):
             if lines is None:
                 return
             await self._send_image_me(lines)
-            self.run_worker(self.core.send_image_lines(lines))
+            self.run_worker(self.core.send_image_lines(lines), group="transfer")
 
         elif cmd == "history":
             if not args or args[0] == "show":
@@ -4637,7 +4714,7 @@ class TuiMediaScreen(ModalScreen[None]):
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns("#", "When", "Kind", "File", "Detail")
-        self._rows = list(self.host._recent_transfers)[:20]
+        self._rows = self.host._media_transfer_rows(20)
         if not self._rows:
             table.add_row("—", "—", "", "No recent transfers", "", key="empty")
             table.disabled = True
@@ -4687,7 +4764,7 @@ class TuiMediaScreen(ModalScreen[None]):
             return
         self.host._record_transfer_event("file", path, "queued for sending")
         self.dismiss(None)
-        self.host.run_worker(self.host.core.send_file(path))
+        self.host.run_worker(self.host.core.send_file(path), group="transfer")
 
     def action_send_picture(self) -> None:
         path = self._require_path()
@@ -4695,7 +4772,7 @@ class TuiMediaScreen(ModalScreen[None]):
             return
         self.host._record_transfer_event("image", path, "queued for sending")
         self.dismiss(None)
-        self.host.run_worker(self.host.core.send_image(path))
+        self.host.run_worker(self.host.core.send_image(path), group="transfer")
 
     def action_send_ascii(self) -> None:
         path = self._require_path()
@@ -4708,7 +4785,9 @@ class TuiMediaScreen(ModalScreen[None]):
                 return
             await self.host._send_image_me(lines)
             self.host._record_transfer_event("ascii", path, "queued for sending")
-            self.host.run_worker(self.host.core.send_image_lines(lines))
+            self.host.run_worker(
+                self.host.core.send_image_lines(lines), group="transfer"
+            )
 
         self.dismiss(None)
         asyncio.create_task(_runner())
@@ -4724,7 +4803,9 @@ class TuiMediaScreen(ModalScreen[None]):
                 return
             await self.host._send_image_me(lines)
             self.host._record_transfer_event("bw", path, "queued for sending")
-            self.host.run_worker(self.host.core.send_image_lines(lines))
+            self.host.run_worker(
+                self.host.core.send_image_lines(lines), group="transfer"
+            )
 
         self.dismiss(None)
         asyncio.create_task(_runner())

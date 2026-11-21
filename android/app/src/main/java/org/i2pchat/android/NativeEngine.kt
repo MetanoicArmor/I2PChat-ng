@@ -104,6 +104,19 @@ object NativeEngine {
     @JvmStatic external fun nativeGroupHistory(groupId: String): String
     @JvmStatic external fun nativeSetPeerProfile(addr: String, name: String, note: String)
     @JvmStatic external fun nativeSetPeerRetentionDays(addr: String, days: Int)
+    /** Pin or unpin a direct chat or group; [pinOrder] ranks among pinned rows. */
+    @JvmStatic external fun nativeSetConversationPin(
+        id: String,
+        group: Boolean,
+        pinned: Boolean,
+        pinOrder: Int,
+    )
+    /** Mute or unmute system notifications for a direct chat or group. */
+    @JvmStatic external fun nativeSetConversationNotificationsMuted(
+        id: String,
+        group: Boolean,
+        muted: Boolean,
+    )
     @JvmStatic external fun nativeRemovePeer(addr: String)
     @JvmStatic external fun nativeForgetPin(addr: String)
     @JvmStatic external fun nativeClearHistory(addr: String)

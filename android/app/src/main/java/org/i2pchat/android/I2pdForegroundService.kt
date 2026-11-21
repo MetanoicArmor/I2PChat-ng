@@ -323,11 +323,13 @@ class I2pdForegroundService : Service() {
         }
 
         fun start(context: Context, appRoot: File, bundled: Boolean, text: String) {
-            val intent = Intent(context, I2pdForegroundService::class.java)
+            val app = context.applicationContext
+            val intent = Intent(app, I2pdForegroundService::class.java)
                 .putExtra(EXTRA_BUNDLED, bundled)
                 .putExtra(EXTRA_APP_ROOT, appRoot.absolutePath)
                 .putExtra(EXTRA_TEXT, text)
-            context.startForegroundService(intent)
+            runCatching { app.startForegroundService(intent) }
+                .recoverCatching { app.startService(intent) }
         }
 
         fun restartBundled(

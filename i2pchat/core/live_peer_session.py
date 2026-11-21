@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from i2pchat.core.i2p_chat_core import FileTransferInfo, PendingAckEntry
@@ -84,6 +84,10 @@ class LivePeerSession:
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # One outgoing F/D/E (or G/image) at a time per peer.
     file_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # High-priority outbound frames (U text, S ACK) flushed between file chunks.
+    priority_frames: List[bytes] = field(default_factory=list)
+    priority_waiters: List[asyncio.Future] = field(default_factory=list)
+    priority_q_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     receive_task: Optional[asyncio.Task] = None
 

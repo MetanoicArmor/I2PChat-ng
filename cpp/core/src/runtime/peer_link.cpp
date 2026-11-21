@@ -64,7 +64,10 @@ void PeerLink::send(char msg_type, ByteView payload, std::uint64_t msg_id) {
         return;
     }
     try {
-        enqueue(peer_.send_message(msg_type, payload, msg_id));
+        // Text (U) and signals (S, including delivery ACK) jump ahead of file
+        // chunks so a mid-transfer chat message is not stuck behind D/G frames.
+        const bool high = (msg_type == 'U' || msg_type == 'S');
+        enqueue(peer_.send_message(msg_type, payload, msg_id), high);
     } catch (const std::exception& error) {
         finish(std::string("send failed: ") + error.what());
     }
@@ -91,11 +94,15 @@ bool PeerLink::complete_deferred_trust(bool accept) {
     return apply(peer_.resolve_deferred_trust(accept));
 }
 
-void PeerLink::enqueue(Bytes bytes) {
+void PeerLink::enqueue(Bytes bytes, bool high_priority) {
     if (closed_ || bytes.empty()) {
         return;
     }
-    outbox_.push_back(std::move(bytes));
+    if (high_priority) {
+        outbox_high_.push_back(std::move(bytes));
+    } else {
+        outbox_normal_.push_back(std::move(bytes));
+    }
     if (writing_) {
         return;
     }
@@ -108,10 +115,17 @@ void PeerLink::enqueue(Bytes bytes) {
 asio::awaitable<void> PeerLink::drain_outbox() {
     // After co_await, another enqueue may have raced past writing_==true and left
     // bytes sitting in the queue with nobody draining. Re-claim until idle.
+    // High-priority (U/S) frames always leave before the next normal chunk.
     for (;;) {
-        while (!closed_ && !outbox_.empty()) {
-            const Bytes frame = std::move(outbox_.front());
-            outbox_.pop_front();
+        while (!closed_ && (!outbox_high_.empty() || !outbox_normal_.empty())) {
+            Bytes frame;
+            if (!outbox_high_.empty()) {
+                frame = std::move(outbox_high_.front());
+                outbox_high_.pop_front();
+            } else {
+                frame = std::move(outbox_normal_.front());
+                outbox_normal_.pop_front();
+            }
             boost::system::error_code error;
             co_await asio::async_write(socket_, asio::buffer(frame),
                                        asio::redirect_error(asio::use_awaitable, error));
@@ -121,7 +135,7 @@ asio::awaitable<void> PeerLink::drain_outbox() {
             }
         }
         writing_ = false;
-        if (closed_ || outbox_.empty()) {
+        if (closed_ || (outbox_high_.empty() && outbox_normal_.empty())) {
             co_return;
         }
         writing_ = true;
@@ -268,7 +282,8 @@ void PeerLink::finish(std::string reason) {
     socket_.close(ignored);
     keepalive_timer_.cancel();
     handshake_timer_.cancel();
-    outbox_.clear();
+    outbox_high_.clear();
+    outbox_normal_.clear();
 
     if (callbacks_.on_closed) {
         callbacks_.on_closed(*this, reason);

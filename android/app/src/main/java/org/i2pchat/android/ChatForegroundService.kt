@@ -56,7 +56,9 @@ class ChatForegroundService : Service() {
             val app = context.applicationContext
             val intent = Intent(app, ChatForegroundService::class.java)
                 .putExtra(EXTRA_PROFILE, profile)
-            app.startForegroundService(intent)
+            // Without notification / background rights OEMs may throw; do not crash the UI.
+            runCatching { app.startForegroundService(intent) }
+                .recoverCatching { app.startService(intent) }
         }
 
         fun stop(context: Context) {

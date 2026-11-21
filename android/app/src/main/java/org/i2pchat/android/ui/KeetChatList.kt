@@ -1,18 +1,23 @@
 package org.i2pchat.android.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,6 +63,7 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
     var pasteInvite by remember { mutableStateOf(false) }
     var peerAddr by remember { mutableStateOf("") }
     var invite by remember { mutableStateOf("") }
+    var menuFor by remember { mutableStateOf<ContactUi?>(null) }
     val filtered = state.conversations.filter {
         query.isBlank() || it.title.contains(query, true) || it.addr.contains(query, true)
     }
@@ -192,9 +198,46 @@ fun ChatListScreen(bridge: ChatBridge, nav: NavHostController) {
                             bridge.selectConversation(item.addr, item.isGroup)
                             nav.navigate("conversation")
                         },
+                        onLongClick = { menuFor = item },
                     )
                 }
             }
+        }
+    }
+    val menuItem = menuFor
+    if (menuItem != null) {
+        ModalBottomSheet(onDismissRequest = { menuFor = null }) {
+            if (menuItem.pinned) {
+                SheetAction(stringResource(R.string.action_unpin_chat)) {
+                    menuFor = null
+                    bridge.setConversationPinned(menuItem.addr, menuItem.isGroup, false)
+                }
+                SheetAction(stringResource(R.string.action_pin_move_up)) {
+                    menuFor = null
+                    bridge.movePinnedConversation(menuItem.addr, -1)
+                }
+                SheetAction(stringResource(R.string.action_pin_move_down)) {
+                    menuFor = null
+                    bridge.movePinnedConversation(menuItem.addr, 1)
+                }
+            } else {
+                SheetAction(stringResource(R.string.action_pin_chat)) {
+                    menuFor = null
+                    bridge.setConversationPinned(menuItem.addr, menuItem.isGroup, true)
+                }
+            }
+            if (menuItem.notificationsMuted) {
+                SheetAction(stringResource(R.string.action_unmute_notifications)) {
+                    menuFor = null
+                    bridge.setConversationNotificationsMuted(menuItem.addr, menuItem.isGroup, false)
+                }
+            } else {
+                SheetAction(stringResource(R.string.action_mute_notifications)) {
+                    menuFor = null
+                    bridge.setConversationNotificationsMuted(menuItem.addr, menuItem.isGroup, true)
+                }
+            }
+            Spacer(Modifier.padding(bottom = 24.dp))
         }
     }
 }
@@ -211,12 +254,14 @@ private fun SheetAction(label: String, onClick: () -> Unit) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatRow(
     item: ContactUi,
     state: ChatUiState,
     avatarPath: String?,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val title = if (item.isGroup && item.displayName.isBlank()) {
         stringResource(R.string.group_default_title)
@@ -231,7 +276,7 @@ private fun ChatRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -251,11 +296,32 @@ private fun ChatRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (item.pinned) {
+                    Icon(
+                        Icons.Default.PushPin,
+                        contentDescription = stringResource(R.string.cd_pinned_chat),
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                            .size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (item.notificationsMuted) {
+                    Icon(
+                        Icons.Default.NotificationsOff,
+                        contentDescription = stringResource(R.string.cd_muted_chat),
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                            .size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (item.lastActivityTs.isNotBlank()) {
                     Text(
                         shortClock(item.lastActivityTs),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp),
                     )
                 }
             }

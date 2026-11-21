@@ -138,6 +138,14 @@ data class UiPrefs(
     val filesDir: String = "",
     val imagesDir: String = "",
     val ephemeralMedia: Boolean = false,
+    /** First-launch background-permission dialog has been shown (Allow or Later). */
+    val backgroundPromptSeen: Boolean = false,
+    /**
+     * Last known “safe to run in background” snapshot: notifications granted and
+     * battery optimizations disabled for this app. Refreshed from the OS; shown
+     * on the Settings screen.
+     */
+    val backgroundAllowed: Boolean = false,
 ) {
     companion object {
         fun file(appRoot: File) = File(appRoot, "ui_prefs.json")
@@ -155,6 +163,8 @@ data class UiPrefs(
                     filesDir = raw.optString("files_dir", ""),
                     imagesDir = raw.optString("images_dir", ""),
                     ephemeralMedia = raw.optBoolean("ephemeral_media", false),
+                    backgroundPromptSeen = raw.optBoolean("background_prompt_seen", false),
+                    backgroundAllowed = raw.optBoolean("background_allowed", false),
                 )
             } catch (_: Exception) {
                 UiPrefs()
@@ -172,6 +182,8 @@ data class UiPrefs(
                 .put("files_dir", filesDir)
                 .put("images_dir", imagesDir)
                 .put("ephemeral_media", ephemeralMedia)
+                .put("background_prompt_seen", backgroundPromptSeen)
+                .put("background_allowed", backgroundAllowed)
                 .toString(),
         )
     }

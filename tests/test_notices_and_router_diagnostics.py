@@ -7,6 +7,8 @@ from i2pchat.presentation.notices import (
     LEVEL_PEER_STATE,
     LEVEL_USER,
     LEVEL_VERBOSE,
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
     NoticeLog,
     classify_error,
     classify_notice,
@@ -58,6 +60,30 @@ def test_connection_errors_are_not_chat_noise():
     assert classify_error("Secure handshake timed out. Reconnect.").level == LEVEL_VERBOSE
     other = classify_error("File too large")
     assert other.level == LEVEL_USER and other.code == "error.other"
+
+
+def test_channel_desync_and_integrity_errors_are_localized(monkeypatch):
+    desync = classify_error(
+        "Secure channel out of sync (peer abcd…) (seq got 5, expected 4)"
+    )
+    assert desync.code == "peer.channel_desync"
+    assert desync.level == LEVEL_USER
+    assert desync.severity == SEVERITY_WARNING
+    rendered = render_notice(desync)
+    assert "Reconnecting automatically" in rendered
+    assert "reconnect and resend" not in rendered.lower()
+    legacy = classify_error("Replay protection triggered (peer abcd…)")
+    assert legacy.code == "peer.channel_desync"
+    assert legacy.severity == SEVERITY_WARNING
+    integrity = classify_error("Message integrity check failed (peer abcd…)")
+    assert integrity.code == "peer.integrity_failed"
+    assert integrity.severity == SEVERITY_ERROR
+    monkeypatch.setattr(i18n, "_language", "ru")
+    monkeypatch.delenv("I2PCHAT_LANG", raising=False)
+    ru = render_notice(desync)
+    assert "синхронизации" in ru
+    assert "автоматически" in ru
+    assert "целостности" in render_notice(integrity)
 
 
 def test_render_notice_localized(monkeypatch):

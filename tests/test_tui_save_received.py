@@ -251,3 +251,31 @@ def test_media_screen_disables_save_when_nothing_was_received() -> None:
 
 def test_transfer_event_path_defaults_to_empty() -> None:
     assert TransferEventRef(kind="file", filename="a", detail="d", timestamp="t").path == ""
+
+
+def test_file_progress_and_delivery_do_not_fill_media_list(tmp_path: Path) -> None:
+    app, posted = _app()
+    document = _received(tmp_path, "notes.txt", b"12345")
+
+    I2PChat.handle_file_event(app, FileTransferInfo(filename=document, size=5, received=0))
+    I2PChat.handle_file_event(app, FileTransferInfo(filename=document, size=5, received=2))
+    assert list(app._recent_transfers) == []
+    assert any("receiving" in text and "%" in text for _kind, text in posted)
+
+    I2PChat.handle_file_event(app, FileTransferInfo(filename=document, size=5, received=5))
+    assert len(app._recent_transfers) == 1
+    assert app._recent_transfers[0].detail == "received"
+    assert app._recent_transfers[0].path == document
+
+    I2PChat.handle_file_delivered(app, "notes.txt")
+    I2PChat.handle_image_delivered(app, "photo.png")
+    assert len(app._recent_transfers) == 1
+    assert [kind for kind, _ in posted if kind == "success"] == ["success", "success"]
+
+    # Legacy noisy rows stay in the deque but Media filters them out.
+    I2PChat._record_transfer_event(app, "file", "old.bin", "receiving 40%")
+    I2PChat._record_transfer_event(app, "file", "old.bin", "delivered")
+    rows = I2PChat._media_transfer_rows(app)
+    assert [item.detail for item in rows] == ["received"]
+    assert "delivery" not in I2PChat._media_summary_text(app).lower()
+    assert "Received items available to save: 1" in I2PChat._media_summary_text(app)

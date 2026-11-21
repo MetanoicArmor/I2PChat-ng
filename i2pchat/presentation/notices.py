@@ -102,6 +102,25 @@ _SYSTEM_RULES: tuple[_Rule, ...] = (
 _ERROR_RULES: tuple[_Rule, ...] = (
     _r(r"^Connection timed out", "peer.connect_failed", _U, SEVERITY_WARNING),
     _r(r"^Connection failed:", "peer.connect_failed", _U, SEVERITY_WARNING),
+    _r(
+        r"^Secure channel out of sync(?: \(peer (?P<peer>[^)]+)\))?",
+        "peer.channel_desync",
+        _U,
+        SEVERITY_WARNING,
+    ),
+    # Legacy core wording (pre-1.5.x UI copy); keep matching for older logs/tests.
+    _r(
+        r"^Replay protection triggered(?: \(peer (?P<peer>[^)]+)\))?",
+        "peer.channel_desync",
+        _U,
+        SEVERITY_WARNING,
+    ),
+    _r(
+        r"^Message integrity check failed(?: \(peer (?P<peer>[^)]+)\))?",
+        "peer.integrity_failed",
+        _U,
+        SEVERITY_ERROR,
+    ),
     _r(r"^Secure handshake timed out", "peer.handshake_timeout", _V, SEVERITY_WARNING),
     _r(r"^Handshake ", "peer.handshake_failed", _V, SEVERITY_WARNING),
     _r(r"^Rejected incoming connection", "peer.incoming_rejected", _V, SEVERITY_WARNING),

@@ -23,7 +23,11 @@ private val extraMimeByExt = mapOf(
 fun mimeTypeForName(nameOrPath: String): String? {
     val ext = File(nameOrPath).extension.lowercase(Locale.ROOT)
     if (ext.isEmpty()) return null
-    return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: extraMimeByExt[ext]
+    // Prefer the local table so JVM unit tests (no MimeTypeMap) and older APIs stay consistent.
+    extraMimeByExt[ext]?.let { return it }
+    return runCatching {
+        MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+    }.getOrNull()
 }
 
 fun mediaKindForName(nameOrPath: String): MediaKind {

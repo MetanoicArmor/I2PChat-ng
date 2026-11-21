@@ -2218,6 +2218,34 @@ class I2PChatCore:
             TransportState.RECONNECTING, reason="scheduled-disconnect"
         )
 
+    def _handle_channel_desync(
+        self,
+        peer_id: Optional[str],
+        *,
+        seq_got: int,
+        seq_expected: int,
+        err_peer: Optional[str] = None,
+    ) -> None:
+        """Tear down a desynced live channel and dial again immediately.
+
+        Pending ACK confirmation is often lost with the stream; do not mark
+        outbound messages failed — bubbles stay ``sending`` until TTL prune.
+        """
+        peer_label = err_peer
+        if not peer_label and peer_id:
+            peer_label = peer_id
+        self._emit_error(
+            "Secure channel out of sync"
+            + self._peer_protocol_err_suffix(peer_label)
+            + f" (seq got {seq_got}, expected {seq_expected})"
+        )
+        self._schedule_disconnect(peer_id)
+        peer = self._normalize_peer_addr(peer_id or peer_label or "")
+        if peer:
+            # Skip the ~20s first backoff; same path as send-during-grace.
+            self._auto_reconnect.nudge(peer, time.monotonic())
+            self._ensure_auto_reconnect()
+
     async def _handshake_watchdog(
         self,
         connection: Tuple[asyncio.StreamReader, asyncio.StreamWriter],
@@ -2326,17 +2354,80 @@ class I2PChatCore:
             return self._live_sessions[k]
         raise ValueError(f"No live session for peer route {peer_for_route!r}")
 
+    async def _flush_priority_frames(
+        self,
+        writer: asyncio.StreamWriter,
+        *,
+        sess: LivePeerSession,
+    ) -> None:
+        """Send queued U/S frames ahead of the next file chunk (caller holds no write_lock)."""
+        async with sess.priority_q_lock:
+            frames = sess.priority_frames
+            waiters = sess.priority_waiters
+            if not frames and not waiters:
+                return
+            sess.priority_frames = []
+            sess.priority_waiters = []
+        async with sess.write_lock:
+            for frame in frames:
+                writer.write(frame)
+            if frames:
+                await writer.drain()
+                sess._soft_signal_ack_since_drain = 0
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
+
+    async def _enqueue_priority_frame(
+        self,
+        sess: LivePeerSession,
+        data: bytes,
+        *,
+        wait: bool = False,
+    ) -> Optional[asyncio.Future]:
+        """Queue a high-priority frame; optionally return a Future completed on flush."""
+        fut: Optional[asyncio.Future] = None
+        async with sess.priority_q_lock:
+            if wait:
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                sess.priority_waiters.append(fut)
+            sess.priority_frames.append(data)
+        return fut
+
     async def _live_write_drain(
         self,
         writer: asyncio.StreamWriter,
         data: bytes,
         *,
         sess: LivePeerSession,
+        use_priority: bool = True,
     ) -> None:
-        """Write + drain under the peer live write lock (text/file/signals share one SAM writer)."""
+        """Write + drain under the peer live write lock (text/file/signals share one SAM writer).
+
+        During an outgoing file/image transfer, concurrent text/ACK frames go into the
+        priority queue and are flushed between chunks. The transfer's own F/D/E/G
+        frames pass use_priority=False so they write directly.
+        """
+        if use_priority and sess._file_transfer_active:
+            fut = await self._enqueue_priority_frame(sess, data, wait=True)
+            await self._flush_priority_frames(writer, sess=sess)
+            if fut is not None and not fut.done():
+                await fut
+            return
+        async with sess.priority_q_lock:
+            frames = sess.priority_frames
+            waiters = sess.priority_waiters
+            sess.priority_frames = []
+            sess.priority_waiters = []
         async with sess.write_lock:
+            for frame in frames:
+                writer.write(frame)
             writer.write(data)
             await writer.drain()
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
 
     def _handshake_complete_for_peer_route(self, peer_for_route: str) -> bool:
         try:
@@ -6002,7 +6093,11 @@ class I2PChatCore:
     ACK_PRUNE_INTERVAL = 15.0
 
     def _activate_ack_session(self, peer_id: Optional[str] = None) -> None:
-        """Сброс inflight и новый epoch ACK для legacy-потока или указанного live-пира."""
+        """Сброс inflight и новый epoch ACK для legacy-потока или указанного live-пира.
+
+        Does not emit ``DELIVERY_STATE_FAILED``: after channel desync / reconnect the
+        peer may already have the text; bubbles stay ``sending`` until TTL prune.
+        """
         if peer_id:
             k = self._normalize_peer_addr(peer_id)
             ls = self._live_sessions.get(k)
@@ -9059,17 +9154,27 @@ class I2PChatCore:
         *,
         sess: Any,
     ) -> None:
-        """S-фрейм (MSG_ACK, IMG_ACK): при исходящей передаче файла реже await drain()."""
+        """S-фрейм (MSG_ACK, IMG_ACK): при исходящей передаче — в priority queue."""
+        if sess._file_transfer_active:
+            await self._enqueue_priority_frame(sess, frame, wait=False)
+            # Opportunistic flush when write_lock is free (between chunks).
+            if not sess.write_lock.locked():
+                await self._flush_priority_frames(writer, sess=sess)
+            return
+        async with sess.priority_q_lock:
+            frames = sess.priority_frames
+            waiters = sess.priority_waiters
+            sess.priority_frames = []
+            sess.priority_waiters = []
         async with sess.write_lock:
+            for pending in frames:
+                writer.write(pending)
             writer.write(frame)
-            if not sess._file_transfer_active:
-                await writer.drain()
-                sess._soft_signal_ack_since_drain = 0
-                return
-            sess._soft_signal_ack_since_drain += 1
-            if sess._soft_signal_ack_since_drain >= _msg_ack_soft_drain_every():
-                await writer.drain()
-                sess._soft_signal_ack_since_drain = 0
+            await writer.drain()
+            sess._soft_signal_ack_since_drain = 0
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
 
     async def _send_abort_file(self, peer_for_route: Optional[str] = None) -> None:
         """Отправить пиру сигнал отмены передачи файла (получатель отменил или отправитель)."""
@@ -9188,7 +9293,9 @@ class I2PChatCore:
                 header_frame, file_msg_id = self.frame_message_with_id(
                     "F", header, peer_id=fpid
                 )
-                await self._live_write_drain(writer, header_frame, sess=sess)
+                await self._live_write_drain(
+                    writer, header_frame, sess=sess, use_priority=False
+                )
                 routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
                 self._register_pending_ack(
                     file_acks,
@@ -9242,6 +9349,9 @@ class I2PChatCore:
                         if not sess.conn:
                             raise ConnectionError("Connection lost during transfer")
 
+                        # Let queued U/ACK frames go out before the next D chunk.
+                        await self._flush_priority_frames(writer, sess=sess)
+
                         chunk = await asyncio.to_thread(f.read, chunk_size)
                         if not chunk:
                             break
@@ -9281,10 +9391,12 @@ class I2PChatCore:
                     async with sess.write_lock:
                         await writer.drain()
 
+                await self._flush_priority_frames(writer, sess=sess)
                 await self._live_write_drain(
                     writer,
                     self.frame_message("E", "", peer_id=fpid),
                     sess=sess,
+                    use_priority=False,
                 )
 
                 info = FileTransferInfo(
@@ -9313,6 +9425,23 @@ class I2PChatCore:
                 )
                 self._emit_file_event(info)
                 self._emit_error(f"File transfer interrupted: connection lost")
+
+            except asyncio.CancelledError:
+                # Worker/group cancel (or task cancel): notify peer, then re-raise.
+                try:
+                    await self._send_abort_file(peer_for_route)
+                except Exception:
+                    pass
+                info = FileTransferInfo(
+                    filename=filename,
+                    size=filesize,
+                    received=-1,
+                    is_sending=True,
+                    source_path=path,
+                )
+                self._emit_file_event(info)
+                self._emit_error("File transfer cancelled")
+                raise
 
             except Exception as e:
                 rejected = "rejected" in str(e).lower()
@@ -9457,7 +9586,9 @@ class I2PChatCore:
                 header_frame, image_msg_id = self.frame_message_with_id(
                     "G", header, peer_id=fpid
                 )
-                await self._live_write_drain(writer, header_frame, sess=sess)
+                await self._live_write_drain(
+                    writer, header_frame, sess=sess, use_priority=False
+                )
                 routing_pid = fpid or self._normalize_peer_addr(peer_for_route)
                 self._register_pending_ack(
                     image_acks,
@@ -9483,6 +9614,8 @@ class I2PChatCore:
                         raise Exception("Transfer cancelled by user")
                     if not sess.conn:
                         raise ConnectionError("Connection lost during transfer")
+
+                    await self._flush_priority_frames(writer, sess=sess)
 
                     chunk = payload[offset : offset + chunk_size]
                     offset += len(chunk)
@@ -9524,11 +9657,13 @@ class I2PChatCore:
                     async with sess.write_lock:
                         await writer.drain()
 
+                await self._flush_priority_frames(writer, sess=sess)
                 # Отправляем маркер завершения
                 await self._live_write_drain(
                     writer,
                     self.frame_message("G", "__IMG_END__", peer_id=fpid),
                     sess=sess,
+                    use_priority=False,
                 )
 
                 self._emit_file_event(
@@ -9563,6 +9698,24 @@ class I2PChatCore:
                 )
                 self._emit_error(f"Image transfer interrupted: connection lost")
                 return None
+
+            except asyncio.CancelledError:
+                try:
+                    await self._send_abort_file(peer_for_route)
+                except Exception:
+                    pass
+                self._emit_file_event(
+                    FileTransferInfo(
+                        filename=filename,
+                        size=filesize,
+                        received=-1,
+                        is_sending=True,
+                        is_inline_image=True,
+                        source_path=path,
+                    )
+                )
+                self._emit_error("Image transfer cancelled")
+                raise
 
             except Exception as e:
                 self._emit_file_event(
@@ -11362,10 +11515,27 @@ class I2PChatCore:
                             # Тот же read_task дочитывает кадр. Новый read_frame
                             # здесь съел бы уже прочитанные байты и сдвинул seq.
                             continue
+                        # Idle: never cancel an in-flight read_frame on a still-open
+                        # socket (that desyncs anti-replay). Close first so the
+                        # pending read fails cleanly, then exit to cleanup.
                         if sess.conn == connection:
                             self._emit_error(
                                 "Connection timed out (no data received)" + _ps(err_peer)
                             )
+                            try:
+                                sess.conn = None
+                                writer.close()
+                            except Exception:
+                                pass
+                            if read_task is not None and not read_task.done():
+                                try:
+                                    await asyncio.wait_for(
+                                        asyncio.shield(read_task), timeout=2.0
+                                    )
+                                except Exception:
+                                    pass
+                                else:
+                                    read_task = None
                         return
                     read_task = None
                     msg_type = frame.msg_type
@@ -11473,18 +11643,18 @@ class I2PChatCore:
                             expected_seq,
                             (err_peer or "?")[:24],
                         )
-                        self._emit_error(
-                            "Replay protection triggered"
-                            + _ps(err_peer)
-                            + f" (seq got {seq_num}, expected {expected_seq})"
+                        self._handle_channel_desync(
+                            peer_id,
+                            seq_got=seq_num,
+                            seq_expected=expected_seq,
+                            err_peer=err_peer,
                         )
-                        self._schedule_disconnect(peer_id)
                         break
 
                     decrypted = crypto.decrypt_message(recv_enc, encrypted_body)
                     if decrypted is None:
                         logger.warning("Decryption failed")
-                        self._emit_error("Failed to decrypt message")
+                        self._emit_error("Failed to decrypt message" + _ps(err_peer))
                         break
                     try:
                         body_data = self._remove_padding_profile(decrypted)
@@ -12205,26 +12375,54 @@ class I2PChatCore:
             if sess.conn == connection:
                 self._emit_error(f"Protocol Error: {e}")
         finally:
+            # Tear-down order matters for anti-replay:
+            # 1) detach/close the socket so no other receive_loop can attach,
+            # 2) let/cancel the in-flight read_task,
+            # 3) only then clear _recv_loop_active.
+            transfer_busy = (
+                sess._file_transfer_active
+                or sess.incoming_info is not None
+                or sess.inline_image_info is not None
+            )
+            owned = sess.conn is connection
+            # Idle-timeout path may already have nulled conn while closing writer.
+            orphaned_closed = (
+                sess.conn is None
+                and not transfer_busy
+                and self._live_sessions.get(peer_id) is sess
+            )
+            cleaning = (owned or orphaned_closed) and not transfer_busy
+
+            if owned and cleaning:
+                try:
+                    sess.conn = None
+                    writer.close()
+                except Exception:
+                    pass
+
             if read_task is not None and not read_task.done():
-                read_task.cancel()
+                if cleaning:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(read_task), timeout=1.0)
+                    except Exception:
+                        pass
+                if read_task is not None and not read_task.done():
+                    read_task.cancel()
 
-                def _consume_read(task: asyncio.Task[Any]) -> None:
-                    if task.cancelled():
-                        return
-                    task.exception()
+                    def _consume_read(task: asyncio.Task[Any]) -> None:
+                        if task.cancelled():
+                            return
+                        task.exception()
 
-                read_task.add_done_callback(_consume_read)
+                    read_task.add_done_callback(_consume_read)
+
             current_task = asyncio.current_task()
             sess._recv_loop_active = False
             if sess.receive_task is current_task:
                 sess.receive_task = None
-            # Не сбрасываем соединение если идёт передача или приём файла / inline-изображения
-            if (
-                sess.conn == connection
-                and not sess._file_transfer_active
-                and sess.incoming_info is None
-                and sess.inline_image_info is None
-            ):
+
+            # Не сбрасываем сессию если идёт передача или приём файла / inline-изображения
+            if cleaning:
                 self._cancel_handshake_watchdog(peer_id)
                 peer_before_cleanup = self._normalize_peer_addr(sess.peer_id or "")
                 self._live_sessions.pop(peer_id, None)
