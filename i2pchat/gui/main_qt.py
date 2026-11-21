@@ -8187,7 +8187,8 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._center_stack.setCurrentWidget(self._call_overlay)
 
     def _on_call_overlay_closed(self) -> None:
-        if self._center_stack.currentWidget() is getattr(self, "_call_overlay", None):
+        # Always leave the call page (and status, if opened during a call).
+        if self._center_stack.currentWidget() is not self._chat_page:
             self._show_chat_page()
 
     def _on_call_overlay_minimized(self) -> None:

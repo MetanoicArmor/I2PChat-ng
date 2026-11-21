@@ -15,9 +15,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+// media / signaling helpers live in CallSignals + CallMediaFraming
 
 enum class CallPhase {
     Idle, Outgoing, Incoming, Active, Ending
@@ -42,10 +45,13 @@ data class CallUiState(
     val videoFps: Int = 8,
     val videoMaxEdge: Int = 480,
     val lastRemoteJpeg: ByteArray? = null,
+    val mediaReady: Boolean = false,
 )
 
 /**
  * 1:1 call orchestration: STREAM signaling via [sendSignal], media via SAM DATAGRAM.
+ *
+ * DATAGRAM SESSION CREATE is cancelable; hangup/reject tear down locally immediately.
  */
 class CallController(
     private val appContext: Context,
@@ -62,6 +68,10 @@ class CallController(
     private var seq = AtomicInteger(0)
     private var audioJob: Job? = null
     private var audioTrack: AudioTrack? = null
+    private var setupJob: Job? = null
+    private var generation = 0
+    private val mutex = Mutex()
+    private val remoteCache = HashMap<String, String>()
     private val prefs by lazy {
         appContext.getSharedPreferences("call_prefs", Context.MODE_PRIVATE)
     }
@@ -89,41 +99,29 @@ class CallController(
 
     fun startOutgoing(peer: String, video: Boolean) {
         scope.launch(Dispatchers.IO) {
-            if (_state.value.phase != CallPhase.Idle) return@launch
-            loadPrefsIntoState()
-            val callId = CallSignals.newCallId()
-            val dg = runCatching {
-                SamDatagramSession.open(
-                    sessionId = "call-${UUID.randomUUID().toString().take(10)}",
-                    samHost = samHost(),
-                    samPort = samPort(),
-                    onDatagram = ::onDatagram,
-                )
-            }.getOrElse {
-                _state.update { s -> s.copy(error = it.message.orEmpty()) }
-                return@launch
-            }
-            datagram = dg
-            val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
-            val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
-            _state.update {
-                it.copy(
-                    phase = CallPhase.Outgoing,
-                    callId = callId,
-                    peer = peer,
-                    wantVideo = video,
-                    cam = video,
-                    mic = true,
-                    spk = true,
-                    error = "",
-                )
-            }
-            val ok = sendSignal(
-                peer,
-                CallSignals.buildInvite(callId, video, "opus,jpeg", maxBr, token),
-            )
-            if (!ok) {
-                teardown("signal failed")
+            mutex.withLock {
+                if (_state.value.phase != CallPhase.Idle) return@launch
+                loadPrefsIntoState()
+                val callId = CallSignals.newCallId()
+                generation += 1
+                val gen = generation
+                _state.update {
+                    it.copy(
+                        phase = CallPhase.Outgoing,
+                        callId = callId,
+                        peer = peer,
+                        wantVideo = video,
+                        cam = video,
+                        mic = true,
+                        spk = true,
+                        error = "",
+                        mediaReady = false,
+                    )
+                }
+                setupJob?.cancel()
+                setupJob = scope.launch(Dispatchers.IO) {
+                    outgoingSetup(gen, peer, callId, video)
+                }
             }
         }
     }
@@ -133,54 +131,67 @@ class CallController(
             val snap = _state.value
             if (snap.phase != CallPhase.Incoming) return@launch
             loadPrefsIntoState()
-            val dg = runCatching {
-                SamDatagramSession.open(
-                    sessionId = "call-${UUID.randomUUID().toString().take(10)}",
-                    samHost = samHost(),
-                    samPort = samPort(),
-                    onDatagram = ::onDatagram,
+            val gen = generation
+            val peer = snap.peer
+            val callId = snap.callId
+            try {
+                val dg = awaitDatagramReady(gen)
+                    ?: throw IllegalStateException("DATAGRAM setup failed")
+                if (generation != gen || _state.value.phase != CallPhase.Incoming) {
+                    return@launch
+                }
+                val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
+                val token = dg.localB32Hint.ifBlank { dg.localDestinationB64 }
+                val ok = sendSignal(
+                    peer,
+                    CallSignals.buildAccept(callId, "opus,jpeg", maxBr, token),
                 )
-            }.getOrElse {
-                teardown(it.message.orEmpty())
-                return@launch
+                if (!ok) {
+                    teardown("accept failed")
+                    return@launch
+                }
+                resolveRemoteLocked(remoteDestB64.ifBlank { snap.let { remoteDestB64 } })
+                val ready = remoteDestB64.length >= REMOTE_DEST_MIN
+                _state.update {
+                    it.copy(
+                        phase = CallPhase.Active,
+                        cam = it.wantVideo,
+                        mediaReady = ready,
+                    )
+                }
+                sendMediaState()
+                startAudioLoop()
+            } catch (t: Throwable) {
+                if (generation == gen) {
+                    Log.w(TAG, "accept failed", t)
+                    teardown(t.message.orEmpty().ifBlank { "accept failed" })
+                }
             }
-            datagram = dg
-            val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
-            val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
-            remoteDestB64 = snap.let { /* set from invite */ remoteDestB64 }
-            val ok = sendSignal(
-                snap.peer,
-                CallSignals.buildAccept(snap.callId, "opus,jpeg", maxBr, token),
-            )
-            if (!ok) {
-                teardown("accept failed")
-                return@launch
-            }
-            _state.update {
-                it.copy(phase = CallPhase.Active, cam = it.wantVideo)
-            }
-            sendMediaState()
-            startAudioLoop()
         }
     }
 
     fun rejectIncoming(reason: String = "declined") {
-        scope.launch(Dispatchers.IO) {
-            val snap = _state.value
-            if (snap.phase == CallPhase.Incoming) {
-                sendSignal(snap.peer, CallSignals.buildReject(snap.callId, reason))
+        val snap = _state.value
+        val peer = snap.peer
+        val callId = snap.callId
+        beginLocalTeardown("rejected")
+        if (snap.phase == CallPhase.Incoming && peer.isNotBlank() && callId.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { sendSignal(peer, CallSignals.buildReject(callId, reason)) }
             }
-            teardown("rejected")
         }
     }
 
     fun hangup() {
-        scope.launch(Dispatchers.IO) {
-            val snap = _state.value
-            if (snap.phase != CallPhase.Idle && snap.peer.isNotBlank()) {
-                sendSignal(snap.peer, CallSignals.buildHangup(snap.callId))
+        val snap = _state.value
+        val peer = snap.peer
+        val callId = snap.callId
+        if (snap.phase == CallPhase.Idle) return
+        beginLocalTeardown("hangup")
+        if (peer.isNotBlank() && callId.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { sendSignal(peer, CallSignals.buildHangup(callId)) }
             }
-            teardown("hangup")
         }
     }
 
@@ -211,30 +222,50 @@ class CallController(
         scope.launch(Dispatchers.IO) {
             when (parsed.kind) {
                 CallSignals.INVITE -> {
-                    if (_state.value.phase != CallPhase.Idle) {
-                        sendSignal(peer, CallSignals.buildReject(parsed.callId, "busy"))
-                        return@launch
-                    }
-                    remoteDestB64 = parsed.datagramB32
-                    _state.update {
-                        CallUiState(
-                            phase = CallPhase.Incoming,
-                            callId = parsed.callId,
-                            peer = peer,
-                            wantVideo = parsed.wantVideo,
-                        )
+                    mutex.withLock {
+                        if (_state.value.phase != CallPhase.Idle) {
+                            sendSignal(peer, CallSignals.buildReject(parsed.callId, "busy"))
+                            return@launch
+                        }
+                        generation += 1
+                        val gen = generation
+                        remoteDestB64 = parsed.datagramB32
+                        _state.update {
+                            CallUiState(
+                                phase = CallPhase.Incoming,
+                                callId = parsed.callId,
+                                peer = peer,
+                                wantVideo = parsed.wantVideo,
+                                audioBitrateKbps = it.audioBitrateKbps,
+                                videoBitrateKbps = it.videoBitrateKbps,
+                                videoFps = it.videoFps,
+                                videoMaxEdge = it.videoMaxEdge,
+                            )
+                        }
+                        setupJob?.cancel()
+                        setupJob = scope.launch(Dispatchers.IO) {
+                            prefetchDatagram(gen)
+                        }
                     }
                 }
                 CallSignals.ACCEPT -> {
                     val snap = _state.value
                     if (snap.phase != CallPhase.Outgoing || snap.callId != parsed.callId) return@launch
                     remoteDestB64 = parsed.datagramB32
-                    _state.update { it.copy(phase = CallPhase.Active) }
+                    resolveRemoteLocked(parsed.datagramB32)
+                    _state.update {
+                        it.copy(
+                            phase = CallPhase.Active,
+                            mediaReady = remoteDestB64.length >= REMOTE_DEST_MIN,
+                        )
+                    }
                     sendMediaState()
                     startAudioLoop()
                 }
                 CallSignals.REJECT, CallSignals.HANGUP -> {
-                    if (parsed.callId == _state.value.callId) teardown(parsed.reason.ifBlank { "ended" })
+                    if (parsed.callId == _state.value.callId) {
+                        beginLocalTeardown(parsed.reason.ifBlank { "ended" })
+                    }
                 }
                 CallSignals.MEDIA -> {
                     if (parsed.callId != _state.value.callId) return@launch
@@ -253,7 +284,8 @@ class CallController(
     fun sendJpeg(jpeg: ByteArray) {
         val snap = _state.value
         if (snap.phase != CallPhase.Active || !(snap.cam || snap.screen)) return
-        if (remoteDestB64.length < 40) return
+        ensureRemoteResolved()
+        if (remoteDestB64.length < REMOTE_DEST_MIN) return
         val dg = datagram ?: return
         val hash = CallSignals.callIdHash16(snap.callId)
         val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
@@ -268,6 +300,114 @@ class CallController(
             )
             runCatching { dg.send(remoteDestB64, pkt.encode()) }
         }
+    }
+
+    private suspend fun outgoingSetup(gen: Int, peer: String, callId: String, video: Boolean) {
+        var dg: SamDatagramSession? = null
+        try {
+            dg = SamDatagramSession.open(
+                sessionId = "call-${UUID.randomUUID().toString().take(10)}",
+                samHost = samHost(),
+                samPort = samPort(),
+                onDatagram = ::onDatagram,
+            )
+            if (generation != gen) {
+                dg.close()
+                return
+            }
+            datagram = dg
+            val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
+            val token = dg.localB32Hint.ifBlank { dg.localDestinationB64 }
+            val ok = sendSignal(
+                peer,
+                CallSignals.buildInvite(callId, video, "opus,jpeg", maxBr, token),
+            )
+            if (!ok) {
+                if (generation == gen) teardown("signal failed")
+            }
+        } catch (t: Throwable) {
+            dg?.close()
+            if (generation == gen && _state.value.phase == CallPhase.Outgoing) {
+                Log.w(TAG, "outgoing setup failed", t)
+                teardown(t.message.orEmpty().ifBlank { "setup failed" })
+            }
+        }
+    }
+
+    private suspend fun prefetchDatagram(gen: Int) {
+        var dg: SamDatagramSession? = null
+        try {
+            dg = SamDatagramSession.open(
+                sessionId = "call-${UUID.randomUUID().toString().take(10)}",
+                samHost = samHost(),
+                samPort = samPort(),
+                onDatagram = ::onDatagram,
+            )
+            if (generation != gen || _state.value.phase != CallPhase.Incoming) {
+                dg.close()
+                return
+            }
+            datagram = dg
+        } catch (t: Throwable) {
+            dg?.close()
+            Log.w(TAG, "incoming prefetch failed", t)
+        }
+    }
+
+    private suspend fun awaitDatagramReady(gen: Int): SamDatagramSession? {
+        datagram?.let { return it }
+        val job = setupJob
+        if (job != null) {
+            withTimeout(30_000L) { job.join() }
+        }
+        if (generation != gen) return null
+        datagram?.let { return it }
+        // Prefetch missed — open now.
+        val dg = SamDatagramSession.open(
+            sessionId = "call-${UUID.randomUUID().toString().take(10)}",
+            samHost = samHost(),
+            samPort = samPort(),
+            onDatagram = ::onDatagram,
+        )
+        if (generation != gen) {
+            dg.close()
+            return null
+        }
+        datagram = dg
+        return dg
+    }
+
+    private fun resolveRemoteLocked(token: String) {
+        val t = token.trim()
+        if (t.isEmpty()) return
+        if (t.length >= REMOTE_DEST_MIN && !t.contains('.')) {
+            remoteDestB64 = t
+            return
+        }
+        remoteCache[t]?.let {
+            remoteDestB64 = it
+            return
+        }
+        val name = when {
+            t.endsWith(".b32.i2p") -> t
+            t.endsWith(".i2p") -> t
+            '.' !in t -> "$t.b32.i2p"
+            else -> t
+        }
+        runCatching {
+            SamDatagramSession.namingLookup(samHost(), samPort(), name)
+        }.onSuccess { b64 ->
+            remoteCache[t] = b64
+            remoteDestB64 = b64
+        }.onFailure {
+            Log.w(TAG, "naming lookup failed for $name", it)
+            remoteDestB64 = t
+        }
+    }
+
+    private fun ensureRemoteResolved() {
+        if (remoteDestB64.length >= REMOTE_DEST_MIN) return
+        resolveRemoteLocked(remoteDestB64)
     }
 
     private fun sendMediaState() {
@@ -287,7 +427,6 @@ class CallController(
         when (pkt.type) {
             CallMediaFraming.TYPE_PCM16, CallMediaFraming.TYPE_OPUS -> {
                 if (!snap.spk) return
-                // Opus decode not bundled; treat Opus as opaque skip, PCM16 play.
                 if (pkt.type == CallMediaFraming.TYPE_PCM16) {
                     runCatching { audioTrack?.write(pkt.payload, 0, pkt.payload.size) }
                 }
@@ -341,7 +480,9 @@ class CallController(
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     val snap = _state.value
-                    if (!snap.mic || remoteDestB64.length < 40) continue
+                    if (!snap.mic) continue
+                    ensureRemoteResolved()
+                    if (remoteDestB64.length < REMOTE_DEST_MIN) continue
                     val bytes = ByteArray(n * 2)
                     for (i in 0 until n) {
                         val v = buf[i].toInt()
@@ -369,17 +510,32 @@ class CallController(
         }
     }
 
+    private fun beginLocalTeardown(reason: String) {
+        generation += 1
+        setupJob?.cancel()
+        setupJob = null
+        teardown(reason)
+    }
+
     private fun teardown(reason: String) {
         audioJob?.cancel()
         audioJob = null
-        runCatching { datagram?.close() }
+        val dg = datagram
         datagram = null
         remoteDestB64 = ""
-        _state.value = CallUiState(error = reason.takeIf { it != "hangup" && it != "ended" }.orEmpty())
+        _state.value = CallUiState(
+            error = reason.takeIf { it != "hangup" && it != "ended" && it != "remote_hangup" }.orEmpty(),
+            audioBitrateKbps = _state.value.audioBitrateKbps,
+            videoBitrateKbps = _state.value.videoBitrateKbps,
+            videoFps = _state.value.videoFps,
+            videoMaxEdge = _state.value.videoMaxEdge,
+        )
+        scope.launch(Dispatchers.IO) { runCatching { dg?.close() } }
         Log.i(TAG, "call ended: $reason")
     }
 
     companion object {
         private const val TAG = "CallController"
+        private const val REMOTE_DEST_MIN = 80
     }
 }

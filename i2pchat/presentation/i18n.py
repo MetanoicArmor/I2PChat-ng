@@ -183,13 +183,16 @@ _EN: dict[str, str] = {
     "call.accept": "Accept",
     "call.reject": "Reject",
     "call.calling": "Calling…",
+    "call.connecting": "Connecting…",
     "call.incoming": "Incoming call",
     "call.incoming_from": "Incoming call from {peer}",
     "call.connected": "Connected",
+    "call.media_pending": "Connected (waiting for media path…)",
     "call.in_call": "In call",
     "call.remote_video": "Remote",
     "call.local_video": "You",
     "call.need_peer": "Connect to a peer before starting a call.",
+    "call.no_event_loop": "No asyncio event loop. Restart the app and try again.",
     "diag.clock_skew": (
         "The system clock differs too much from network time. Enable automatic "
         "time synchronization and restart."
@@ -388,13 +391,16 @@ _RU: dict[str, str] = {
     "call.accept": "Принять",
     "call.reject": "Отклонить",
     "call.calling": "Вызов…",
+    "call.connecting": "Подключение…",
     "call.incoming": "Входящий звонок",
     "call.incoming_from": "Входящий звонок от {peer}",
     "call.connected": "Соединено",
+    "call.media_pending": "Соединено (ждём media-путь…)",
     "call.in_call": "В звонке",
     "call.remote_video": "Собеседник",
     "call.local_video": "Вы",
     "call.need_peer": "Сначала подключитесь к собеседнику.",
+    "call.no_event_loop": "Нет asyncio-цикла. Перезапустите приложение.",
     "diag.clock_skew": (
         "Системное время сильно расходится с сетевым. Включите автоматическую "
         "синхронизацию времени и перезапустите приложение."

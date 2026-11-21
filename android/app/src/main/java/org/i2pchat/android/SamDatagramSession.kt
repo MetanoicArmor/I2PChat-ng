@@ -107,13 +107,14 @@ class SamDatagramSession private constructor(
                 udp.close()
                 throw IllegalStateException("SESSION STATUS missing DESTINATION")
             }
+            val normalized = I2pDestinationUtil.normalize(dest)
             // Keep a BufferedInputStream reference so the TCP control socket stays open;
             // we do not read DATAGRAM RECEIVED here because PORT forwarding is enabled.
             BufferedInputStream(sock.getInputStream())
             val session = SamDatagramSession(
                 sessionId = sessionId,
-                localDestinationB64 = dest,
-                localB32Hint = dest.take(16),
+                localDestinationB64 = normalized.base64,
+                localB32Hint = normalized.base32,
                 control = sock,
                 out = out,
                 udp = udp,
@@ -121,6 +122,33 @@ class SamDatagramSession private constructor(
             )
             session.startRecv()
             return session
+        }
+
+        /** Resolve a .b32.i2p (or other) name to an I2P-base64 destination via SAM. */
+        fun namingLookup(samHost: String, samPort: Int, name: String): String {
+            val sock = Socket()
+            sock.connect(InetSocketAddress(samHost, samPort), 15_000)
+            sock.soTimeout = 60_000
+            try {
+                val reader = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8))
+                val out = BufferedOutputStream(sock.getOutputStream())
+                out.write("HELLO VERSION MIN=3.0 MAX=3.2\n".toByteArray(StandardCharsets.US_ASCII))
+                out.flush()
+                expectOk(reader.readLine(), "HELLO")
+                val safe = name.trim().replace(" ", "")
+                out.write("NAMING LOOKUP NAME=$safe\n".toByteArray(StandardCharsets.US_ASCII))
+                out.flush()
+                val line = reader.readLine() ?: throw IllegalStateException("Empty NAMING LOOKUP reply")
+                val fields = parseFields(line)
+                if (fields["RESULT"]?.equals("OK", true) != true) {
+                    throw IllegalStateException("NAMING LOOKUP failed: $line")
+                }
+                val value = fields["VALUE"].orEmpty()
+                if (value.isBlank()) throw IllegalStateException("NAMING LOOKUP missing VALUE")
+                return value
+            } finally {
+                runCatching { sock.close() }
+            }
         }
 
         private fun expectOk(line: String?, topic: String) {

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 SendSignal = Callable[[str, str], Awaitable[bool]]
 OnCallEvent = Callable[[str, dict[str, Any]], None]
+OpenDatagram = Callable[..., Awaitable[DatagramSession]]
+
+ACCEPT_SETUP_TIMEOUT_S = 30.0
+REMOTE_DEST_MIN_LEN = 80
 
 
 class CallPhase(str, Enum):
@@ -72,10 +76,11 @@ class CallState:
     max_bitrate: int = 320_000
     minimized: bool = False
     error: str = ""
+    media_ready: bool = False
 
 
 class CallSessionManager:
-    """Owns at most one call; creates TRANSIENT DATAGRAM when negotiating."""
+    """Owns at most one call; DATAGRAM setup is cancelable and off the signal path."""
 
     def __init__(
         self,
@@ -84,11 +89,13 @@ class CallSessionManager:
         send_signal: SendSignal,
         on_event: Optional[OnCallEvent] = None,
         profile: Optional[str] = None,
+        open_datagram: Optional[OpenDatagram] = None,
     ) -> None:
         self.sam_address = sam_address
         self.send_signal = send_signal
         self.on_event = on_event
         self.profile = profile
+        self._open_datagram_impl: OpenDatagram = open_datagram or self._default_open_datagram
         self.state = CallState()
         self.prefs: CallPrefs = load_call_prefs(profile)
         self._dg: Optional[DatagramSession] = None
@@ -96,6 +103,9 @@ class CallSessionManager:
         self._lock = asyncio.Lock()
         self._remote_b64_cache: dict[str, str] = {}
         self._frag_buf: dict[int, list[bytes]] = {}
+        self._setup_task: Optional[asyncio.Task[Optional[DatagramSession]]] = None
+        self._generation = 0
+        self._resolve_logged = False
 
     def _emit(self, kind: str, **extra: Any) -> None:
         if self.on_event is None:
@@ -125,6 +135,7 @@ class CallSessionManager:
             "minimized": s.minimized,
             "error": s.error,
             "max_bitrate": s.max_bitrate,
+            "media_ready": s.media_ready,
             "audio_bitrate_kbps": self.prefs.audio_bitrate_kbps,
             "video_bitrate_kbps": self.prefs.video_bitrate_kbps,
             "video_fps": self.prefs.video_fps,
@@ -138,8 +149,8 @@ class CallSessionManager:
             prefs = load_call_prefs(self.profile)
             self.prefs = prefs
             call_id = new_call_id()
-            dg = await self._open_datagram(f"call-{uuid.uuid4().hex[:10]}")
-            self._dg = dg
+            self._generation += 1
+            gen = self._generation
             self.state = CallState(
                 phase=CallPhase.OUTGOING,
                 call_id=call_id,
@@ -148,23 +159,13 @@ class CallSessionManager:
                 local_mic=prefs.start_mic,
                 local_cam=video,
                 local_spk=prefs.start_spk,
-                local_datagram_b32=dg.local_b32,
-                local_datagram_b64=dg.local_destination_b64,
                 max_bitrate=prefs.max_bitrate_bps,
             )
-            invite = CallInvite(
-                call_id=call_id,
-                want_audio=True,
-                want_video=video,
-                codecs="opus,jpeg",
-                max_bitrate=prefs.max_bitrate_bps,
-                datagram_b32=dg.local_b32 or dg.local_destination_b64,
-            )
-            ok = await self.send_signal(peer, invite.encode())
-            if not ok:
-                await self._teardown_unlocked("signal failed")
-                raise RuntimeError("Could not send CALL_INVITE (peer not live?)")
             self._emit("outgoing")
+            self._setup_task = asyncio.create_task(
+                self._outgoing_setup(gen, peer, call_id, video, prefs),
+                name="call-outgoing-setup",
+            )
             return self.state
 
     async def accept_incoming(self) -> CallState:
@@ -173,52 +174,106 @@ class CallSessionManager:
                 raise RuntimeError("No incoming call to accept")
             prefs = load_call_prefs(self.profile)
             self.prefs = prefs
-            dg = await self._open_datagram(f"call-{uuid.uuid4().hex[:10]}")
+            peer = self.state.peer
+            call_id = self.state.call_id
+            want_video = self.state.want_video
+            remote_token = self.state.remote_datagram_b64
+            gen = self._generation
+            setup = self._setup_task
+
+        dg: Optional[DatagramSession] = self._dg
+        if dg is None and setup is not None:
+            try:
+                dg = await asyncio.wait_for(setup, timeout=ACCEPT_SETUP_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("DATAGRAM setup timed out") from exc
+            except asyncio.CancelledError as exc:
+                raise RuntimeError("Call ended while accepting") from exc
+            except Exception as exc:
+                raise RuntimeError(f"DATAGRAM setup failed: {exc}") from exc
+        if dg is None:
+            # Prefetch missing/failed — open now (hangup bumps generation).
+            try:
+                dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
+            except asyncio.CancelledError as exc:
+                raise RuntimeError("Call ended while accepting") from exc
+            except Exception as exc:
+                raise RuntimeError(f"DATAGRAM setup failed: {exc}") from exc
+
+        async with self._lock:
+            if self._generation != gen or self.state.phase != CallPhase.INCOMING:
+                if dg is not None and dg is not self._dg:
+                    asyncio.create_task(self._close_dg(dg))
+                raise RuntimeError("Call ended while accepting")
+            assert dg is not None
             self._dg = dg
+            self._setup_task = None
             self.state.local_datagram_b32 = dg.local_b32
             self.state.local_datagram_b64 = dg.local_destination_b64
             self.state.local_mic = prefs.start_mic
             self.state.local_spk = prefs.start_spk
-            if self.state.want_video:
+            if want_video:
                 self.state.local_cam = True
+            self.state.max_bitrate = prefs.max_bitrate_bps
+            token = dg.local_b32 or dg.local_destination_b64
             accept = CallAccept(
-                call_id=self.state.call_id,
+                call_id=call_id,
                 codecs="opus,jpeg",
                 max_bitrate=prefs.max_bitrate_bps,
-                datagram_b32=dg.local_b32 or dg.local_destination_b64,
+                datagram_b32=token,
             )
-            ok = await self.send_signal(self.state.peer, accept.encode())
+
+        ok = await self.send_signal(peer, accept.encode())
+        async with self._lock:
+            if self._generation != gen or self.state.phase != CallPhase.INCOMING:
+                raise RuntimeError("Call ended while accepting")
             if not ok:
                 await self._teardown_unlocked("accept signal failed")
                 raise RuntimeError("Could not send CALL_ACCEPT")
-            await self._resolve_remote_dest(self.state.remote_datagram_b64 or "")
+            await self._resolve_remote_dest(remote_token or "")
+            self.state.media_ready = len(self.state.remote_datagram_b64) >= REMOTE_DEST_MIN_LEN
+            if not self.state.media_ready:
+                logger.warning(
+                    "Call ACTIVE but remote DATAGRAM dest not resolved (%s…)",
+                    (self.state.remote_datagram_b64 or "")[:24],
+                )
+                self._emit("media_pending")
             self.state.phase = CallPhase.ACTIVE
-            self.state.max_bitrate = prefs.max_bitrate_bps
             self._emit("active")
             await self._send_media_state_unlocked()
             return self.state
 
     async def reject_incoming(self, reason: str = "declined") -> None:
+        peer = ""
+        call_id = ""
         async with self._lock:
             if self.state.phase != CallPhase.INCOMING:
                 return
             peer = self.state.peer
             call_id = self.state.call_id
-            await self.send_signal(peer, CallReject(call_id, reason).encode())
-            await self._teardown_unlocked("rejected")
+            await self._begin_teardown_unlocked("rejected")
+        if peer and call_id:
+            try:
+                await self.send_signal(peer, CallReject(call_id, reason).encode())
+            except Exception:
+                logger.debug("CALL_REJECT send failed", exc_info=True)
+        await self._finish_teardown("rejected")
 
     async def hangup(self) -> None:
+        peer = ""
+        call_id = ""
         async with self._lock:
             if self.state.phase == CallPhase.IDLE:
                 return
             peer = self.state.peer
             call_id = self.state.call_id
-            if peer and call_id:
-                try:
-                    await self.send_signal(peer, CallHangup(call_id).encode())
-                except Exception:
-                    logger.debug("CALL_HANGUP send failed", exc_info=True)
-            await self._teardown_unlocked("hangup")
+            await self._begin_teardown_unlocked("hangup")
+        if peer and call_id:
+            try:
+                await self.send_signal(peer, CallHangup(call_id).encode())
+            except Exception:
+                logger.debug("CALL_HANGUP send failed", exc_info=True)
+        await self._finish_teardown("hangup")
 
     async def set_media(
         self,
@@ -256,25 +311,33 @@ class CallSessionManager:
         parsed = parse_call_signal(payload)
         if parsed is None:
             return False
-        async with self._lock:
-            if parsed.kind == CALL_INVITE:
+        if parsed.kind == CALL_INVITE:
+            async with self._lock:
                 if self.state.phase != CallPhase.IDLE:
-                    await self.send_signal(
-                        peer,
-                        CallReject(parsed.call_id, "busy").encode(),
+                    busy_peer = peer
+                    busy_id = parsed.call_id
+                else:
+                    self._generation += 1
+                    gen = self._generation
+                    self.state = CallState(
+                        phase=CallPhase.INCOMING,
+                        call_id=parsed.call_id,
+                        peer=peer,
+                        want_video=parsed.want_video,
+                        codecs=parsed.codecs,
+                        max_bitrate=parsed.max_bitrate,
+                        remote_datagram_b64=parsed.datagram_b32,
+                    )
+                    self._emit("incoming")
+                    self._setup_task = asyncio.create_task(
+                        self._prefetch_datagram(gen),
+                        name="call-incoming-prefetch",
                     )
                     return True
-                self.state = CallState(
-                    phase=CallPhase.INCOMING,
-                    call_id=parsed.call_id,
-                    peer=peer,
-                    want_video=parsed.want_video,
-                    codecs=parsed.codecs,
-                    max_bitrate=parsed.max_bitrate,
-                    remote_datagram_b64=parsed.datagram_b32,
-                )
-                self._emit("incoming")
-                return True
+            await self.send_signal(busy_peer, CallReject(busy_id, "busy").encode())
+            return True
+
+        async with self._lock:
             if parsed.kind == CALL_ACCEPT:
                 if self.state.phase != CallPhase.OUTGOING or parsed.call_id != self.state.call_id:
                     return True
@@ -282,6 +345,13 @@ class CallSessionManager:
                 self.state.codecs = parsed.codecs or self.state.codecs
                 self.state.max_bitrate = min(self.state.max_bitrate, parsed.max_bitrate)
                 await self._resolve_remote_dest(parsed.datagram_b32)
+                self.state.media_ready = len(self.state.remote_datagram_b64) >= REMOTE_DEST_MIN_LEN
+                if not self.state.media_ready:
+                    logger.warning(
+                        "Call ACTIVE but remote DATAGRAM dest not resolved (%s…)",
+                        (self.state.remote_datagram_b64 or "")[:24],
+                    )
+                    self._emit("media_pending")
                 self.state.phase = CallPhase.ACTIVE
                 self._emit("active")
                 await self._send_media_state_unlocked()
@@ -289,11 +359,14 @@ class CallSessionManager:
             if parsed.kind == CALL_REJECT:
                 if parsed.call_id and parsed.call_id == self.state.call_id:
                     self.state.error = parsed.reason or "rejected"
-                    await self._teardown_unlocked("rejected")
+                    await self._begin_teardown_unlocked("rejected")
+                    # finish outside would need care; do full teardown here for signal path
+                    await self._finish_teardown_unlocked("rejected")
                 return True
             if parsed.kind == CALL_HANGUP:
                 if parsed.call_id and parsed.call_id == self.state.call_id:
-                    await self._teardown_unlocked("remote_hangup")
+                    await self._begin_teardown_unlocked("remote_hangup")
+                    await self._finish_teardown_unlocked("remote_hangup")
                 return True
             if parsed.kind == CALL_MEDIA:
                 if parsed.call_id != self.state.call_id:
@@ -317,16 +390,102 @@ class CallSessionManager:
             return
         await self._send_media(TYPE_VIDEO_JPEG, jpeg, ts_ms=ts_ms)
 
+    async def _outgoing_setup(
+        self,
+        gen: int,
+        peer: str,
+        call_id: str,
+        video: bool,
+        prefs: CallPrefs,
+    ) -> Optional[DatagramSession]:
+        dg: Optional[DatagramSession] = None
+        try:
+            dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
+            if self._generation != gen:
+                await self._close_dg(dg)
+                return None
+            token = dg.local_b32 or dg.local_destination_b64
+            invite = CallInvite(
+                call_id=call_id,
+                want_audio=True,
+                want_video=video,
+                codecs="opus,jpeg",
+                max_bitrate=prefs.max_bitrate_bps,
+                datagram_b32=token,
+            )
+            ok = await self.send_signal(peer, invite.encode())
+            async with self._lock:
+                if self._generation != gen or self.state.phase != CallPhase.OUTGOING:
+                    await self._close_dg(dg)
+                    return None
+                if not ok:
+                    self.state.error = "signal failed"
+                    await self._begin_teardown_unlocked("signal failed")
+                    await self._finish_teardown_unlocked("signal failed")
+                    return None
+                self._dg = dg
+                self.state.local_datagram_b32 = dg.local_b32
+                self.state.local_datagram_b64 = dg.local_destination_b64
+                self._setup_task = None
+                self._emit("outgoing")
+                return dg
+        except asyncio.CancelledError:
+            if dg is not None:
+                await self._close_dg(dg)
+            raise
+        except Exception as exc:
+            logger.warning("Outgoing DATAGRAM setup failed: %s", exc, exc_info=True)
+            if dg is not None:
+                await self._close_dg(dg)
+            async with self._lock:
+                if self._generation == gen and self.state.phase == CallPhase.OUTGOING:
+                    self.state.error = str(exc)
+                    await self._begin_teardown_unlocked("setup failed")
+                    await self._finish_teardown_unlocked("setup failed")
+            return None
+
+    async def _prefetch_datagram(self, gen: int) -> Optional[DatagramSession]:
+        dg: Optional[DatagramSession] = None
+        try:
+            dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
+            async with self._lock:
+                if self._generation != gen or self.state.phase != CallPhase.INCOMING:
+                    await self._close_dg(dg)
+                    return None
+                self._dg = dg
+                self.state.local_datagram_b32 = dg.local_b32
+                self.state.local_datagram_b64 = dg.local_destination_b64
+                return dg
+        except asyncio.CancelledError:
+            if dg is not None:
+                await self._close_dg(dg)
+            raise
+        except Exception as exc:
+            logger.warning("Incoming DATAGRAM prefetch failed: %s", exc, exc_info=True)
+            if dg is not None:
+                await self._close_dg(dg)
+            async with self._lock:
+                if self._generation == gen and self._setup_task is asyncio.current_task():
+                    self._setup_task = None
+            return None
+
     async def _send_media(self, ptype: int, payload: bytes, *, ts_ms: Optional[int]) -> None:
         dg = self._dg
         remote = self.state.remote_datagram_b64
         if dg is None or self.state.phase != CallPhase.ACTIVE or not remote:
             return
-        if len(remote) < 80:
-            # still a b32 / short token — try resolve
+        if len(remote) < REMOTE_DEST_MIN_LEN:
             await self._resolve_remote_dest(remote)
             remote = self.state.remote_datagram_b64
-        if len(remote) < 80:
+            self.state.media_ready = len(remote) >= REMOTE_DEST_MIN_LEN
+        if len(remote) < REMOTE_DEST_MIN_LEN:
+            if not self._resolve_logged:
+                self._resolve_logged = True
+                logger.warning(
+                    "Dropping media: remote DATAGRAM dest unresolved (%s…)",
+                    remote[:24],
+                )
+                self._emit("media_pending")
             return
         call_hash = call_id_hash16(self.state.call_id)
         now = int(time.time() * 1000) if ts_ms is None else int(ts_ms)
@@ -370,7 +529,7 @@ class CallSessionManager:
             from_dest=from_dest,
         )
 
-    async def _open_datagram(self, session_id: str) -> DatagramSession:
+    async def _default_open_datagram(self, session_id: str) -> DatagramSession:
         return await create_datagram_session(
             session_id,
             sam_address=self.sam_address,
@@ -382,18 +541,18 @@ class CallSessionManager:
         token = (token or "").strip()
         if not token:
             return
-        if len(token) > 80 and "=" not in token[:20]:
-            # likely already base64 destination
+        if len(token) > REMOTE_DEST_MIN_LEN and "=" not in token[:20]:
             self.state.remote_datagram_b64 = token
             return
         if token in self._remote_b64_cache:
             self.state.remote_datagram_b64 = self._remote_b64_cache[token]
             return
-        name = token if token.endswith(".i2p") else f"{token}.b32.i2p" if not token.endswith(".b32.i2p") else token
         if token.endswith(".b32.i2p"):
             name = token
         elif "." not in token:
             name = f"{token}.b32.i2p"
+        else:
+            name = token if token.endswith(".i2p") else f"{token}.b32.i2p"
         try:
             b64 = await naming_lookup_b64(name, sam_address=self.sam_address)
             self._remote_b64_cache[token] = b64
@@ -414,18 +573,45 @@ class CallSessionManager:
         ).encode()
         await self.send_signal(self.state.peer, body)
 
-    async def _teardown_unlocked(self, reason: str) -> None:
+    def _cancel_setup_task(self) -> Optional[asyncio.Task[Optional[DatagramSession]]]:
+        task = self._setup_task
+        self._setup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        return task
+
+    async def _begin_teardown_unlocked(self, reason: str) -> None:
+        """Bump generation, cancel setup, emit ending — close DG in finish."""
+        self._generation += 1
         self.state.phase = CallPhase.ENDING
+        self._cancel_setup_task()
+        self._resolve_logged = False
+
+    async def _finish_teardown(self, reason: str) -> None:
+        async with self._lock:
+            await self._finish_teardown_unlocked(reason)
+
+    async def _finish_teardown_unlocked(self, reason: str) -> None:
         dg = self._dg
         self._dg = None
-        if dg is not None:
-            try:
-                await dg.close()
-            except Exception:
-                logger.debug("DATAGRAM close failed", exc_info=True)
         peer = self.state.peer
         call_id = self.state.call_id
         err = self.state.error
-        self.state = CallState(error=err if reason in ("rejected",) else "")
+        keep_err = reason in ("rejected", "signal failed", "setup failed")
+        self.state = CallState(error=err if keep_err else "")
         self._frag_buf.clear()
         self._emit("ended", reason=reason, peer=peer, call_id=call_id)
+        if dg is not None:
+            # Close off the critical path so hangup stays snappy.
+            asyncio.create_task(self._close_dg(dg), name="call-dg-close")
+
+    async def _teardown_unlocked(self, reason: str) -> None:
+        await self._begin_teardown_unlocked(reason)
+        await self._finish_teardown_unlocked(reason)
+
+    @staticmethod
+    async def _close_dg(dg: DatagramSession) -> None:
+        try:
+            await dg.close()
+        except Exception:
+            logger.debug("DATAGRAM close failed", exc_info=True)

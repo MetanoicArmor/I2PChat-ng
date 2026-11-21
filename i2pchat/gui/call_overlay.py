@@ -258,6 +258,28 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if core is not None:
             core.on_call_event = self._on_call_event
 
+    def _spawn(self, coro: Any) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            QtWidgets.QMessageBox.warning(
+                self.window(), tr("call.title"), tr("call.no_event_loop")
+            )
+            return
+        loop.create_task(coro)
+
+    def _set_action_buttons_enabled(self, enabled: bool) -> None:
+        for b in (
+            self._accept_btn,
+            self._reject_btn,
+            self._hangup_btn,
+            self._mic_btn,
+            self._spk_btn,
+            self._cam_btn,
+            self._screen_btn,
+        ):
+            b.setEnabled(enabled)
+
     def start_outgoing(self, *, video: bool) -> None:
         if self._core is None:
             return
@@ -269,7 +291,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._accept_btn.hide()
         self._reject_btn.hide()
         self._hangup_btn.show()
-        asyncio.create_task(self._start_outgoing_async(video))
+        self._set_action_buttons_enabled(True)
+        self._spawn(self._start_outgoing_async(video))
 
     async def _start_outgoing_async(self, video: bool) -> None:
         try:
@@ -287,6 +310,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._accept_btn.show()
         self._reject_btn.show()
         self._hangup_btn.hide()
+        self._set_action_buttons_enabled(True)
         self._title.setText(tr("call.incoming_from", peer=str(state.get("peer", ""))[:24]))
         self._refresh_buttons(state)
 
@@ -299,6 +323,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def hide_all(self) -> None:
         self._stop_media()
         self._mini.hide()
+        self._set_action_buttons_enabled(True)
         self.closed.emit()
 
     def _on_minimize(self) -> None:
@@ -337,7 +362,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def _toggle(self, which: str) -> None:
         if self._core is None:
             return
-        asyncio.create_task(self._toggle_async(which))
+        self._spawn(self._toggle_async(which))
 
     async def _toggle_async(self, which: str) -> None:
         mgr = self._core.get_call_manager()
@@ -356,21 +381,24 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._sync_capture_devices()
 
     def _hangup(self) -> None:
-        if self._core is None:
-            self.hide_all()
+        core = self._core
+        self.hide_all()
+        if core is None:
             return
-        asyncio.create_task(self._hangup_async())
+        self._spawn(self._hangup_async(core))
 
-    async def _hangup_async(self) -> None:
+    async def _hangup_async(self, core: Any) -> None:
         try:
-            await self._core.hangup_call()
-        finally:
-            self.hide_all()
+            await core.hangup_call()
+        except Exception:
+            logger.debug("hangup_call failed", exc_info=True)
 
     def _accept(self) -> None:
         if self._core is None:
             return
-        asyncio.create_task(self._accept_async())
+        self._status.setText(tr("call.connecting"))
+        self._set_action_buttons_enabled(False)
+        self._spawn(self._accept_async())
 
     async def _accept_async(self) -> None:
         try:
@@ -378,24 +406,45 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._manager = self._core.get_call_manager()
             self._accept_btn.hide()
             self._reject_btn.hide()
-            self._status.setText(tr("call.connected"))
+            self._hangup_btn.show()
+            self._set_action_buttons_enabled(True)
+            snap = self._manager.snapshot() if self._manager else {}
+            if snap.get("media_ready"):
+                self._status.setText(tr("call.connected"))
+            else:
+                self._status.setText(tr("call.media_pending"))
             self._refresh_from_state()
             self._start_media()
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, tr("call.title"), str(exc))
-            self.hide_all()
+            self._set_action_buttons_enabled(True)
+            QtWidgets.QMessageBox.warning(self.window(), tr("call.title"), str(exc))
+            # Call may already be ended; if still incoming, restore buttons.
+            phase = ""
+            try:
+                if self._core is not None:
+                    phase = str(self._core.get_call_manager().snapshot().get("phase") or "")
+            except Exception:
+                phase = ""
+            if phase == "incoming":
+                self._accept_btn.show()
+                self._reject_btn.show()
+                self._hangup_btn.hide()
+                self._status.setText(tr("call.incoming"))
+            else:
+                self.hide_all()
 
     def _reject(self) -> None:
-        if self._core is None:
-            self.hide_all()
+        core = self._core
+        self.hide_all()
+        if core is None:
             return
-        asyncio.create_task(self._reject_async())
+        self._spawn(self._reject_async(core))
 
-    async def _reject_async(self) -> None:
+    async def _reject_async(self, core: Any) -> None:
         try:
-            await self._core.reject_call()
-        finally:
-            self.hide_all()
+            await core.reject_call()
+        except Exception:
+            logger.debug("reject_call failed", exc_info=True)
 
     def _on_call_event(self, kind: str, payload: dict[str, Any]) -> None:
         QtCore.QTimer.singleShot(0, lambda: self._handle_event(kind, payload))
@@ -409,9 +458,17 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if kind == "active":
             self._accept_btn.hide()
             self._reject_btn.hide()
-            self._status.setText(tr("call.connected"))
+            self._hangup_btn.show()
+            self._set_action_buttons_enabled(True)
+            if state.get("media_ready"):
+                self._status.setText(tr("call.connected"))
+            else:
+                self._status.setText(tr("call.media_pending"))
             self._refresh_buttons(state)
             self._start_media()
+            return
+        if kind == "media_pending":
+            self._status.setText(tr("call.media_pending"))
             return
         if kind == "ended":
             self.hide_all()
@@ -421,6 +478,12 @@ class CallOverlayWidget(QtWidgets.QWidget):
             return
         if kind in ("media", "remote_media", "outgoing", "minimized"):
             self._refresh_buttons(state)
+            if kind == "outgoing":
+                self._status.setText(tr("call.calling"))
+                self._hangup_btn.show()
+                self._accept_btn.hide()
+                self._reject_btn.hide()
+                self._set_action_buttons_enabled(True)
             if kind == "media":
                 self._sync_capture_devices()
 
@@ -555,7 +618,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             chunk = bytes(self._pcm_buf[:frame_bytes])
             del self._pcm_buf[:frame_bytes]
             encoded, is_opus = self._codec.encode(chunk)
-            asyncio.create_task(self._manager.send_audio_frame(encoded, opus=is_opus))
+            self._spawn(self._manager.send_audio_frame(encoded, opus=is_opus))
 
     def _on_local_frame(self, frame: QtMultimedia.QVideoFrame) -> None:
         if self._manager is None:
@@ -571,7 +634,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._local_view.setPixmap(pix)
         jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge)
         if jpeg:
-            asyncio.create_task(self._manager.send_jpeg_frame(jpeg))
+            self._spawn(self._manager.send_jpeg_frame(jpeg))
 
     def _capture_screen_frame(self) -> None:
         if self._manager is None:
@@ -590,7 +653,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         )
         jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge, quality=45)
         if jpeg:
-            asyncio.create_task(self._manager.send_jpeg_frame(jpeg))
+            self._spawn(self._manager.send_jpeg_frame(jpeg))
 
     def _on_media_packet(self, payload: dict[str, Any]) -> None:
         if self._manager is None:
