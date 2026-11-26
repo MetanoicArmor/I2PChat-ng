@@ -297,10 +297,11 @@
     <string name="call_calling">Вызов…</string>
     <string name="call_incoming_from">Входящий звонок от %1$s</string>
     <string name="call_incoming_audio">Входящий голосовой звонок</string>
-    <string name="call_incoming_video">Входящий видеозвонок. Камера выключена, пока вы её не включите.</string>
+    <string name="call_incoming_video">Входящий видеозвонок. При ответе камера включится.</string>
     <string name="call_connected">Соединено</string>
     <string name="call_in_call">В звонке</string>
     <string name="call_remote_video">Собеседник</string>
+    <string name="call_remote_cam_off">Камера собеседника выключена</string>
     <string name="call_local_video">Вы</string>
     <string name="call_need_peer">Сначала подключитесь к собеседнику.</string>
     <string name="call_permission_denied">Для звонка нужно разрешение на микрофон.</string>

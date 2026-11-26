@@ -80,8 +80,20 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { granted ->
-        val ok = granted.values.all { it }
-        if (!ok) {
+        if (granted[Manifest.permission.CAMERA] == true) {
+            bridge.callController.setCamEnabled(true)
+        } else if (
+            granted.containsKey(Manifest.permission.CAMERA) &&
+            bridge.callController.state.value.wantVideo
+        ) {
+            bridge.callController.setCamEnabled(false)
+            Toast.makeText(
+                context,
+                context.getString(R.string.call_camera_permission_denied),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+        if (granted[Manifest.permission.RECORD_AUDIO] == false) {
             Toast.makeText(context, context.getString(R.string.call_permission_denied), Toast.LENGTH_LONG).show()
         }
     }
@@ -144,6 +156,13 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                     label = stringResource(R.string.call_remote_video),
                     frame = call.remoteFrame,
                     modifier = Modifier.weight(1f),
+                    placeholder = if (
+                        call.phase == CallPhase.Active && !call.remoteCam && !call.remoteScreen
+                    ) {
+                        stringResource(R.string.call_remote_cam_off)
+                    } else {
+                        stringResource(R.string.call_remote_video)
+                    },
                 )
                 VideoPane(
                     label = stringResource(R.string.call_local_video),
@@ -161,7 +180,12 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(
                         onClick = {
-                            permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+                            val perms = if (call.wantVideo) {
+                                arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+                            } else {
+                                arrayOf(Manifest.permission.RECORD_AUDIO)
+                            }
+                            permLauncher.launch(perms)
                             bridge.acceptCall()
                         },
                         modifier = Modifier.weight(1f),

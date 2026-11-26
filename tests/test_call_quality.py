@@ -15,6 +15,7 @@ from i2pchat.core.media_framing import (
     FrameReassembler,
     MediaPacket,
     build_parity_payload,
+    completed_ptype,
     decode_media_packet,
     fragment_payload,
 )
@@ -52,6 +53,18 @@ def _wire(p: MediaPacket) -> MediaPacket:
     out = decode_media_packet(p.encode())
     assert out is not None
     return out
+
+
+def test_recovered_frame_reports_video_type_not_parity():
+    data = bytes(range(256)) * 20
+    pkts, parity = _frame_packets(data)
+    wired = _wire(parity)
+    assert wired.ptype == TYPE_PARITY
+    assert completed_ptype(wired) == TYPE_VIDEO_KEY
+    assert completed_ptype(_wire(pkts[0])) == TYPE_VIDEO_KEY
+    r = FrameReassembler()
+    assert r.feed(_wire(pkts[0])) is None
+    assert r.feed(wired) == data
 
 
 def test_parity_recovers_any_single_lost_fragment():

@@ -46,6 +46,7 @@ from i2pchat.core.media_framing import (
     FrameReassembler,
     MediaPacket,
     build_parity_payload,
+    completed_ptype,
     decode_media_packet,
     fragment_payload,
 )
@@ -326,9 +327,9 @@ class CallSessionManager:
             self.state.local_datagram_b64 = dg.local_destination_b64
             self.state.local_mic = prefs.start_mic
             self.state.local_spk = prefs.start_spk
-            # An incoming video call does not turn the camera on. The user enables
-            # it afterwards; the incoming screen says so before they accept.
-            self.state.local_cam = False
+            # Accepting a video call turns the camera on. The incoming screen says
+            # so before the user accepts; a voice call leaves the camera off.
+            self.state.local_cam = bool(self.state.want_video)
             self.state.max_bitrate = prefs.max_bitrate_bps
             token = datagram_token(dg)
             negotiated = intersect_codecs(local_offer_codecs(), self.state.codecs)
@@ -724,13 +725,16 @@ class CallSessionManager:
         body = self._reassembler.feed(pkt)
         if body is None:
             return
+        # A frame finished by its parity datagram must be delivered as video
+        # (or audio), not as TYPE_PARITY — the UI ignores that type.
+        ptype = completed_ptype(pkt)
         self._rx_frames += 1
         self._emit(
             "media_packet",
-            ptype=pkt.ptype,
+            ptype=ptype,
             ts_ms=pkt.ts_ms,
             seq=pkt.seq,
-            flags=pkt.flags,
+            flags=0 if pkt.ptype == TYPE_PARITY else pkt.flags,
             payload=body,
             from_dest=from_dest,
         )

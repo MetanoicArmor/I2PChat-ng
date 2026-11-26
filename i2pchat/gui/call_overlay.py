@@ -821,6 +821,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._vp8_dec: Optional[Vp8Decoder] = None
         self._force_vp8_key = False
         self._last_remote_video_at = 0.0
+        self._remote_video_on = False
         self._last_pli_at = 0.0
         self._pli_hits = 0
 
@@ -1338,6 +1339,28 @@ class CallOverlayWidget(QtWidgets.QWidget):
             phase=phase,
             status=mini_status,
         )
+        self._sync_remote_placeholder(state)
+
+    def _sync_remote_placeholder(self, state: dict[str, Any]) -> None:
+        """Say so when the peer's camera is off, instead of a blank pane."""
+        view = self._remote_view
+        remote_on = bool(state.get("remote_cam") or state.get("remote_screen"))
+        active = str(state.get("phase") or "") == "active"
+        pix = view.pixmap()
+        has_frame = pix is not None and not pix.isNull()
+        was_on = self._remote_video_on
+        self._remote_video_on = remote_on
+        if active and not remote_on:
+            # Drop a frozen picture only when they actually turn the camera off.
+            # A frame can arrive before the first CALL_MEDIA, and that must stay.
+            if was_on and has_frame:
+                view.clear()
+                self._last_remote_video_at = 0.0
+                has_frame = False
+            if not has_frame:
+                view.setText(tr("call.remote_cam_off"))
+        elif not has_frame and view.text() != tr("call.remote_video"):
+            view.setText(tr("call.remote_video"))
 
     @staticmethod
     def _request_permission(perm: Any, callback: Any) -> None:

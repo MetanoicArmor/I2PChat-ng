@@ -41,6 +41,20 @@ FLAG_PCM_FALLBACK = 0x02
 # ``seq`` of audio packets is a dedicated per-stream counter, so gaps mean loss.
 FLAG_AUDIO_SEQ = 0x04
 
+
+def completed_ptype(pkt: "MediaPacket") -> int:
+    """Media type of a frame that ``FrameReassembler.feed`` just finished.
+
+    The datagram that completes a frame is sometimes the XOR parity packet.
+    That packet's own type is ``TYPE_PARITY``; the picture type is the first
+    byte of its payload. Callers must use this, or a recovered frame is
+    dropped as an unknown packet.
+    """
+    if pkt.ptype == TYPE_PARITY and pkt.payload:
+        return pkt.payload[0]
+    return pkt.ptype
+
+
 PARITY_HEADER = struct.Struct(">BBI")
 # Parity datagram = fragment-sized XOR + its small header.
 MAX_PACKET_PAYLOAD = MAX_PAYLOAD + PARITY_HEADER.size

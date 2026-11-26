@@ -26,6 +26,19 @@ object CallMediaFraming {
      */
     const val TYPE_PARITY = 7
 
+    /**
+     * Type of a frame [Reassembler.feed] just finished.
+     * The datagram that completes a frame may be the XOR parity packet; its own
+     * type is [TYPE_PARITY], and the picture type is the first payload byte.
+     * Callers that switch on the packet type would otherwise drop the picture.
+     */
+    fun completedType(pkt: Packet): Int {
+        if (pkt.type == TYPE_PARITY && pkt.payload.isNotEmpty()) {
+            return pkt.payload[0].toInt() and 0xff
+        }
+        return pkt.type
+    }
+
     /** `seq` of audio packets is a dedicated per-stream counter, so gaps mean loss. */
     const val FLAG_AUDIO_SEQ = 0x04
     const val PARITY_HEADER_SIZE = 6

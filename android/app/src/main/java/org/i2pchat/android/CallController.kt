@@ -238,10 +238,12 @@ class CallController(
                 }
                 val ready = applyRemoteToken(remoteDestB64)
                 _state.update {
+                    // Accepting a video call turns the camera on once permission
+                    // is granted. The incoming screen says so before they accept.
+                    val camOn = snap.wantVideo && (it.cam || hasCameraPermission())
                     it.copy(
                         phase = CallPhase.Active,
-                        // Camera stays off until the user turns it on.
-                        cam = false,
+                        cam = camOn,
                         codecs = negotiated,
                         mediaReady = ready,
                     )
@@ -292,6 +294,31 @@ class CallController(
         val on = !it.cam
         it.copy(cam = on, screen = if (on) false else it.screen, error = "")
     }
+
+    /** Turn the camera on or off. Safe to call again after the permission dialog. */
+    fun setCamEnabled(on: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            val before = _state.value
+            if (before.phase == CallPhase.Idle || before.phase == CallPhase.Ending) return@launch
+            if (before.cam == on) {
+                if (on && before.phase == CallPhase.Active) syncVideoSources()
+                return@launch
+            }
+            _state.update {
+                it.copy(cam = on, screen = if (on) false else it.screen, error = if (on) "" else it.error)
+            }
+            if (_state.value.phase == CallPhase.Active) {
+                sendMediaState()
+                syncVideoSources()
+            }
+        }
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        androidx.core.content.ContextCompat.checkSelfPermission(
+            appContext,
+            android.Manifest.permission.CAMERA,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
     private fun toggle(transform: (CallUiState) -> CallUiState) {
         scope.launch(Dispatchers.IO) {
@@ -376,11 +403,13 @@ class CallController(
                     val snap = _state.value
                     if (!CallSignals.samePeer(peer, snap.peer)) return@launch
                     if (parsed.callId != snap.callId || snap.phase == CallPhase.Idle) return@launch
+                    val showRemote = parsed.cam || parsed.screen
                     _state.update {
                         it.copy(
                             remoteMic = parsed.mic,
                             remoteCam = parsed.cam,
                             remoteScreen = parsed.screen,
+                            remoteFrame = if (showRemote) it.remoteFrame else null,
                         )
                     }
                 }
@@ -641,7 +670,8 @@ class CallController(
         }
         rxPackets.incrementAndGet()
         val body = reassembler.feed(pkt) ?: return
-        when (pkt.type) {
+        val type = CallMediaFraming.completedType(pkt)
+        when (type) {
             CallMediaFraming.TYPE_PCM16, CallMediaFraming.TYPE_OPUS -> {
                 val ex = audioRx ?: return
                 if (audioRxPending.get() >= MAX_AUDIO_BACKLOG) {
@@ -670,7 +700,7 @@ class CallController(
                 videoRxPending.incrementAndGet()
                 ex.execute {
                     try {
-                        handleVideo(pkt.type, body)
+                        handleVideo(type, body)
                     } finally {
                         videoRxPending.decrementAndGet()
                     }
@@ -799,8 +829,11 @@ class CallController(
         }.also { camera = it }
         if (wantCam) {
             cam.minIntervalMs = 1000L / eff.fps.coerceAtLeast(1)
-            if (!cam.isRunning && !cam.start(s.videoMaxEdge.coerceAtMost(CAMERA_MAX_EDGE))) {
-                Log.w(TAG, "camera unavailable (permission?)")
+            if (!hasCameraPermission()) {
+                // The accept dialog may still be on screen. Leave cam on and
+                // start once the permission callback calls setCamEnabled.
+            } else if (!cam.isRunning && !cam.start(s.videoMaxEdge.coerceAtMost(CAMERA_MAX_EDGE))) {
+                Log.w(TAG, "camera unavailable")
                 _state.update { it.copy(cam = false, error = "camera") }
                 sendMediaState()
             }

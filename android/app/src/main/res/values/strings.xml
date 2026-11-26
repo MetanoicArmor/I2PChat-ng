@@ -314,10 +314,11 @@
     <string name="call_calling">Calling…</string>
     <string name="call_incoming_from">Incoming call from %1$s</string>
     <string name="call_incoming_audio">Incoming voice call</string>
-    <string name="call_incoming_video">Incoming video call. Your camera stays off until you turn it on.</string>
+    <string name="call_incoming_video">Incoming video call. Accepting turns your camera on.</string>
     <string name="call_connected">Connected</string>
     <string name="call_in_call">In call</string>
     <string name="call_remote_video">Remote</string>
+    <string name="call_remote_cam_off">Their camera is off</string>
     <string name="call_local_video">You</string>
     <string name="call_need_peer">Connect to a peer before starting a call.</string>
     <string name="call_permission_denied">Microphone permission is required for calls.</string>

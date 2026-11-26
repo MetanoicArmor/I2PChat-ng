@@ -248,8 +248,29 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
         media = [p for k, p in events if k == "media_packet"]
         self.assertEqual(len(media), 1)
         self.assertEqual(media[0]["payload"], frame)
+        self.assertEqual(media[0]["ptype"], 3)  # TYPE_VIDEO_JPEG
         self.assertIn("media_flowing", [k for k, _ in events])
         self.assertEqual(mgr.stats()["rx_frames"], 1)
+        await mgr.hangup()
+
+    async def test_parity_recovered_frame_is_delivered_as_video(self) -> None:
+        from i2pchat.core.media_framing import TYPE_PARITY, TYPE_VIDEO_JPEG, decode_media_packet
+
+        mgr, dg, _, events = await self._active_outgoing("R" * 100)
+        frame = bytes(range(256)) * 20  # two fragments + parity
+        mgr.state.local_cam = True
+        await mgr.send_jpeg_frame(frame)
+        decoded = [decode_media_packet(raw) for _, raw in dg.sent]
+        video = [p for p in decoded if p is not None and p.ptype != TYPE_PARITY]
+        parity = next(p for p in decoded if p is not None and p.ptype == TYPE_PARITY)
+        self.assertGreaterEqual(len(video), 2)
+        for pkt in video[:-1]:
+            await mgr._on_datagram("R" * 100, pkt.encode())
+        await mgr._on_datagram("R" * 100, parity.encode())
+        media = [p for k, p in events if k == "media_packet"]
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0]["ptype"], TYPE_VIDEO_JPEG)
+        self.assertEqual(media[0]["payload"], frame)
         await mgr.hangup()
 
     async def test_foreign_call_hash_is_dropped(self) -> None:
@@ -333,7 +354,7 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
         await mgr._on_datagram("R" * 100, pkt.encode())
         self.assertFalse(any(k == "media_packet" for k, _ in events))
         state = await mgr.accept_incoming()
-        self.assertFalse(state.local_cam)
+        self.assertTrue(state.local_cam)
         self.assertTrue(state.want_video)
         await mgr.hangup()
 

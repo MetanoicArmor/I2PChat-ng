@@ -29,6 +29,15 @@ class CallQualityTest {
     private fun wire(p: CallMediaFraming.Packet) = CallMediaFraming.decode(p.encode())!!
 
     @Test
+    fun recoveredFrameKeepsOriginalVideoType() {
+        val (pkts, parity) = packetsFor(frameData(CallMediaFraming.MAX_PAYLOAD + 10))
+        val wiredParity = wire(parity)
+        assertEquals(CallMediaFraming.TYPE_PARITY, wiredParity.type)
+        assertEquals(CallMediaFraming.TYPE_VIDEO_KEY, CallMediaFraming.completedType(wiredParity))
+        assertEquals(CallMediaFraming.TYPE_VIDEO_KEY, CallMediaFraming.completedType(wire(pkts[0])))
+    }
+
+    @Test
     fun parityRecoversAnySingleLostFragment() {
         val data = frameData(CallMediaFraming.MAX_PAYLOAD * 2 + 777)
         val (pkts, parity) = packetsFor(data)
