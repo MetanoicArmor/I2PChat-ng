@@ -20,19 +20,31 @@ SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS // 1000
 
 def _bundled_codec_dir() -> Optional[Path]:
     """Directory with vendor codec dylibs/so/dll next to the frozen app or repo."""
+    plat = _codec_plat_subdir()
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
         exe = Path(sys.executable).resolve()
-        # macOS .app: .../Contents/MacOS/I2PChat → search MacOS and Resources
-        candidates.append(exe.parent)
-        candidates.append(exe.parent.parent / "Resources" / "vendor" / "codecs")
+        # macOS .app: MacOS/<exe>, deps in Contents/Frameworks (ex-_internal).
+        candidates.append(exe.parent / "vendor" / "codecs" / plat)
         candidates.append(exe.parent / "vendor" / "codecs")
+        frameworks = exe.parent.parent / "Frameworks"
+        candidates.append(frameworks / "vendor" / "codecs" / plat)
+        candidates.append(frameworks / "vendor" / "codecs")
+        candidates.append(frameworks)
+        candidates.append(exe.parent)
     here = Path(__file__).resolve()
     # i2pchat/core/call_media.py → repo root vendor/codecs/<plat>
     repo = here.parents[2]
-    plat = _codec_plat_subdir()
     if plat:
         candidates.append(repo / "vendor" / "codecs" / plat)
+    for c in candidates:
+        if c.is_dir() and any(
+            p.suffix in {".dylib", ".so", ".dll"} or p.name.startswith("libopus")
+            for p in c.iterdir()
+            if p.is_file() or p.is_symlink()
+        ):
+            return c
+        # Accept empty platform dirs only as last resort when they contain libs above.
     for c in candidates:
         if c.is_dir():
             return c

@@ -109,21 +109,28 @@ rm -rf "dist/${APP_NAME}" "build/${APP_NAME}"
 
 echo "==> Собираю I2PChat.app"
 rm -rf "dist/${APP_NAME}.app"
-mkdir -p "dist/${APP_NAME}.app/Contents/MacOS" "dist/${APP_NAME}.app/Contents/Resources"
-# Put the PyInstaller onedir *inside MacOS/* so CFBundleExecutable is a real Mach-O.
-# A shell-script launcher under MacOS/ that exec's Resources/... breaks macOS TCC:
-# Camera/Microphone prompts never register and I2PChat never appears in
-# System Settings → Privacy → Camera.
-#
-# Layout:
-#   Contents/MacOS/I2PChat          (Mach-O)
-#   Contents/MacOS/I2PChat-tui      (Mach-O)
-#   Contents/MacOS/_internal/       (PyInstaller deps)
+mkdir -p \
+  "dist/${APP_NAME}.app/Contents/MacOS" \
+  "dist/${APP_NAME}.app/Contents/Frameworks" \
+  "dist/${APP_NAME}.app/Contents/Resources"
+# PyInstaller onedir inside a .app must follow Apple/PyInstaller layout:
+#   Contents/MacOS/<exe>          — real Mach-O (required for TCC Camera/Mic)
+#   Contents/Frameworks/…         — former _internal/ (bootloader looks here, NOT MacOS/_internal)
 #   Contents/Resources/I2PChat.icns
-rsync -a --delete "dist/${APP_NAME}/" "dist/${APP_NAME}.app/Contents/MacOS/"
+#
+# A shell wrapper in MacOS/ that exec's Resources/... never registers under
+# System Settings → Privacy → Camera. Dumping the whole onedir into MacOS/
+# makes the bootloader look for Contents/Frameworks/Python and fail to start.
+cp "dist/${APP_NAME}/${APP_NAME}" "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-if [ -f "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui" ]; then
+if [ -f "dist/${APP_NAME}/${APP_NAME}-tui" ]; then
+  cp "dist/${APP_NAME}/${APP_NAME}-tui" "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui"
   chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui"
+fi
+rsync -a --delete "dist/${APP_NAME}/_internal/" "dist/${APP_NAME}.app/Contents/Frameworks/"
+# Keep vendor next to the Mach-O for frozen path helpers (codecs / i2pd).
+if [ -d "dist/${APP_NAME}/vendor" ]; then
+  rsync -a "dist/${APP_NAME}/vendor/" "dist/${APP_NAME}.app/Contents/MacOS/vendor/"
 fi
 if [ -f "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" ]; then
   I2PD_APP_VENDOR="dist/${APP_NAME}.app/Contents/MacOS/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"
@@ -174,12 +181,16 @@ cat > "dist/${APP_NAME}.app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc sign so TCC associates Camera/Microphone with this bundle (unsigned
-# shell-wrapped apps often never appear under Privacy → Camera).
+# Ad-hoc sign so TCC associates Camera/Microphone with CFBundleIdentifier.
+# Must bind Info.plist + seal Resources; a bare `codesign -s - App.app` leaves
+# Info.plist unbound and Privacy → Camera never lists I2PChat. Nested
+# Frameworks data dirs (PIL/.dylibs, *.dist-info, …) need stub Info.plist —
+# see scripts/codesign_macos_app.sh.
 if command -v codesign >/dev/null 2>&1; then
-  echo "==> Ad-hoc codesign I2PChat.app (TCC)"
-  codesign --force --deep --sign - "dist/${APP_NAME}.app" 2>/dev/null || \
-    echo "WARNING: codesign failed (camera prompt may still work after MacOS/ Mach-O fix)"
+  bash "$(pwd)/scripts/codesign_macos_app.sh" \
+    "dist/${APP_NAME}.app" \
+    "net.i2pchat.I2PChat" || \
+    echo "WARNING: codesign of .app failed (launch may still work; Camera TCC may not)"
 fi
 
 echo
