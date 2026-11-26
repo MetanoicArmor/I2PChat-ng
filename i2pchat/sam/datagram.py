@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
@@ -21,6 +22,10 @@ from .protocol import build_session_create, expect_ok, parse_reply_line
 logger = logging.getLogger(__name__)
 
 OnDatagram = Callable[[str, bytes], Awaitable[None] | None]
+
+# i2pd reads the whole ``DATAGRAM SEND`` (header line + payload) into an 8192-byte
+# buffer (SAM_SOCKET_BUFFER_SIZE); anything larger stalls the control socket.
+MAX_SEND_PAYLOAD = 7_000
 
 
 @dataclass(slots=True)
@@ -35,20 +40,60 @@ class DatagramSession:
     _transport: asyncio.DatagramTransport
     _protocol: "_DatagramProtocol"
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _reader_task: Optional[asyncio.Task] = None
+    tx_packets: int = 0
+    tx_bytes: int = 0
+    tx_errors: int = 0
+    rx_packets: int = 0
+    rx_bytes: int = 0
+    control_closed: bool = False
+    first_rx_at: Optional[float] = None
+
+    def stats(self) -> dict[str, int | float | bool | None]:
+        return {
+            "tx_packets": self.tx_packets,
+            "tx_bytes": self.tx_bytes,
+            "tx_errors": self.tx_errors,
+            "rx_packets": self.rx_packets,
+            "rx_bytes": self.rx_bytes,
+            "control_closed": self.control_closed,
+            "first_rx_at": self.first_rx_at,
+        }
 
     async def send(self, destination_b64_or_b32: str, payload: bytes) -> None:
-        if self._control.writer.is_closing():
+        if self.control_closed or self._control.writer.is_closing():
             raise SessionClosed(message="DATAGRAM control socket closed")
         dest = destination_b64_or_b32.strip()
-        if dest.endswith(".b32.i2p") or (len(dest) < 100 and ".i2p" in dest):
-            raise ValueError("DATAGRAM send requires I2P-base64 destination")
-        # i2pd: DATAGRAM SEND SIZE=n DESTINATION=...\n + n raw bytes
+        if not dest or any(c.isspace() for c in dest):
+            raise ValueError("DATAGRAM send needs a destination (base64 or <b32>.b32.i2p)")
+        if len(payload) > MAX_SEND_PAYLOAD:
+            raise ValueError(f"DATAGRAM payload too large ({len(payload)} > {MAX_SEND_PAYLOAD})")
+        # i2pd: DATAGRAM SEND SIZE=n DESTINATION=...\n + n raw bytes. i2pd 3.x also
+        # resolves ``<b32>.b32.i2p`` here (SAMSession::SendDatagram), so a full
+        # base64 destination is preferred but not strictly required.
         header = f"DATAGRAM SEND SIZE={len(payload)} DESTINATION={dest}\n".encode("ascii")
-        async with self._send_lock:
-            self._control.writer.write(header + payload)
-            await self._control.writer.drain()
+        try:
+            async with self._send_lock:
+                self._control.writer.write(header + payload)
+                await self._control.writer.drain()
+        except Exception:
+            self.tx_errors += 1
+            raise
+        self.tx_packets += 1
+        self.tx_bytes += len(payload)
+
+    def note_received(self, size: int) -> None:
+        self.rx_packets += 1
+        self.rx_bytes += size
+        if self.first_rx_at is None:
+            self.first_rx_at = time.monotonic()
+            logger.info("DATAGRAM %s: first inbound packet (%d bytes)", self.session_id, size)
 
     async def close(self) -> None:
+        task = self._reader_task
+        self._reader_task = None
+        if task is not None:
+            task.cancel()
         try:
             self._transport.close()
         except Exception:
@@ -56,9 +101,40 @@ class DatagramSession:
         await self._control.close()
 
 
+async def _watch_control(dg: "DatagramSession") -> None:
+    """Drain the SAM control socket: log anything i2pd says and notice closure.
+
+    With HOST/PORT forwarding i2pd normally writes nothing here, so any data or
+    EOF means the session is in trouble (e.g. a malformed/oversized DATAGRAM SEND).
+    """
+    reader = dg._control.reader
+    try:
+        while True:
+            data = await reader.read(4096)
+            if not data:
+                break
+            logger.warning(
+                "DATAGRAM %s: unexpected SAM control data: %r",
+                dg.session_id,
+                data[:200],
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("DATAGRAM %s: control read error: %s", dg.session_id, exc)
+    dg.control_closed = True
+    logger.warning(
+        "DATAGRAM %s: SAM control socket closed (tx=%d rx=%d)",
+        dg.session_id,
+        dg.tx_packets,
+        dg.rx_packets,
+    )
+
+
 class _DatagramProtocol(asyncio.DatagramProtocol):
     def __init__(self) -> None:
         self.on_datagram: Optional[OnDatagram] = None
+        self.owner: Optional["DatagramSession"] = None
         self.transport: Optional[asyncio.DatagramTransport] = None
         try:
             self.loop = asyncio.get_running_loop()
@@ -79,6 +155,9 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
             return
         if not from_dest:
             return
+        owner = self.owner
+        if owner is not None:
+            owner.note_received(len(payload))
         cb = self.on_datagram
         if cb is None:
             return
@@ -202,7 +281,7 @@ async def create_datagram_session(
     client._reader = None
     client._writer = None
 
-    return DatagramSession(
+    session = DatagramSession(
         session_id=session_id,
         local_destination_b64=public_b64,
         local_b32=local_b32,
@@ -211,6 +290,12 @@ async def create_datagram_session(
         _transport=transport,
         _protocol=protocol,
     )
+    protocol.owner = session
+    session._reader_task = loop.create_task(
+        _watch_control(session),
+        name=f"datagram-control-{session_id}",
+    )
+    return session
 
 
 async def naming_lookup_b64(

@@ -56,6 +56,7 @@ class SamDatagramSession private constructor(
 
     fun send(destinationB64: String, payload: ByteArray) {
         if (closed.get()) return
+        require(payload.size <= MAX_SEND_PAYLOAD) { "DATAGRAM payload too large: ${payload.size}" }
         val header = "DATAGRAM SEND SIZE=${payload.size} DESTINATION=$destinationB64\n"
             .toByteArray(StandardCharsets.US_ASCII)
         synchronized(sendLock) {
@@ -73,6 +74,9 @@ class SamDatagramSession private constructor(
     }
 
     companion object {
+        // i2pd reads a whole DATAGRAM SEND into an 8192-byte buffer (SAM_SOCKET_BUFFER_SIZE).
+        const val MAX_SEND_PAYLOAD = 7_000
+
         fun open(
             sessionId: String,
             samHost: String,

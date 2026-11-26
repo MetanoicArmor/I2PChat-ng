@@ -31,6 +31,7 @@ from i2pchat.core.media_framing import (
     TYPE_OPUS,
     TYPE_PCM16,
     TYPE_VIDEO_JPEG,
+    FrameReassembler,
     MediaPacket,
     decode_media_packet,
     fragment_payload,
@@ -45,6 +46,32 @@ OpenDatagram = Callable[..., Awaitable[DatagramSession]]
 
 ACCEPT_SETUP_TIMEOUT_S = 30.0
 REMOTE_DEST_MIN_LEN = 80
+RESOLVE_TIMEOUT_S = 20.0
+RESOLVE_BACKOFF_MAX_S = 30.0
+
+
+def is_full_destination(token: str) -> bool:
+    """True for a full public I2P base64 destination (not a short b32 hash/name)."""
+    t = (token or "").strip()
+    return len(t) >= REMOTE_DEST_MIN_LEN and "." not in t
+
+
+def b32_host_name(token: str) -> str:
+    """Normalise a b32 token (with or without suffix) to ``<b32>.b32.i2p``."""
+    t = (token or "").strip()
+    if not t:
+        return ""
+    if t.endswith(".b32.i2p"):
+        return t
+    if "." not in t:
+        return f"{t}.b32.i2p"
+    return t if t.endswith(".i2p") else f"{t}.b32.i2p"
+
+
+def datagram_token(dg: Any) -> str:
+    """Address advertised to the peer: full public base64 first (no NAMING LOOKUP
+    needed, a fresh TRANSIENT LeaseSet is usually not published yet), b32 as fallback."""
+    return (getattr(dg, "local_destination_b64", "") or getattr(dg, "local_b32", "") or "").strip()
 
 
 class CallPhase(str, Enum):
@@ -102,10 +129,41 @@ class CallSessionManager:
         self._seq = 0
         self._lock = asyncio.Lock()
         self._remote_b64_cache: dict[str, str] = {}
-        self._frag_buf: dict[int, list[bytes]] = {}
+        self._reassembler = FrameReassembler()
+        self._resolve_task: Optional[asyncio.Task[None]] = None
+        self._resolve_failures = 0
+        self._next_resolve_at = 0.0
+        self._reset_stats()
         self._setup_task: Optional[asyncio.Task[Optional[DatagramSession]]] = None
         self._generation = 0
-        self._resolve_logged = False
+
+    def _reset_stats(self) -> None:
+        self._tx_packets = 0
+        self._tx_dropped = 0
+        self._rx_packets = 0
+        self._rx_frames = 0
+        self._rx_dropped = 0
+        self._first_rx_logged = False
+        self._from_mismatch_logged = False
+        self._control_closed_logged = False
+
+    def stats(self) -> dict[str, Any]:
+        dg = self._dg
+        dg_stats: dict[str, Any] = {}
+        if dg is not None and hasattr(dg, "stats"):
+            try:
+                dg_stats = dict(dg.stats())
+            except Exception:
+                dg_stats = {}
+        return {
+            "tx_packets": self._tx_packets,
+            "tx_dropped": self._tx_dropped,
+            "rx_packets": self._rx_packets,
+            "rx_frames": self._rx_frames,
+            "rx_dropped": self._rx_dropped + self._reassembler.dropped_frames,
+            "remote_resolved": is_full_destination(self.state.remote_datagram_b64),
+            "control_closed": bool(dg_stats.get("control_closed", False)),
+        }
 
     def _emit(self, kind: str, **extra: Any) -> None:
         if self.on_event is None:
@@ -140,6 +198,7 @@ class CallSessionManager:
             "video_bitrate_kbps": self.prefs.video_bitrate_kbps,
             "video_fps": self.prefs.video_fps,
             "video_max_edge": self.prefs.video_max_edge,
+            "stats": self.stats(),
         }
 
     async def start_outgoing(self, peer: str, *, video: bool) -> CallState:
@@ -151,6 +210,7 @@ class CallSessionManager:
             call_id = new_call_id()
             self._generation += 1
             gen = self._generation
+            self._reset_call_runtime()
             self.state = CallState(
                 phase=CallPhase.OUTGOING,
                 call_id=call_id,
@@ -215,7 +275,7 @@ class CallSessionManager:
             if want_video:
                 self.state.local_cam = True
             self.state.max_bitrate = prefs.max_bitrate_bps
-            token = dg.local_b32 or dg.local_destination_b64
+            token = datagram_token(dg)
             accept = CallAccept(
                 call_id=call_id,
                 codecs="opus,jpeg",
@@ -230,14 +290,7 @@ class CallSessionManager:
             if not ok:
                 await self._teardown_unlocked("accept signal failed")
                 raise RuntimeError("Could not send CALL_ACCEPT")
-            await self._resolve_remote_dest(remote_token or "")
-            self.state.media_ready = len(self.state.remote_datagram_b64) >= REMOTE_DEST_MIN_LEN
-            if not self.state.media_ready:
-                logger.warning(
-                    "Call ACTIVE but remote DATAGRAM dest not resolved (%s…)",
-                    (self.state.remote_datagram_b64 or "")[:24],
-                )
-                self._emit("media_pending")
+            self._apply_remote_token(remote_token or "", gen)
             self.state.phase = CallPhase.ACTIVE
             self._emit("active")
             await self._send_media_state_unlocked()
@@ -319,6 +372,7 @@ class CallSessionManager:
                 else:
                     self._generation += 1
                     gen = self._generation
+                    self._reset_call_runtime()
                     self.state = CallState(
                         phase=CallPhase.INCOMING,
                         call_id=parsed.call_id,
@@ -344,14 +398,7 @@ class CallSessionManager:
                 self.state.remote_datagram_b64 = parsed.datagram_b32
                 self.state.codecs = parsed.codecs or self.state.codecs
                 self.state.max_bitrate = min(self.state.max_bitrate, parsed.max_bitrate)
-                await self._resolve_remote_dest(parsed.datagram_b32)
-                self.state.media_ready = len(self.state.remote_datagram_b64) >= REMOTE_DEST_MIN_LEN
-                if not self.state.media_ready:
-                    logger.warning(
-                        "Call ACTIVE but remote DATAGRAM dest not resolved (%s…)",
-                        (self.state.remote_datagram_b64 or "")[:24],
-                    )
-                    self._emit("media_pending")
+                self._apply_remote_token(parsed.datagram_b32, self._generation)
                 self.state.phase = CallPhase.ACTIVE
                 self._emit("active")
                 await self._send_media_state_unlocked()
@@ -404,7 +451,7 @@ class CallSessionManager:
             if self._generation != gen:
                 await self._close_dg(dg)
                 return None
-            token = dg.local_b32 or dg.local_destination_b64
+            token = datagram_token(dg)
             invite = CallInvite(
                 call_id=call_id,
                 want_audio=True,
@@ -471,55 +518,72 @@ class CallSessionManager:
 
     async def _send_media(self, ptype: int, payload: bytes, *, ts_ms: Optional[int]) -> None:
         dg = self._dg
-        remote = self.state.remote_datagram_b64
-        if dg is None or self.state.phase != CallPhase.ACTIVE or not remote:
+        if dg is None or self.state.phase != CallPhase.ACTIVE:
             return
-        if len(remote) < REMOTE_DEST_MIN_LEN:
-            await self._resolve_remote_dest(remote)
-            remote = self.state.remote_datagram_b64
-            self.state.media_ready = len(remote) >= REMOTE_DEST_MIN_LEN
-        if len(remote) < REMOTE_DEST_MIN_LEN:
-            if not self._resolve_logged:
-                self._resolve_logged = True
-                logger.warning(
-                    "Dropping media: remote DATAGRAM dest unresolved (%s…)",
-                    remote[:24],
-                )
-                self._emit("media_pending")
+        target = self._remote_send_target()
+        if not target:
+            self._tx_dropped += 1
+            return
+        if getattr(dg, "control_closed", False):
+            self._tx_dropped += 1
+            if not self._control_closed_logged:
+                self._control_closed_logged = True
+                logger.warning("Dropping media: SAM DATAGRAM control socket is closed")
+                self.state.error = "datagram session closed"
+                self._emit("media_error")
             return
         call_hash = call_id_hash16(self.state.call_id)
         now = int(time.time() * 1000) if ts_ms is None else int(ts_ms)
         self._seq = (self._seq + 1) & 0xFFFFFFFF
         frame_seq = self._seq
-        for chunk, frag_flags in fragment_payload(payload):
+        chunks = fragment_payload(payload)
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks):
             pkt = MediaPacket(
                 call_hash=call_hash,
                 seq=frame_seq,
                 ts_ms=now,
                 ptype=ptype,
-                flags=frag_flags,
+                flags=0,
                 payload=chunk,
+                frag_idx=idx,
+                frag_total=total,
             )
             try:
-                await dg.send(remote, pkt.encode())
+                await dg.send(target, pkt.encode())
+                self._tx_packets += 1
             except Exception:
+                self._tx_dropped += 1
                 logger.debug("DATAGRAM send failed", exc_info=True)
                 return
 
     async def _on_datagram(self, from_dest: str, payload: bytes) -> None:
-        from i2pchat.core.media_framing import FLAG_FRAG_MORE
-
         pkt = decode_media_packet(payload)
         if pkt is None:
+            self._rx_dropped += 1
             return
         if self.state.call_id and pkt.call_hash != call_id_hash16(self.state.call_id):
+            self._rx_dropped += 1
             return
-        if pkt.flags & FLAG_FRAG_MORE:
-            self._frag_buf.setdefault(pkt.seq, []).append(pkt.payload)
+        remote = self.state.remote_datagram_b64
+        if (
+            is_full_destination(remote)
+            and from_dest
+            and from_dest != remote
+            and not self._from_mismatch_logged
+        ):
+            # Soft check only: base64 spelling can differ while still being the same peer.
+            self._from_mismatch_logged = True
+            logger.info("DATAGRAM sender differs from advertised destination (%s…)", from_dest[:24])
+        self._rx_packets += 1
+        if not self._first_rx_logged:
+            self._first_rx_logged = True
+            logger.info("Call media: first packet received (ptype=%d)", pkt.ptype)
+            self._emit("media_flowing")
+        body = self._reassembler.feed(pkt)
+        if body is None:
             return
-        chunks = self._frag_buf.pop(pkt.seq, [])
-        chunks.append(pkt.payload)
-        body = b"".join(chunks)
+        self._rx_frames += 1
         self._emit(
             "media_packet",
             ptype=pkt.ptype,
@@ -537,29 +601,86 @@ class CallSessionManager:
             on_datagram=self._on_datagram,
         )
 
-    async def _resolve_remote_dest(self, token: str) -> None:
+    def _reset_call_runtime(self) -> None:
+        self._reset_stats()
+        self._reassembler = FrameReassembler()
+        self._remote_b64_cache.clear()
+        self._resolve_failures = 0
+        self._next_resolve_at = 0.0
+        self._control_closed_logged = False
+        task = self._resolve_task
+        self._resolve_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _apply_remote_token(self, token: str, gen: int) -> None:
+        """Remember the peer's datagram address; never block the signal path on lookups."""
         token = (token or "").strip()
-        if not token:
+        self.state.remote_datagram_b64 = token
+        if is_full_destination(token):
+            self.state.media_ready = True
             return
-        if len(token) > REMOTE_DEST_MIN_LEN and "=" not in token[:20]:
-            self.state.remote_datagram_b64 = token
+        self.state.media_ready = False
+        if token:
+            logger.info(
+                "Peer sent a short DATAGRAM address (%s…); resolving in background",
+                token[:24],
+            )
+            self._schedule_resolve(token, gen)
+        self._emit("media_pending")
+
+    def _remote_send_target(self) -> str:
+        """Destination string for ``DATAGRAM SEND`` (full base64 when known)."""
+        remote = self.state.remote_datagram_b64
+        if not remote:
+            return ""
+        if is_full_destination(remote):
+            return remote
+        cached = self._remote_b64_cache.get(remote)
+        if cached:
+            self.state.remote_datagram_b64 = cached
+            self.state.media_ready = True
+            return cached
+        # i2pd 3.x resolves ``<b32>.b32.i2p`` itself in DATAGRAM SEND.
+        self._schedule_resolve(remote, self._generation)
+        return b32_host_name(remote)
+
+    def _schedule_resolve(self, token: str, gen: int) -> None:
+        """Single-flight NAMING LOOKUP with exponential backoff."""
+        task = self._resolve_task
+        if task is not None and not task.done():
             return
-        if token in self._remote_b64_cache:
-            self.state.remote_datagram_b64 = self._remote_b64_cache[token]
+        if time.monotonic() < self._next_resolve_at:
             return
-        if token.endswith(".b32.i2p"):
-            name = token
-        elif "." not in token:
-            name = f"{token}.b32.i2p"
-        else:
-            name = token if token.endswith(".i2p") else f"{token}.b32.i2p"
         try:
-            b64 = await naming_lookup_b64(name, sam_address=self.sam_address)
-            self._remote_b64_cache[token] = b64
-            self.state.remote_datagram_b64 = b64
-        except Exception:
-            logger.warning("DATAGRAM naming lookup failed for %s", name, exc_info=True)
-            self.state.remote_datagram_b64 = token
+            self._resolve_task = asyncio.get_running_loop().create_task(
+                self._resolve_worker(token, gen),
+                name="call-resolve-remote",
+            )
+        except RuntimeError:
+            self._resolve_task = None
+
+    async def _resolve_worker(self, token: str, gen: int) -> None:
+        name = b32_host_name(token)
+        try:
+            b64 = await asyncio.wait_for(
+                naming_lookup_b64(name, sam_address=self.sam_address),
+                timeout=RESOLVE_TIMEOUT_S,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._resolve_failures += 1
+            delay = min(RESOLVE_BACKOFF_MAX_S, 2.0 ** self._resolve_failures)
+            self._next_resolve_at = time.monotonic() + delay
+            logger.info("DATAGRAM naming lookup for %s failed (%s); retry in %.0fs", name, exc, delay)
+            return
+        if self._generation != gen or self.state.remote_datagram_b64 != token:
+            return
+        self._remote_b64_cache[token] = b64
+        self.state.remote_datagram_b64 = b64
+        self.state.media_ready = is_full_destination(b64)
+        self._emit("media_ready")
 
     async def _send_media_state_unlocked(self) -> None:
         if not self.state.peer or not self.state.call_id:
@@ -585,7 +706,6 @@ class CallSessionManager:
         self._generation += 1
         self.state.phase = CallPhase.ENDING
         self._cancel_setup_task()
-        self._resolve_logged = False
 
     async def _finish_teardown(self, reason: str) -> None:
         async with self._lock:
@@ -599,7 +719,11 @@ class CallSessionManager:
         err = self.state.error
         keep_err = reason in ("rejected", "signal failed", "setup failed")
         self.state = CallState(error=err if keep_err else "")
-        self._frag_buf.clear()
+        self._reassembler = FrameReassembler()
+        task = self._resolve_task
+        self._resolve_task = None
+        if task is not None and not task.done():
+            task.cancel()
         self._emit("ended", reason=reason, peer=peer, call_id=call_id)
         if dg is not None:
             # Close off the critical path so hangup stays snappy.

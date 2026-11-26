@@ -50,10 +50,41 @@ class CallSignalsTest {
     }
 
     @Test
-    fun fragmentFlags() {
+    fun fragmentChunks() {
         val parts = CallMediaFraming.fragment(ByteArray(10) { it.toByte() }, maxChunk = 4)
         assertEquals(3, parts.size)
-        assertTrue(parts[0].second and CallMediaFraming.FLAG_FRAG_MORE != 0)
-        assertEquals(0, parts[2].second)
+        assertEquals(4, parts[0].size)
+        assertEquals(2, parts[2].size)
+    }
+
+    @Test
+    fun reassemblerRebuildsOutOfOrderFrame() {
+        val data = ByteArray(9000) { (it % 251).toByte() }
+        val chunks = CallMediaFraming.fragment(data)
+        val hash = CallSignals.callIdHash16("x")
+        val reassembler = CallMediaFraming.Reassembler()
+        var out: ByteArray? = null
+        for ((idx, chunk) in chunks.withIndex().reversed()) {
+            val pkt = CallMediaFraming.Packet(
+                hash, 5, 1, CallMediaFraming.TYPE_VIDEO_JPEG, 0, chunk, idx, chunks.size,
+            )
+            val decoded = CallMediaFraming.decode(pkt.encode())!!
+            out = reassembler.feed(decoded) ?: out
+        }
+        assertTrue(out!!.contentEquals(data))
+    }
+
+    @Test
+    fun reassemblerDropsExpiredFrames() {
+        var now = 0L
+        val reassembler = CallMediaFraming.Reassembler(timeoutMs = 1_500L, clock = { now })
+        val hash = CallSignals.callIdHash16("x")
+        val first = CallMediaFraming.Packet(hash, 1, 1, 3, 0, byteArrayOf(1), 0, 2)
+        assertEquals(null, reassembler.feed(first))
+        now = 5_000L
+        val single = CallMediaFraming.Packet(hash, 2, 1, 3, 0, byteArrayOf(9), 0, 1)
+        assertTrue(reassembler.feed(single)!!.contentEquals(byteArrayOf(9)))
+        assertEquals(0, reassembler.pendingCount)
+        assertEquals(1, reassembler.droppedFrames)
     }
 }

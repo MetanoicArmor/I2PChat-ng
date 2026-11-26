@@ -14,9 +14,9 @@ from i2pchat.router.settings import router_settings_path
 @dataclass
 class CallPrefs:
     audio_bitrate_kbps: int = 32
-    video_bitrate_kbps: int = 250
-    video_fps: int = 8
-    video_max_edge: int = 480
+    video_bitrate_kbps: int = 150
+    video_fps: int = 5
+    video_max_edge: int = 320
     start_mic: bool = True
     start_spk: bool = True
 

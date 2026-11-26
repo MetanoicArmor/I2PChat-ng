@@ -16,7 +16,12 @@ SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS // 1000
 
 
 class AudioCodec:
-    """Prefer Opus; fall back to raw PCM16 LE."""
+    """Prefer Opus when ``opuslib`` + libopus are present; otherwise raw PCM16 LE.
+
+    ``opuslib`` is intentionally not a hard dependency (it needs a native libopus
+    that is not bundled), so PCM16 is the default transport: 16 kHz mono, sent as
+    several 20 ms frames per datagram.
+    """
 
     def __init__(self, bitrate_bps: int = 32_000) -> None:
         self.bitrate_bps = max(12_000, min(64_000, int(bitrate_bps)))
@@ -48,10 +53,13 @@ class AudioCodec:
             except Exception:
                 logger.debug("opus decode failed", exc_info=True)
                 return b""
+        if opus:
+            # Peer sent Opus but we have no decoder: raw bytes would play as noise.
+            return b""
         return payload
 
 
-def jpeg_from_qimage(qimage, *, max_edge: int = 480, quality: int = 55) -> bytes:
+def jpeg_from_qimage(qimage, *, max_edge: int = 320, quality: int = 40) -> bytes:
     """Encode a QImage to JPEG bytes (Qt must be available)."""
     from PyQt6 import QtCore, QtGui
 

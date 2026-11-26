@@ -6,8 +6,12 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 
+from unittest import mock
+
+from i2pchat.core import call_session as call_session_mod
 from i2pchat.core.call_session import CallPhase, CallSessionManager
-from i2pchat.core.call_signals import CallInvite, parse_call_signal
+from i2pchat.core.call_signals import CallAccept, CallInvite, call_id_hash16, parse_call_signal
+from i2pchat.core.media_framing import TYPE_PCM16, MediaPacket, fragment_payload
 
 
 @dataclass
@@ -149,6 +153,119 @@ class CallSessionCancelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             await asyncio.wait_for(accept_task, timeout=2.0)
         self.assertFalse(any(s.startswith("CALL_ACCEPT|") for s in signals))
+
+
+class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
+    async def _active_outgoing(self, accept_token: str, **kw):
+        dg = FakeDatagram()
+        signals: list[str] = []
+        events: list[tuple[str, dict]] = []
+
+        async def open_dg(session_id: str) -> FakeDatagram:
+            return dg
+
+        async def send_signal(peer: str, body: str) -> bool:
+            signals.append(body)
+            return True
+
+        mgr = CallSessionManager(
+            sam_address=("127.0.0.1", 7656),
+            send_signal=send_signal,
+            on_event=lambda k, p: events.append((k, p)),
+            open_datagram=open_dg,  # type: ignore[arg-type]
+        )
+        await mgr.start_outgoing("peer.b32.i2p", video=False)
+        for _ in range(50):
+            if mgr._dg is not None:
+                break
+            await asyncio.sleep(0.01)
+        call_id = mgr.state.call_id
+        accept = CallAccept(call_id, "opus,jpeg", 250_000, accept_token)
+        await mgr.handle_signal("peer.b32.i2p", accept.encode())
+        return mgr, dg, signals, events
+
+    async def test_invite_advertises_full_public_destination(self) -> None:
+        mgr, dg, signals, _ = await self._active_outgoing("R" * 100)
+        invite = next(s for s in signals if s.startswith("CALL_INVITE|"))
+        parsed = parse_call_signal(invite)
+        assert parsed is not None
+        self.assertEqual(parsed.datagram_b32, dg.local_destination_b64)
+        self.assertEqual(mgr.state.phase, CallPhase.ACTIVE)
+        self.assertTrue(mgr.state.media_ready)
+        await mgr.hangup()
+
+    async def test_short_remote_token_sends_via_b32_and_looks_up_once(self) -> None:
+        lookups: list[str] = []
+
+        async def failing_lookup(name: str, *, sam_address):  # noqa: ANN001
+            lookups.append(name)
+            raise RuntimeError("Key not found")
+
+        with mock.patch.object(call_session_mod, "naming_lookup_b64", failing_lookup):
+            token = "q" * 52
+            mgr, dg, _, _ = await self._active_outgoing(token)
+            self.assertFalse(mgr.state.media_ready)
+            for _ in range(30):
+                await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(dg.sent), 30)
+            self.assertTrue(all(dest == f"{token}.b32.i2p" for dest, _ in dg.sent))
+            self.assertEqual(len(lookups), 1)  # single-flight + backoff, not per frame
+            await mgr.hangup()
+
+    async def test_lookup_success_switches_to_full_destination(self) -> None:
+        full = "F" * 200
+
+        async def ok_lookup(name: str, *, sam_address):  # noqa: ANN001
+            return full
+
+        with mock.patch.object(call_session_mod, "naming_lookup_b64", ok_lookup):
+            mgr, dg, _, events = await self._active_outgoing("q" * 52)
+            await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+            for _ in range(50):
+                if mgr.state.media_ready:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(mgr.state.media_ready)
+            await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+            self.assertEqual(dg.sent[-1][0], full)
+            self.assertIn("media_ready", [k for k, _ in events])
+            await mgr.hangup()
+
+    async def test_large_frame_is_fragmented_and_reassembled_on_receive(self) -> None:
+        mgr, dg, _, events = await self._active_outgoing("R" * 100)
+        frame = bytes(range(256)) * 50  # 12.8 KB
+        await mgr.send_jpeg_frame(frame)  # cam off -> ignored
+        mgr.state.local_cam = True
+        await mgr.send_jpeg_frame(frame)
+        from i2pchat.core.media_framing import MAX_PAYLOAD
+
+        self.assertGreater(len(dg.sent), 1)
+        self.assertTrue(all(len(p) <= MAX_PAYLOAD + 64 for _, p in dg.sent))
+        for _, raw in reversed(dg.sent):  # out-of-order delivery
+            await mgr._on_datagram("R" * 100, raw)
+        media = [p for k, p in events if k == "media_packet"]
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0]["payload"], frame)
+        self.assertIn("media_flowing", [k for k, _ in events])
+        self.assertEqual(mgr.stats()["rx_frames"], 1)
+        await mgr.hangup()
+
+    async def test_foreign_call_hash_is_dropped(self) -> None:
+        mgr, _, _, events = await self._active_outgoing("R" * 100)
+        pkt = MediaPacket(
+            call_hash=call_id_hash16("other-call"),
+            seq=1,
+            ts_ms=1,
+            ptype=TYPE_PCM16,
+            flags=0,
+            payload=b"\x00" * 10,
+        )
+        await mgr._on_datagram("R" * 100, pkt.encode())
+        self.assertFalse(any(k == "media_packet" for k, _ in events))
+        self.assertEqual(mgr.stats()["rx_dropped"], 1)
+        await mgr.hangup()
 
 
 if __name__ == "__main__":

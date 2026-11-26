@@ -8180,6 +8180,13 @@ class ChatWindow(QtWidgets.QMainWindow):
             self._show_status_page()
 
     def _show_status_page(self) -> None:
+        overlay = getattr(self, "_call_overlay", None)
+        if (
+            overlay is not None
+            and self._center_stack.currentWidget() is overlay
+            and overlay.has_live_call()
+        ):
+            overlay.minimize_to_bar(emit_signal=False)
         self._center_stack.setCurrentWidget(self.status_panel)
 
     def _show_call_page(self) -> None:
@@ -8189,15 +8196,26 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _on_call_overlay_closed(self) -> None:
         # Always leave the call page (and status, if opened during a call).
         if self._center_stack.currentWidget() is not self._chat_page:
-            self._show_chat_page()
+            self._show_chat_page(keep_call=False)
 
     def _on_call_overlay_minimized(self) -> None:
         # Return to chat while the floating mini-bar keeps the call alive.
-        self._show_chat_page()
+        self._show_chat_page(keep_call=False)
         _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
         self._refresh_status_panel()
 
-    def _show_chat_page(self) -> None:
+    def _show_chat_page(self, *, keep_call: bool = True) -> None:
+        # Leaving the call page while a call is live (e.g. picking another contact in
+        # the address book) must not orphan it: collapse to the floating mini-bar,
+        # from which the call page can always be restored.
+        overlay = getattr(self, "_call_overlay", None)
+        if (
+            keep_call
+            and overlay is not None
+            and self._center_stack.currentWidget() is overlay
+            and overlay.has_live_call()
+        ):
+            overlay.minimize_to_bar(emit_signal=False)
         self._center_stack.setCurrentWidget(self._chat_page)
         _set_tooltip_if_changed(self.status_label, self._status_bar_tooltip())
         self._refresh_connection_buttons()

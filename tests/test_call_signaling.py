@@ -17,9 +17,11 @@ from i2pchat.core.call_signals import (
     parse_call_signal,
 )
 from i2pchat.core.media_framing import (
-    FLAG_FRAG_MORE,
+    HEADER_SIZE,
+    MAX_PAYLOAD,
     TYPE_OPUS,
     TYPE_VIDEO_JPEG,
+    FrameReassembler,
     MediaPacket,
     decode_media_packet,
     fragment_payload,
@@ -80,13 +82,75 @@ def test_media_packet_roundtrip():
     assert decoded.payload == b"opus-bytes"
 
 
-def test_fragment_payload_flags():
+def test_fragment_payload_chunks():
     parts = fragment_payload(b"abcdefghij", max_chunk=4)
-    assert len(parts) == 3
-    assert parts[0][1] & FLAG_FRAG_MORE
-    assert parts[1][1] & FLAG_FRAG_MORE
-    assert parts[2][1] == 0
-    assert b"".join(c for c, _ in parts) == b"abcdefghij"
+    assert parts == [b"abcd", b"efgh", b"ij"]
+    assert fragment_payload(b"") == [b""]
+
+
+def test_max_payload_fits_sam_buffer():
+    # i2pd's SAM socket buffer is 8192 bytes: header line + payload must fit.
+    assert MAX_PAYLOAD + HEADER_SIZE + 700 < 8192
+
+
+def _packets(payload: bytes, seq: int = 7, chunk: int = 4):
+    chunks = fragment_payload(payload, max_chunk=chunk)
+    return [
+        MediaPacket(
+            call_hash=b"\x02" * 16,
+            seq=seq,
+            ts_ms=1,
+            ptype=TYPE_VIDEO_JPEG,
+            flags=0,
+            payload=c,
+            frag_idx=i,
+            frag_total=len(chunks),
+        )
+        for i, c in enumerate(chunks)
+    ]
+
+
+def test_fragment_roundtrip_through_wire_and_reassembler():
+    data = bytes(range(256)) * 40
+    pkts = [decode_media_packet(p.encode()) for p in _packets(data, chunk=MAX_PAYLOAD)]
+    assert all(p is not None for p in pkts)
+    assert len(pkts) == 3
+    r = FrameReassembler()
+    out = None
+    for p in reversed(pkts):  # reordered delivery
+        out = r.feed(p) or out
+    assert out == data
+
+
+def test_reassembler_drops_incomplete_frame_after_timeout():
+    now = [0.0]
+    r = FrameReassembler(timeout_s=1.5, clock=lambda: now[0])
+    pkts = _packets(b"abcdefghij")
+    assert r.feed(pkts[0]) is None
+    now[0] = 5.0
+    # a later frame triggers expiry of the stale partial one
+    full = _packets(b"zz", seq=8)
+    assert r.feed(full[0]) == b"zz"
+    assert len(r) == 0
+    assert r.dropped_frames == 1
+    assert r.feed(pkts[1]) is None  # late fragment of an expired frame never completes
+
+
+def test_reassembler_limits_pending_frames():
+    r = FrameReassembler(max_pending=2)
+    for seq in range(5):
+        r.feed(_packets(b"abcdefgh", seq=seq)[0])
+    assert len(r) == 2
+    assert r.dropped_frames == 3
+
+
+def test_decode_rejects_old_magic_and_bad_fragment_index():
+    assert decode_media_packet(b"I2C1" + b"\x00" * 40) is None
+    bad = MediaPacket(call_hash=b"\x01" * 16, seq=1, ts_ms=1, ptype=1, flags=0, payload=b"x").encode()
+    raw = bytearray(bad)
+    raw[HEADER_SIZE - 2] = 5  # frag_idx
+    raw[HEADER_SIZE - 1] = 2  # frag_total
+    assert decode_media_packet(bytes(raw)) is None
 
 
 def test_jpeg_type_constant():

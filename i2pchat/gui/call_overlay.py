@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from PyQt6 import QtCore, QtGui, QtMultimedia, QtWidgets
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
     from i2pchat.core.call_session import CallSessionManager
 
 logger = logging.getLogger(__name__)
+
+PCM_FRAMES_PER_PACKET = 3  # 3 x 20 ms PCM per DATAGRAM
+PLAY_PREBUFFER_MS = 120
+PLAY_MAX_BUFFER_MS = 500
 
 
 class CallSettingsDialog(QtWidgets.QDialog):
@@ -250,6 +255,20 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._audio_timer.setInterval(FRAME_MS)
         self._audio_timer.timeout.connect(self._poll_audio)
         self._pcm_buf = bytearray()
+        self._pcm_out_acc = bytearray()
+        self._play_buf = bytearray()
+        self._play_started = False
+        self._last_play_data = 0.0
+        self._media_epoch = 0
+        self._mic_denied = False
+        self._cam_denied = False
+        self._camera_pending = False
+        self._last_video_sent = 0.0
+        self._video_inflight = False
+        self._status_base = ""
+        self._stats_timer = QtCore.QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._update_stats)
         self._prefs = load_call_prefs()
         self._want_video_start = False
 
@@ -257,6 +276,31 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._core = core
         if core is not None:
             core.on_call_event = self._on_call_event
+
+    def _set_status(self, text: str) -> None:
+        self._status_base = text
+        self._status.setText(text)
+
+    def _update_stats(self) -> None:
+        """Append live TX/RX counters while a call is active (diagnoses one-way media)."""
+        if self._manager is None:
+            return
+        snap = self._manager.snapshot()
+        if snap.get("phase") != "active":
+            return
+        st = snap.get("stats") or {}
+        tx = int(st.get("tx_packets") or 0)
+        rx = int(st.get("rx_packets") or 0)
+        base = self._status_base
+        if rx > 0 and base == tr("call.media_pending"):
+            base = tr("call.connected")
+            self._status_base = base
+        extra = tr("call.stats", tx=tx, rx=rx)
+        if st.get("control_closed"):
+            extra += " · " + tr("call.media_error")
+        elif self._mic_denied:
+            extra += " · " + tr("call.mic_denied")
+        self._status.setText(f"{base} · {extra}")
 
     def _spawn(self, coro: Any) -> None:
         try:
@@ -287,7 +331,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._prefs = load_call_prefs()
         self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
         self.show_overlay()
-        self._status.setText(tr("call.calling"))
+        self._set_status(tr("call.calling"))
         self._accept_btn.hide()
         self._reject_btn.hide()
         self._hangup_btn.show()
@@ -306,7 +350,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
 
     def show_incoming(self, state: dict[str, Any]) -> None:
         self.show_overlay()
-        self._status.setText(tr("call.incoming"))
+        self._set_status(tr("call.incoming"))
         self._accept_btn.show()
         self._reject_btn.show()
         self._hangup_btn.hide()
@@ -326,7 +370,22 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._set_action_buttons_enabled(True)
         self.closed.emit()
 
+    def has_live_call(self) -> bool:
+        """True while a call is ringing, dialing or active (overlay must not just vanish)."""
+        try:
+            mgr = self._manager
+            if mgr is None and self._core is not None:
+                mgr = self._core.get_call_manager()
+            if mgr is None:
+                return False
+            return str(mgr.snapshot().get("phase") or "idle") in ("outgoing", "incoming", "active")
+        except Exception:
+            return False
+
     def _on_minimize(self) -> None:
+        self.minimize_to_bar(emit_signal=True)
+
+    def minimize_to_bar(self, *, emit_signal: bool = True) -> None:
         if self._manager is not None:
             self._manager.set_minimized(True)
             snap = self._manager.snapshot()
@@ -343,7 +402,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._mini.move(geo.x() + geo.width() - 440, geo.y() + 80)
         self._mini.show()
         self._mini.raise_()
-        self.minimized.emit()
+        if emit_signal:
+            self.minimized.emit()
 
     def _expand_from_mini(self) -> None:
         self._mini.hide()
@@ -396,7 +456,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def _accept(self) -> None:
         if self._core is None:
             return
-        self._status.setText(tr("call.connecting"))
+        self._set_status(tr("call.connecting"))
         self._set_action_buttons_enabled(False)
         self._spawn(self._accept_async())
 
@@ -410,9 +470,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._set_action_buttons_enabled(True)
             snap = self._manager.snapshot() if self._manager else {}
             if snap.get("media_ready"):
-                self._status.setText(tr("call.connected"))
+                self._set_status(tr("call.connected"))
             else:
-                self._status.setText(tr("call.media_pending"))
+                self._set_status(tr("call.media_pending"))
             self._refresh_from_state()
             self._start_media()
         except Exception as exc:
@@ -429,7 +489,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 self._accept_btn.show()
                 self._reject_btn.show()
                 self._hangup_btn.hide()
-                self._status.setText(tr("call.incoming"))
+                self._set_status(tr("call.incoming"))
             else:
                 self.hide_all()
 
@@ -461,14 +521,21 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._hangup_btn.show()
             self._set_action_buttons_enabled(True)
             if state.get("media_ready"):
-                self._status.setText(tr("call.connected"))
+                self._set_status(tr("call.connected"))
             else:
-                self._status.setText(tr("call.media_pending"))
+                self._set_status(tr("call.media_pending"))
             self._refresh_buttons(state)
             self._start_media()
             return
         if kind == "media_pending":
-            self._status.setText(tr("call.media_pending"))
+            self._set_status(tr("call.media_pending"))
+            return
+        if kind in ("media_ready", "media_flowing"):
+            if self._status_base == tr("call.media_pending"):
+                self._set_status(tr("call.connected"))
+            return
+        if kind == "media_error":
+            self._update_stats()
             return
         if kind == "ended":
             self.hide_all()
@@ -479,7 +546,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if kind in ("media", "remote_media", "outgoing", "minimized"):
             self._refresh_buttons(state)
             if kind == "outgoing":
-                self._status.setText(tr("call.calling"))
+                self._set_status(tr("call.calling"))
                 self._hangup_btn.show()
                 self._accept_btn.hide()
                 self._reject_btn.hide()
@@ -505,26 +572,85 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._screen_btn.setText(tr("call.screen_on") if screen else tr("call.screen_off"))
         peer = str(state.get("peer") or "")
         if state.get("phase") == "outgoing":
-            self._status.setText(tr("call.calling"))
+            self._set_status(tr("call.calling"))
         self._mini.update_flags(mic=mic, spk=spk, cam=cam, screen=screen, peer=peer)
+
+    @staticmethod
+    def _request_permission(perm: Any, callback: Any) -> None:
+        """Ask Qt (macOS TCC / Android-style permission API) and call ``callback(bool)``."""
+        app = QtCore.QCoreApplication.instance()
+        granted = QtCore.Qt.PermissionStatus.Granted
+        undetermined = QtCore.Qt.PermissionStatus.Undetermined
+        try:
+            status = app.checkPermission(perm)
+            if status == granted:
+                callback(True)
+            elif status == undetermined:
+                app.requestPermission(
+                    perm,
+                    app,
+                    lambda p: callback(app.checkPermission(p) == granted),
+                )
+            else:
+                callback(False)
+        except Exception:
+            logger.debug("permission API unavailable; assuming granted", exc_info=True)
+            callback(True)
 
     def _start_media(self) -> None:
         self._stop_media()
+        self._media_epoch += 1
+        epoch = self._media_epoch
+        self._mic_denied = False
+        self._start_audio_output()
+        self._audio_timer.start()
+        self._stats_timer.start()
+        self._request_permission(
+            QtCore.QMicrophonePermission(),
+            lambda ok, e=epoch: self._on_mic_permission(ok, e),
+        )
+        self._sync_capture_devices()
+
+    def _audio_format(self) -> QtMultimedia.QAudioFormat:
         fmt = QtMultimedia.QAudioFormat()
         fmt.setSampleRate(SAMPLE_RATE)
         fmt.setChannelCount(1)
         fmt.setSampleFormat(QtMultimedia.QAudioFormat.SampleFormat.Int16)
+        return fmt
+
+    def _start_audio_output(self) -> None:
+        try:
+            out_dev = QtMultimedia.QMediaDevices.defaultAudioOutput()
+            if out_dev.isNull():
+                logger.warning("call audio: no default output device")
+                return
+            self._audio_out = QtMultimedia.QAudioSink(out_dev, self._audio_format(), self)
+            self._audio_out_io = self._audio_out.start()
+            logger.info("call audio: output %s", out_dev.description())
+        except Exception:
+            logger.exception("audio output failed")
+
+    def _on_mic_permission(self, ok: bool, epoch: int) -> None:
+        if epoch != self._media_epoch:
+            return
+        if not ok:
+            self._mic_denied = True
+            logger.warning("call audio: microphone permission denied")
+            return
         try:
             in_dev = QtMultimedia.QMediaDevices.defaultAudioInput()
-            out_dev = QtMultimedia.QMediaDevices.defaultAudioOutput()
-            self._audio_in = QtMultimedia.QAudioSource(in_dev, fmt, self)
-            self._audio_out = QtMultimedia.QAudioSink(out_dev, fmt, self)
+            if in_dev.isNull():
+                logger.warning("call audio: no default input device")
+                self._mic_denied = True
+                return
+            self._audio_in = QtMultimedia.QAudioSource(in_dev, self._audio_format(), self)
+            self._audio_in.stateChanged.connect(
+                lambda st: logger.info("call audio: input state %s", st)
+            )
             self._audio_in_io = self._audio_in.start()
-            self._audio_out_io = self._audio_out.start()
-            self._audio_timer.start()
+            logger.info("call audio: input %s", in_dev.description())
         except Exception:
-            logger.exception("audio devices failed")
-        self._sync_capture_devices()
+            logger.exception("audio input failed")
 
     def _sync_capture_devices(self) -> None:
         if self._manager is None:
@@ -542,7 +668,29 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._stop_screen()
 
     def _ensure_camera(self) -> None:
-        if self._camera is not None:
+        if self._camera is not None or self._camera_pending:
+            return
+        cameras = QtMultimedia.QMediaDevices.videoInputs()
+        if not cameras:
+            logger.warning("call video: no camera found")
+            return
+        self._camera_pending = True
+        epoch = self._media_epoch
+        self._request_permission(
+            QtCore.QCameraPermission(),
+            lambda ok, e=epoch: self._on_camera_permission(ok, e),
+        )
+
+    def _on_camera_permission(self, ok: bool, epoch: int) -> None:
+        self._camera_pending = False
+        if epoch != self._media_epoch or self._camera is not None:
+            return
+        if not ok:
+            self._cam_denied = True
+            logger.warning("call video: camera permission denied")
+            self._set_status(tr("call.cam_denied"))
+            return
+        if self._manager is None or not self._manager.snapshot().get("cam"):
             return
         cameras = QtMultimedia.QMediaDevices.videoInputs()
         if not cameras:
@@ -583,7 +731,10 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._screen_timer = None
 
     def _stop_media(self) -> None:
+        self._media_epoch += 1
+        self._camera_pending = False
         self._audio_timer.stop()
+        self._stats_timer.stop()
         self._stop_camera()
         self._stop_screen()
         if self._audio_in is not None:
@@ -601,8 +752,13 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._audio_in_io = None
         self._audio_out_io = None
         self._pcm_buf.clear()
+        self._pcm_out_acc.clear()
+        self._play_buf.clear()
+        self._play_started = False
+        self._video_inflight = False
 
     def _poll_audio(self) -> None:
+        self._pump_playback()
         if self._manager is None or self._audio_in_io is None:
             return
         snap = self._manager.snapshot()
@@ -610,6 +766,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
             return
         data = bytes(self._audio_in_io.readAll())
         if not snap.get("mic"):
+            self._pcm_buf.clear()
+            self._pcm_out_acc.clear()
             return
         if data:
             self._pcm_buf.extend(data)
@@ -618,10 +776,69 @@ class CallOverlayWidget(QtWidgets.QWidget):
             chunk = bytes(self._pcm_buf[:frame_bytes])
             del self._pcm_buf[:frame_bytes]
             encoded, is_opus = self._codec.encode(chunk)
-            self._spawn(self._manager.send_audio_frame(encoded, opus=is_opus))
+            if is_opus:
+                self._spawn(self._manager.send_audio_frame(encoded, opus=True))
+                continue
+            # PCM fallback: pack several 20 ms frames per datagram (less I2P overhead).
+            self._pcm_out_acc.extend(encoded)
+            if len(self._pcm_out_acc) >= frame_bytes * PCM_FRAMES_PER_PACKET:
+                packed = bytes(self._pcm_out_acc)
+                self._pcm_out_acc.clear()
+                self._spawn(self._manager.send_audio_frame(packed, opus=False))
+
+    def _enqueue_playback(self, pcm: bytes) -> None:
+        """Jitter buffer: queue decoded PCM, cap latency by dropping the oldest audio."""
+        self._play_buf.extend(pcm)
+        self._last_play_data = time.monotonic()
+        max_bytes = SAMPLE_RATE * 2 * PLAY_MAX_BUFFER_MS // 1000
+        overflow = len(self._play_buf) - max_bytes
+        if overflow > 0:
+            overflow -= overflow % 2
+            del self._play_buf[:overflow]
+
+    def _pump_playback(self) -> None:
+        sink = self._audio_out
+        io = self._audio_out_io
+        if sink is None or io is None:
+            return
+        if not self._play_started:
+            if len(self._play_buf) < SAMPLE_RATE * 2 * PLAY_PREBUFFER_MS // 1000:
+                return
+            self._play_started = True
+        if not self._play_buf:
+            # Starved for a while: re-prebuffer so playback does not stutter.
+            if time.monotonic() - self._last_play_data > 0.3:
+                self._play_started = False
+            return
+        n = min(int(sink.bytesFree()), len(self._play_buf))
+        n -= n % 2
+        if n <= 0:
+            return
+        io.write(bytes(self._play_buf[:n]))
+        del self._play_buf[:n]
+
+    def _send_jpeg_task(self, jpeg: bytes) -> None:
+        mgr = self._manager
+        if mgr is None or self._video_inflight:
+            return
+        self._video_inflight = True
+        self._last_video_sent = time.monotonic()
+
+        async def _run() -> None:
+            try:
+                await mgr.send_jpeg_frame(jpeg)
+            finally:
+                self._video_inflight = False
+
+        self._spawn(_run())
 
     def _on_local_frame(self, frame: QtMultimedia.QVideoFrame) -> None:
         if self._manager is None:
+            return
+        # Cameras deliver ~30 fps; honour the configured send rate and never queue
+        # a new frame while the previous one is still being sent.
+        min_interval = 1.0 / max(1, self._prefs.video_fps)
+        if self._video_inflight or time.monotonic() - self._last_video_sent < min_interval:
             return
         img = frame.toImage()
         if img.isNull():
@@ -634,7 +851,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._local_view.setPixmap(pix)
         jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge)
         if jpeg:
-            self._spawn(self._manager.send_jpeg_frame(jpeg))
+            self._send_jpeg_task(jpeg)
 
     def _capture_screen_frame(self) -> None:
         if self._manager is None:
@@ -651,9 +868,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 QtCore.Qt.TransformationMode.SmoothTransformation,
             )
         )
-        jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge, quality=45)
+        jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge, quality=35)
         if jpeg:
-            self._spawn(self._manager.send_jpeg_frame(jpeg))
+            self._send_jpeg_task(jpeg)
 
     def _on_media_packet(self, payload: dict[str, Any]) -> None:
         if self._manager is None:
@@ -666,7 +883,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 return
             pcm = self._codec.decode(data, opus=(ptype == TYPE_OPUS))
             if pcm:
-                self._audio_out_io.write(pcm)
+                self._enqueue_playback(pcm)
         elif ptype == TYPE_VIDEO_JPEG:
             img = qimage_from_jpeg(data)
             if img is not None:

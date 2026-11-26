@@ -434,6 +434,75 @@ class AsyncioRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(k, core._live_sessions)
         self.assertTrue(writer.closed)
 
+    async def test_late_identity_preface_after_handshake_is_ignored(self) -> None:
+        """Simultaneous-connect race: delayed plaintext identity S must not tear down."""
+        import struct
+        import secrets
+        from i2pchat.sam.destination import Destination
+
+        errors: list[str] = []
+        core = I2PChatCore(on_error=errors.append)
+        codec = ProtocolCodec(
+            allowed_types={"U", "S", "P", "O", "F", "D", "E", "I", "H", "G"},
+            max_frame_body=core.MAX_FRAME_BODY,
+        )
+        raw = bytearray(387 + 64)
+        raw[:385] = secrets.token_bytes(385)
+        raw[385:387] = struct.pack("!H", 0)
+        raw[387:] = secrets.token_bytes(64)
+        dest_b64 = Destination(bytes(raw), has_private_key=True).base64.encode("ascii")
+
+        reader = _FakeReader(codec.encode("S", dest_b64, msg_id=1, flags=0))
+        writer = _FakeWriter()
+        conn = (reader, writer)
+        k = attach_mock_live_session(
+            core,
+            PEER_BARE,
+            conn,
+            handshake_complete=True,
+            use_encryption=True,
+            shared_key=b"x" * 32,
+        )
+
+        await core.receive_loop(conn, peer_id=k)
+        await asyncio.sleep(0)
+
+        self.assertFalse(any("Protocol downgrade detected" in e for e in errors), errors)
+        # Exhausted reader ends the loop via cleanup; must not have scheduled
+        # a protocol-downgrade disconnect.
+        self.assertFalse(
+            any("downgrade" in e.lower() for e in errors),
+            errors,
+        )
+
+    async def test_plaintext_quit_after_handshake_closes_without_downgrade_error(self) -> None:
+        errors: list[str] = []
+        systems: list[str] = []
+        core = I2PChatCore(on_error=errors.append, on_system=systems.append)
+        codec = ProtocolCodec(
+            allowed_types={"U", "S", "P", "O", "F", "D", "E", "I", "H", "G"},
+            max_frame_body=core.MAX_FRAME_BODY,
+        )
+        reader = _FakeReader(
+            codec.encode("S", b"__SIGNAL__:QUIT", msg_id=1, flags=0)
+        )
+        writer = _FakeWriter()
+        conn = (reader, writer)
+        k = attach_mock_live_session(
+            core,
+            PEER_BARE,
+            conn,
+            handshake_complete=True,
+            use_encryption=True,
+            shared_key=b"x" * 32,
+        )
+
+        await core.receive_loop(conn, peer_id=k)
+        await asyncio.sleep(0)
+
+        self.assertFalse(any("Protocol downgrade detected" in e for e in errors), errors)
+        self.assertTrue(any("disconnect" in s.lower() for s in systems))
+
     async def test_schedule_disconnect_is_idempotent_while_task_running(self) -> None:
         core = I2PChatCore()
         attach_mock_live_session(core, PEER_BARE, (_FakeReader(b""), _FakeWriter()))

@@ -154,6 +154,10 @@ cat > "dist/${APP_NAME}.app/Contents/Info.plist" <<PLIST
 	<string>${RELEASE_VERSION}</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>10.13</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>I2PChat uses the microphone for audio and video calls with your contacts.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>I2PChat uses the camera for video calls with your contacts.</string>
 </dict>
 </plist>
 PLIST

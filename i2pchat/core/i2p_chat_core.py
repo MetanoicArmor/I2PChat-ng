@@ -11490,6 +11490,36 @@ class I2PChatCore:
             return f" (peer {p})"
         return f" (peer {p[:12]}…)"
 
+    @staticmethod
+    def _benign_plaintext_after_handshake(msg_type: str, body_data: bytes) -> Optional[str]:
+        """Classify late plaintext frames that are not a real protocol downgrade.
+
+        Simultaneous connect / reconnect can deliver a delayed identity preface
+        ``S`` (destination base64) or a plaintext ``__SIGNAL__:QUIT`` after this
+        side already finalized the secure channel. Treat those as benign so a
+        transient race does not tear down an otherwise healthy session.
+        """
+        if msg_type != "S":
+            return None
+        try:
+            text = body_data.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return None
+        if not text:
+            return None
+        if text == "__SIGNAL__:QUIT" or text.startswith("__SIGNAL__:QUIT|"):
+            return "quit"
+        if text.startswith("__SIGNAL__:"):
+            return None
+        # Identity preface: long I2P destination base64 (no signal prefix).
+        if len(text) < 100 or " " in text or "\n" in text:
+            return None
+        try:
+            i2plib.Destination(text)
+        except Exception:
+            return None
+        return "identity"
+
     async def receive_loop(
         self,
         connection: Tuple[asyncio.StreamReader, asyncio.StreamWriter],
@@ -11708,6 +11738,20 @@ class I2PChatCore:
                         break
                     sess._recv_seq = seq_num
                 elif sess.handshake_complete:
+                    benign = self._benign_plaintext_after_handshake(msg_type, body_data)
+                    if benign == "identity":
+                        logger.info(
+                            "Ignoring late identity preface after handshake (peer=%s)",
+                            (err_peer or "?")[:24],
+                        )
+                        continue
+                    if benign == "quit":
+                        logger.info(
+                            "Peer sent plaintext QUIT after handshake (peer=%s); closing",
+                            (err_peer or "?")[:24],
+                        )
+                        self._emit_system("Peer requested disconnect.")
+                        break
                     logger.warning(
                         "Protocol downgrade detected: plaintext frame after handshake "
                         "(msg_type=%r peer=%s encrypted=%s)",

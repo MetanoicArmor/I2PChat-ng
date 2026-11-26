@@ -193,6 +193,10 @@ _EN: dict[str, str] = {
     "call.local_video": "You",
     "call.need_peer": "Connect to a peer before starting a call.",
     "call.no_event_loop": "No asyncio event loop. Restart the app and try again.",
+    "call.stats": "TX {tx} / RX {rx}",
+    "call.mic_denied": "microphone access denied",
+    "call.cam_denied": "Camera access denied (System Settings > Privacy & Security)",
+    "call.media_error": "media link closed",
     "diag.clock_skew": (
         "The system clock differs too much from network time. Enable automatic "
         "time synchronization and restart."
@@ -401,6 +405,10 @@ _RU: dict[str, str] = {
     "call.local_video": "Вы",
     "call.need_peer": "Сначала подключитесь к собеседнику.",
     "call.no_event_loop": "Нет asyncio-цикла. Перезапустите приложение.",
+    "call.stats": "TX {tx} / RX {rx}",
+    "call.mic_denied": "нет доступа к микрофону",
+    "call.cam_denied": "Нет доступа к камере (Системные настройки > Конфиденциальность)",
+    "call.media_error": "медиа-канал закрыт",
     "diag.clock_skew": (
         "Системное время сильно расходится с сетевым. Включите автоматическую "
         "синхронизацию времени и перезапустите приложение."

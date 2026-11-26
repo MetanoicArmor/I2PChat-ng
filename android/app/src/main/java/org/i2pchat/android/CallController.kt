@@ -41,9 +41,9 @@ data class CallUiState(
     val minimized: Boolean = false,
     val error: String = "",
     val audioBitrateKbps: Int = 32,
-    val videoBitrateKbps: Int = 250,
-    val videoFps: Int = 8,
-    val videoMaxEdge: Int = 480,
+    val videoBitrateKbps: Int = 150,
+    val videoFps: Int = 5,
+    val videoMaxEdge: Int = 320,
     val lastRemoteJpeg: ByteArray? = null,
     val mediaReady: Boolean = false,
 )
@@ -64,14 +64,18 @@ class CallController(
     val state: StateFlow<CallUiState> = _state.asStateFlow()
 
     private var datagram: SamDatagramSession? = null
-    private var remoteDestB64: String = ""
+    @Volatile private var remoteDestB64: String = ""
+    private val reassembler = CallMediaFraming.Reassembler()
+    private var resolveJob: Job? = null
+    @Volatile private var resolveFailures = 0
+    @Volatile private var nextResolveAtMs = 0L
     private var seq = AtomicInteger(0)
     private var audioJob: Job? = null
     private var audioTrack: AudioTrack? = null
     private var setupJob: Job? = null
     private var generation = 0
     private val mutex = Mutex()
-    private val remoteCache = HashMap<String, String>()
+    private val remoteCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val prefs by lazy {
         appContext.getSharedPreferences("call_prefs", Context.MODE_PRIVATE)
     }
@@ -80,9 +84,9 @@ class CallController(
         _state.update {
             it.copy(
                 audioBitrateKbps = prefs.getInt("audio_bitrate_kbps", 32).coerceIn(12, 64),
-                videoBitrateKbps = prefs.getInt("video_bitrate_kbps", 250).coerceIn(50, 800),
-                videoFps = prefs.getInt("video_fps", 8).coerceIn(3, 20),
-                videoMaxEdge = prefs.getInt("video_max_edge", 480).coerceIn(160, 720),
+                videoBitrateKbps = prefs.getInt("video_bitrate_kbps", 150).coerceIn(50, 800),
+                videoFps = prefs.getInt("video_fps", 5).coerceIn(3, 20),
+                videoMaxEdge = prefs.getInt("video_max_edge", 320).coerceIn(160, 720),
             )
         }
     }
@@ -141,7 +145,8 @@ class CallController(
                     return@launch
                 }
                 val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
-                val token = dg.localB32Hint.ifBlank { dg.localDestinationB64 }
+                // Full public destination: no NAMING LOOKUP needed on the peer (fresh LeaseSet is often unpublished).
+                val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
                 val ok = sendSignal(
                     peer,
                     CallSignals.buildAccept(callId, "opus,jpeg", maxBr, token),
@@ -150,8 +155,7 @@ class CallController(
                     teardown("accept failed")
                     return@launch
                 }
-                resolveRemoteLocked(remoteDestB64.ifBlank { snap.let { remoteDestB64 } })
-                val ready = remoteDestB64.length >= REMOTE_DEST_MIN
+                val ready = applyRemoteToken(remoteDestB64)
                 _state.update {
                     it.copy(
                         phase = CallPhase.Active,
@@ -251,12 +255,11 @@ class CallController(
                 CallSignals.ACCEPT -> {
                     val snap = _state.value
                     if (snap.phase != CallPhase.Outgoing || snap.callId != parsed.callId) return@launch
-                    remoteDestB64 = parsed.datagramB32
-                    resolveRemoteLocked(parsed.datagramB32)
+                    val ready = applyRemoteToken(parsed.datagramB32)
                     _state.update {
                         it.copy(
                             phase = CallPhase.Active,
-                            mediaReady = remoteDestB64.length >= REMOTE_DEST_MIN,
+                            mediaReady = ready,
                         )
                     }
                     sendMediaState()
@@ -284,22 +287,10 @@ class CallController(
     fun sendJpeg(jpeg: ByteArray) {
         val snap = _state.value
         if (snap.phase != CallPhase.Active || !(snap.cam || snap.screen)) return
-        ensureRemoteResolved()
-        if (remoteDestB64.length < REMOTE_DEST_MIN) return
+        val target = remoteSendTarget()
+        if (target.isEmpty()) return
         val dg = datagram ?: return
-        val hash = CallSignals.callIdHash16(snap.callId)
-        val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
-        for ((chunk, flags) in CallMediaFraming.fragment(jpeg)) {
-            val pkt = CallMediaFraming.Packet(
-                callHash = hash,
-                seq = seq.incrementAndGet(),
-                tsMs = now,
-                type = CallMediaFraming.TYPE_VIDEO_JPEG,
-                flags = flags,
-                payload = chunk,
-            )
-            runCatching { dg.send(remoteDestB64, pkt.encode()) }
-        }
+        sendFramed(dg, target, snap.callId, CallMediaFraming.TYPE_VIDEO_JPEG, jpeg)
     }
 
     private suspend fun outgoingSetup(gen: Int, peer: String, callId: String, video: Boolean) {
@@ -317,7 +308,8 @@ class CallController(
             }
             datagram = dg
             val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
-            val token = dg.localB32Hint.ifBlank { dg.localDestinationB64 }
+            // Full public destination: no NAMING LOOKUP needed on the peer (fresh LeaseSet is often unpublished).
+                val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
             val ok = sendSignal(
                 peer,
                 CallSignals.buildInvite(callId, video, "opus,jpeg", maxBr, token),
@@ -377,37 +369,86 @@ class CallController(
         return dg
     }
 
-    private fun resolveRemoteLocked(token: String) {
+    private fun isFullDest(t: String): Boolean = t.length >= REMOTE_DEST_MIN && !t.contains('.')
+
+    private fun b32HostName(t: String): String = when {
+        t.endsWith(".i2p") -> t
+        '.' !in t -> "$t.b32.i2p"
+        else -> "$t.b32.i2p"
+    }
+
+    /** Remember the peer's address; never blocks on a lookup. Returns true when it is a full destination. */
+    private fun applyRemoteToken(token: String): Boolean {
         val t = token.trim()
-        if (t.isEmpty()) return
-        if (t.length >= REMOTE_DEST_MIN && !t.contains('.')) {
-            remoteDestB64 = t
-            return
-        }
+        remoteDestB64 = t
+        resolveFailures = 0
+        nextResolveAtMs = 0L
+        if (t.isEmpty()) return false
+        if (isFullDest(t)) return true
         remoteCache[t]?.let {
             remoteDestB64 = it
-            return
+            return true
         }
-        val name = when {
-            t.endsWith(".b32.i2p") -> t
-            t.endsWith(".i2p") -> t
-            '.' !in t -> "$t.b32.i2p"
-            else -> t
+        scheduleResolve(t)
+        return false
+    }
+
+    /** Destination for DATAGRAM SEND: full base64 when known, else `<b32>.b32.i2p` (i2pd 3.x resolves it). */
+    private fun remoteSendTarget(): String {
+        val r = remoteDestB64
+        if (r.isEmpty()) return ""
+        if (isFullDest(r)) return r
+        remoteCache[r]?.let {
+            remoteDestB64 = it
+            return it
         }
-        runCatching {
-            SamDatagramSession.namingLookup(samHost(), samPort(), name)
-        }.onSuccess { b64 ->
-            remoteCache[t] = b64
-            remoteDestB64 = b64
-        }.onFailure {
-            Log.w(TAG, "naming lookup failed for $name", it)
-            remoteDestB64 = t
+        scheduleResolve(r)
+        return b32HostName(r)
+    }
+
+    /** Single-flight NAMING LOOKUP with exponential backoff (never per media frame). */
+    private fun scheduleResolve(token: String) {
+        if (resolveJob?.isActive == true) return
+        if (System.currentTimeMillis() < nextResolveAtMs) return
+        val gen = generation
+        resolveJob = scope.launch(Dispatchers.IO) {
+            val name = b32HostName(token)
+            runCatching {
+                SamDatagramSession.namingLookup(samHost(), samPort(), name)
+            }.onSuccess { b64 ->
+                if (generation == gen && remoteDestB64 == token) {
+                    remoteCache[token] = b64
+                    remoteDestB64 = b64
+                    _state.update { it.copy(mediaReady = isFullDest(b64)) }
+                }
+            }.onFailure {
+                resolveFailures += 1
+                val delayMs = minOf(30_000L, 1_000L shl minOf(resolveFailures, 5))
+                nextResolveAtMs = System.currentTimeMillis() + delayMs
+                Log.i(TAG, "naming lookup failed for $name (retry in ${delayMs}ms): ${it.message}")
+            }
         }
     }
 
-    private fun ensureRemoteResolved() {
-        if (remoteDestB64.length >= REMOTE_DEST_MIN) return
-        resolveRemoteLocked(remoteDestB64)
+    /** One media frame -> N datagrams sharing a seq (see CallMediaFraming). */
+    private fun sendFramed(dg: SamDatagramSession, target: String, callId: String, type: Int, payload: ByteArray) {
+        val hash = CallSignals.callIdHash16(callId)
+        val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
+        val frameSeq = seq.incrementAndGet()
+        val chunks = CallMediaFraming.fragment(payload)
+        for ((idx, chunk) in chunks.withIndex()) {
+            val pkt = CallMediaFraming.Packet(
+                callHash = hash,
+                seq = frameSeq,
+                tsMs = now,
+                type = type,
+                flags = 0,
+                payload = chunk,
+                fragIdx = idx,
+                fragTotal = chunks.size,
+            )
+            if (runCatching { dg.send(target, pkt.encode()) }.isFailure) return
+        }
     }
 
     private fun sendMediaState() {
@@ -424,15 +465,16 @@ class CallController(
         ) {
             return
         }
+        val body = reassembler.feed(pkt) ?: return
         when (pkt.type) {
             CallMediaFraming.TYPE_PCM16, CallMediaFraming.TYPE_OPUS -> {
                 if (!snap.spk) return
                 if (pkt.type == CallMediaFraming.TYPE_PCM16) {
-                    runCatching { audioTrack?.write(pkt.payload, 0, pkt.payload.size) }
+                    runCatching { audioTrack?.write(body, 0, body.size) }
                 }
             }
             CallMediaFraming.TYPE_VIDEO_JPEG -> {
-                _state.update { it.copy(lastRemoteJpeg = pkt.payload) }
+                _state.update { it.copy(lastRemoteJpeg = body) }
             }
         }
     }
@@ -475,30 +517,29 @@ class CallController(
             audioTrack?.play()
             runCatching { recorder.startRecording() }
             val buf = ShortArray(frame)
+            val pcmAcc = java.io.ByteArrayOutputStream()
             try {
                 while (isActive && _state.value.phase == CallPhase.Active) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     val snap = _state.value
                     if (!snap.mic) continue
-                    ensureRemoteResolved()
-                    if (remoteDestB64.length < REMOTE_DEST_MIN) continue
-                    val bytes = ByteArray(n * 2)
+                    val target = remoteSendTarget()
+                    if (target.isEmpty()) {
+                        pcmAcc.reset()
+                        continue
+                    }
                     for (i in 0 until n) {
                         val v = buf[i].toInt()
-                        bytes[i * 2] = (v and 0xff).toByte()
-                        bytes[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
+                        pcmAcc.write(v and 0xff)
+                        pcmAcc.write((v shr 8) and 0xff)
                     }
+                    // 3 x 20 ms per datagram: fewer packets, less per-datagram I2P overhead.
+                    if (pcmAcc.size() < frame * 2 * AUDIO_FRAMES_PER_PACKET) continue
+                    val bytes = pcmAcc.toByteArray()
+                    pcmAcc.reset()
                     val dg = datagram ?: continue
-                    val pkt = CallMediaFraming.Packet(
-                        callHash = CallSignals.callIdHash16(snap.callId),
-                        seq = seq.incrementAndGet(),
-                        tsMs = (System.currentTimeMillis() and 0x7fffffff).toInt(),
-                        type = CallMediaFraming.TYPE_PCM16,
-                        flags = 0,
-                        payload = bytes,
-                    )
-                    runCatching { dg.send(remoteDestB64, pkt.encode()) }
+                    sendFramed(dg, target, snap.callId, CallMediaFraming.TYPE_PCM16, bytes)
                 }
             } finally {
                 runCatching { recorder.stop() }
@@ -523,6 +564,9 @@ class CallController(
         val dg = datagram
         datagram = null
         remoteDestB64 = ""
+        resolveJob?.cancel()
+        resolveJob = null
+        remoteCache.clear()
         _state.value = CallUiState(
             error = reason.takeIf { it != "hangup" && it != "ended" && it != "remote_hangup" }.orEmpty(),
             audioBitrateKbps = _state.value.audioBitrateKbps,
@@ -537,5 +581,6 @@ class CallController(
     companion object {
         private const val TAG = "CallController"
         private const val REMOTE_DEST_MIN = 80
+        private const val AUDIO_FRAMES_PER_PACKET = 3
     }
 }
