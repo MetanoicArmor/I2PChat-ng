@@ -898,24 +898,58 @@ class CallOverlayWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _request_permission(perm: Any, callback: Any) -> None:
-        """Ask Qt (macOS TCC / Android-style permission API) and call ``callback(bool)``."""
+        """Ask Qt (macOS TCC / Android-style permission API) and call ``callback(bool)``.
+
+        PyQt6 only exposes ``requestPermission(permission, handler)`` — the Qt C++
+        ``(permission, context, functor)`` overload is not wrapped. Passing a
+        QObject as the second argument raises TypeError; the old code caught that
+        and falsely assumed access was granted, so macOS never showed the camera
+        prompt and ``QCamera.start()`` failed silently.
+        """
         app = QtCore.QCoreApplication.instance()
+        if app is None:
+            callback(False)
+            return
         granted = QtCore.Qt.PermissionStatus.Granted
+        denied = QtCore.Qt.PermissionStatus.Denied
         undetermined = QtCore.Qt.PermissionStatus.Undetermined
         try:
             status = app.checkPermission(perm)
-            if status == granted:
-                callback(True)
-            elif status == undetermined:
-                app.requestPermission(
-                    perm,
-                    app,
-                    lambda p: callback(app.checkPermission(p) == granted),
-                )
-            else:
-                callback(False)
         except Exception:
-            logger.debug("permission API unavailable; assuming granted", exc_info=True)
+            # No permission API (older Qt / plain desktop): open the device.
+            logger.debug("checkPermission unavailable; assuming granted", exc_info=True)
+            callback(True)
+            return
+        if status == granted:
+            callback(True)
+            return
+        if status == denied:
+            callback(False)
+            return
+        if status != undetermined:
+            callback(False)
+            return
+        try:
+            # Handler arg may be a generic QPermission; always re-check with the
+            # typed permission object we requested.
+            def _on_result(_result: Any = None) -> None:
+                try:
+                    st = app.checkPermission(perm)
+                except Exception:
+                    callback(True)
+                    return
+                if st == denied:
+                    callback(False)
+                    return
+                # Granted — or still Undetermined (common on Linux/X11 and some
+                # portals that never flip the flag). Only hard-deny on Denied so
+                # PipeWire/V4L2 capture can proceed.
+                callback(True)
+
+            app.requestPermission(perm, _on_result)
+        except Exception:
+            # requestPermission missing/broken: do not block Linux camera/mic.
+            logger.debug("requestPermission failed; assuming granted", exc_info=True)
             callback(True)
 
     def _start_media(self) -> None:
@@ -991,16 +1025,21 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def _ensure_camera(self) -> None:
         if self._camera is not None or self._camera_pending:
             return
-        cameras = QtMultimedia.QMediaDevices.videoInputs()
-        if not cameras:
-            logger.warning("call video: no camera found")
-            return
+        # On macOS, videoInputs() can be empty until Camera TCC is granted — always
+        # request permission first, then enumerate devices in the callback.
         self._camera_pending = True
         epoch = self._media_epoch
         self._request_permission(
             QtCore.QCameraPermission(),
             lambda ok, e=epoch: self._on_camera_permission(ok, e),
         )
+
+    def _pick_camera_device(self) -> Any:
+        devices = QtMultimedia.QMediaDevices.videoInputs()
+        default = QtMultimedia.QMediaDevices.defaultVideoInput()
+        if not default.isNull():
+            return default
+        return devices[0] if devices else None
 
     def _on_camera_permission(self, ok: bool, epoch: int) -> None:
         self._camera_pending = False
@@ -1013,10 +1052,16 @@ class CallOverlayWidget(QtWidgets.QWidget):
             return
         if self._manager is None or not self._manager.snapshot().get("cam"):
             return
-        cameras = QtMultimedia.QMediaDevices.videoInputs()
-        if not cameras:
+        device = self._pick_camera_device()
+        if device is None:
+            logger.warning("call video: no camera found after permission grant")
+            self._set_status(tr("call.cam_denied"))
             return
-        self._camera = QtMultimedia.QCamera(cameras[0], self)
+        self._camera = QtMultimedia.QCamera(device, self)
+        try:
+            self._camera.errorOccurred.connect(self._on_camera_error)
+        except Exception:
+            pass
         self._capture = QtMultimedia.QMediaCaptureSession(self)
         self._video_sink = QtMultimedia.QVideoSink(self)
         self._capture.setCamera(self._camera)
@@ -1024,8 +1069,15 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._video_sink.videoFrameChanged.connect(self._on_local_frame)
         try:
             self._camera.start()
+            logger.info("call video: camera started (%s)", device.description())
         except Exception:
             logger.exception("camera start failed")
+            self._set_status(tr("call.cam_denied"))
+
+    def _on_camera_error(self, error: Any, error_string: str = "") -> None:
+        logger.warning("call video: camera error %s (%s)", error, error_string)
+        if error_string:
+            self._set_status(tr("call.cam_denied"))
 
     def _stop_camera(self) -> None:
         if self._camera is not None:
