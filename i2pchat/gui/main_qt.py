@@ -12613,6 +12613,8 @@ class ChatWindow(QtWidgets.QMainWindow):
         self._refresh_connection_buttons()
         self._chat_search_console.set_console_theme(self.theme_id)
         self._apply_sidebar_list_selection_backgrounds()
+        if hasattr(self, "_call_overlay"):
+            self._call_overlay.apply_theme(self.theme_id)
 
     def _setup_more_actions_shortcuts(self) -> None:
         """Горячие клавиши обрабатываются в eventFilter → _try_layout_independent_shortcut

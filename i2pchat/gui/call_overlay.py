@@ -32,8 +32,17 @@ PLAY_MAX_BUFFER_MS = 500
 
 
 class CallSettingsDialog(QtWidgets.QDialog):
-    def __init__(self, prefs: CallPrefs, parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(
+        self,
+        prefs: CallPrefs,
+        parent: Optional[QtWidgets.QWidget] = None,
+        *,
+        theme_id: str = "night",
+    ) -> None:
+        # Prefer a top-level window parent: CallOverlay's dark QLabel rules must not
+        # cascade into this dialog (invisible labels on the light theme).
         super().__init__(parent)
+        self.setObjectName("CallSettingsDialog")
         self.setWindowTitle(tr("call.settings"))
         self._prefs = prefs.clamp()
         form = QtWidgets.QFormLayout(self)
@@ -62,6 +71,42 @@ class CallSettingsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+        self.apply_theme(theme_id)
+
+    def apply_theme(self, theme_id: str) -> None:
+        night = (theme_id or "night") == "night"
+        if night:
+            bg, fg, field, border, btn, btn_fg = (
+                "#141417",
+                "#f5f5f7",
+                "#1f1f23",
+                "#3d4450",
+                "#2a2d36",
+                "#f5f5f7",
+            )
+        else:
+            bg, fg, field, border, btn, btn_fg = (
+                "#f5f6f8",
+                "#1d1d1f",
+                "#ffffff",
+                "#d0d5de",
+                "#e2e7f0",
+                "#1d1d1f",
+            )
+        self.setStyleSheet(
+            f"QDialog#CallSettingsDialog {{ background-color: {bg}; color: {fg}; }}"
+            f"QDialog#CallSettingsDialog QLabel {{ color: {fg}; background: transparent; }}"
+            f"QDialog#CallSettingsDialog QSpinBox {{"
+            f"  background: {field}; color: {fg}; border: 1px solid {border};"
+            f"  border-radius: 8px; padding: 6px 8px; min-height: 28px; }}"
+            f"QDialog#CallSettingsDialog QSpinBox::up-button,"
+            f"QDialog#CallSettingsDialog QSpinBox::down-button {{"
+            f"  background: {btn}; width: 18px; }}"
+            f"QDialog#CallSettingsDialog QPushButton {{"
+            f"  background: {btn}; color: {btn_fg}; border: none;"
+            f"  border-radius: 8px; padding: 8px 14px; min-height: 28px; }}"
+            f"QDialog#CallSettingsDialog QPushButton:hover {{ background: {border}; }}"
+        )
 
     def result_prefs(self) -> CallPrefs:
         self._prefs.audio_bitrate_kbps = self._audio.value()
@@ -80,22 +125,60 @@ class CallMiniBar(QtWidgets.QFrame):
     toggle_screen = QtCore.pyqtSignal()
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
-        super().__init__(parent, QtCore.Qt.WindowType.Tool | QtCore.Qt.WindowType.FramelessWindowHint)
-        self.setObjectName("CallMiniBar")
-        self.setStyleSheet(
-            "QFrame#CallMiniBar { background: #1c1f26; border: 1px solid #3a3f4b; border-radius: 10px; }"
-            "QPushButton { min-width: 36px; min-height: 28px; }"
+        flags = (
+            QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
         )
+        super().__init__(parent, flags)
+        self.setObjectName("CallMiniBar")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        self._theme_id = "night"
+        self._drag_offset: Optional[QtCore.QPoint] = None
+        self._user_moved = False
+        self._phase = "idle"
+        self._peer_raw = ""
+        self._active_since: Optional[float] = None
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor))
+        self.setToolTip(tr("call.mini_drag_hint"))
+
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        self._title = QtWidgets.QLabel(tr("call.in_call"), self)
-        self._mic = QtWidgets.QPushButton("Mic", self)
-        self._spk = QtWidgets.QPushButton("Spk", self)
-        self._cam = QtWidgets.QPushButton("Cam", self)
-        self._screen = QtWidgets.QPushButton("Scr", self)
-        self._expand = QtWidgets.QPushButton("□", self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(8)
+
+        grip = QtWidgets.QLabel("⠿", self)
+        grip.setObjectName("CallMiniGrip")
+        grip.setFixedWidth(14)
+        grip.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignHCenter
+        )
+        lay.addWidget(grip)
+
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+        self._status = QtWidgets.QLabel(tr("call.in_call"), self)
+        self._status.setObjectName("CallMiniStatus")
+        self._peer = QtWidgets.QLabel("", self)
+        self._peer.setObjectName("CallMiniPeer")
+        self._timer = QtWidgets.QLabel("0:00", self)
+        self._timer.setObjectName("CallMiniTimer")
+        self._timer.setMinimumWidth(40)
+        text_col.addWidget(self._status)
+        text_col.addWidget(self._peer)
+        lay.addLayout(text_col, 1)
+        lay.addWidget(self._timer, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+        self._mic = QtWidgets.QPushButton(self)
+        self._spk = QtWidgets.QPushButton(self)
+        self._cam = QtWidgets.QPushButton(self)
+        self._screen = QtWidgets.QPushButton(self)
+        self._expand = QtWidgets.QPushButton(tr("call.expand"), self)
         self._hangup = QtWidgets.QPushButton("✕", self)
-        self._hangup.setStyleSheet("background:#c62828; color:white;")
+        self._hangup.setObjectName("CallHangupButton")
+        self._hangup.setToolTip(tr("call.hangup"))
+        self._expand.setToolTip(tr("call.expand"))
         for b, sig in (
             (self._mic, self.toggle_mic),
             (self._spk, self.toggle_spk),
@@ -104,17 +187,179 @@ class CallMiniBar(QtWidgets.QFrame):
             (self._expand, self.expand_requested),
             (self._hangup, self.hangup_requested),
         ):
+            b.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             b.clicked.connect(sig.emit)
-            lay.addWidget(b if b is not self._title else self._title)
-        lay.insertWidget(0, self._title)
-        self.resize(420, 44)
+            lay.addWidget(b)
 
-    def update_flags(self, *, mic: bool, spk: bool, cam: bool, screen: bool, peer: str) -> None:
-        self._title.setText((peer or tr("call.in_call"))[:28])
-        self._mic.setText("Mic✓" if mic else "Mic")
-        self._spk.setText("Spk✓" if spk else "Spk")
-        self._cam.setText("Cam✓" if cam else "Cam")
-        self._screen.setText("Scr✓" if screen else "Scr")
+        self._tick = QtCore.QTimer(self)
+        self._tick.setInterval(1000)
+        self._tick.timeout.connect(self._refresh_timer)
+        self.resize(520, 56)
+        self.apply_theme("night")
+
+    @staticmethod
+    def _short_peer(peer: str) -> str:
+        p = (peer or "").strip()
+        if not p:
+            return tr("call.remote_video")
+        if len(p) <= 22:
+            return p
+        return f"{p[:10]}…{p[-6:]}"
+
+    def _hit_control(self, pos: QtCore.QPoint) -> bool:
+        w = self.childAt(pos)
+        while w is not None and w is not self:
+            if isinstance(w, QtWidgets.QPushButton):
+                return True
+            w = w.parentWidget()
+        return False
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and not self._hit_control(event.position().toPoint())
+        ):
+            self._drag_offset = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+            self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.ClosedHandCursor))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._drag_offset is not None and event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self._user_moved = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._drag_offset is not None:
+            self._drag_offset = None
+            self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.OpenHandCursor))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and not self._hit_control(event.position().toPoint())
+        ):
+            self.expand_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._tick.isActive():
+            self._tick.start()
+        self._refresh_timer()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._tick.stop()
+        super().hideEvent(event)
+
+    def _refresh_timer(self) -> None:
+        if self._active_since is None:
+            self._timer.setText("--:--")
+            return
+        elapsed = max(0, int(time.monotonic() - self._active_since))
+        mm, ss = divmod(elapsed, 60)
+        hh, mm = divmod(mm, 60)
+        if hh:
+            self._timer.setText(f"{hh}:{mm:02d}:{ss:02d}")
+        else:
+            self._timer.setText(f"{mm}:{ss:02d}")
+
+    def update_flags(
+        self,
+        *,
+        mic: bool,
+        spk: bool,
+        cam: bool,
+        screen: bool,
+        peer: str,
+        phase: str = "",
+        status: str = "",
+    ) -> None:
+        self._peer_raw = peer or ""
+        if phase:
+            self._phase = phase
+        if self._phase == "active" and self._active_since is None:
+            self._active_since = time.monotonic()
+        if self._phase in ("idle", "ended"):
+            self._active_since = None
+        if status:
+            self._status.setText(status)
+        elif self._phase == "outgoing":
+            self._status.setText(tr("call.calling"))
+        elif self._phase == "incoming":
+            self._status.setText(tr("call.incoming"))
+        elif self._phase == "active":
+            self._status.setText(tr("call.in_call"))
+        else:
+            self._status.setText(tr("call.title"))
+        self._peer.setText(self._short_peer(self._peer_raw))
+        self._peer.setToolTip(self._peer_raw or "")
+        self._mic.setText(tr("call.mic_on") if mic else tr("call.mic_off"))
+        self._spk.setText(tr("call.spk_on") if spk else tr("call.spk_off"))
+        self._cam.setText(tr("call.cam_on") if cam else tr("call.cam_off"))
+        self._screen.setText(tr("call.screen_on") if screen else tr("call.screen_off"))
+        self._refresh_timer()
+
+    def place_default(self, host_geo: QtCore.QRect) -> None:
+        """Position near the host window unless the user already dragged the bar."""
+        if self._user_moved:
+            return
+        w = max(self.width(), 480)
+        x = host_geo.x() + host_geo.width() - w - 24
+        y = host_geo.y() + 72
+        self.move(max(8, x), max(8, y))
+
+    def apply_theme(self, theme_id: str) -> None:
+        """Match ChatWindow ligth/night so the floating bar does not stay dark-only."""
+        night = (theme_id or "night") == "night"
+        self._theme_id = "night" if night else "ligth"
+        if night:
+            bg, border, fg, muted, btn, hover = (
+                "#1c1f26",
+                "#3a3f4b",
+                "#e8eaed",
+                "#9aa3b2",
+                "#2a3140",
+                "#363e50",
+            )
+        else:
+            bg, border, fg, muted, btn, hover = (
+                "#ffffff",
+                "#d0d5de",
+                "#1d1d1f",
+                "#626875",
+                "#e2e7f0",
+                "#d5dce8",
+            )
+        self.setStyleSheet(
+            f"QFrame#CallMiniBar {{ background: {bg}; border: 1px solid {border};"
+            f" border-radius: 12px; color: {fg}; }}"
+            f"QFrame#CallMiniBar QLabel {{ color: {fg}; background: transparent; }}"
+            f"QFrame#CallMiniBar QLabel#CallMiniGrip {{ color: {muted}; font-size: 14px; }}"
+            f"QFrame#CallMiniBar QLabel#CallMiniStatus {{"
+            f" color: {fg}; font-weight: 600; font-size: 12px; }}"
+            f"QFrame#CallMiniBar QLabel#CallMiniPeer {{"
+            f" color: {muted}; font-size: 11px; }}"
+            f"QFrame#CallMiniBar QLabel#CallMiniTimer {{"
+            f" color: {fg}; font-weight: 600; font-size: 13px; padding: 0 4px; }}"
+            f"QFrame#CallMiniBar QPushButton {{"
+            f" background: {btn}; color: {fg}; border: none; border-radius: 8px;"
+            f" min-height: 30px; padding: 4px 8px; }}"
+            f"QFrame#CallMiniBar QPushButton:hover {{ background: {hover}; }}"
+            "QFrame#CallMiniBar QPushButton#CallHangupButton {"
+            " background: #c62828; color: white; font-weight: bold; min-width: 34px; }"
+        )
 
 
 class CallOverlayWidget(QtWidgets.QWidget):
@@ -129,29 +374,14 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._host = host
         self.setObjectName("CallOverlay")
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setAutoFillBackground(True)
+        # Palette auto-fill paints a sharp rect over stylesheet radii — rely on QSS only.
+        self.setAutoFillBackground(False)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-        pal = self.palette()
-        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#10141c"))
-        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#e8eaed"))
-        pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#e8eaed"))
-        self.setPalette(pal)
-        self.setStyleSheet(
-            "QWidget#CallOverlay { background-color: #10141c; color: #e8eaed; }"
-            "QWidget#CallOverlay QLabel { color: #e8eaed; background: transparent; }"
-            "QWidget#CallOverlay QPushButton {"
-            "  background-color: #2a3140; color: #e8eaed; border: none;"
-            "  border-radius: 8px; padding: 8px 12px; min-height: 32px; }"
-            "QWidget#CallOverlay QPushButton:hover { background-color: #363e50; }"
-            "QWidget#CallOverlay QPushButton#CallHangupButton {"
-            "  background-color: #c62828; color: white; font-weight: bold; }"
-            "QWidget#CallOverlay QPushButton#CallAcceptButton {"
-            "  background-color: #2e7d32; color: white; }"
-            "QWidget#CallControlsBar { background-color: #161b26; border-top: 1px solid #2a3140; }"
-        )
+        self._theme_id = "night"
+        self.apply_theme("night")
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -159,7 +389,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
 
         head_wrap = QtWidgets.QWidget(self)
         head_wrap.setObjectName("CallHeaderBar")
-        head_wrap.setStyleSheet("QWidget#CallHeaderBar { background-color: #161b26; }")
+        head_wrap.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         head = QtWidgets.QHBoxLayout(head_wrap)
         head.setContentsMargins(16, 12, 16, 12)
         self._title = QtWidgets.QLabel(tr("call.title"), head_wrap)
@@ -180,23 +410,23 @@ class CallOverlayWidget(QtWidgets.QWidget):
         root.addWidget(head_wrap, 0)
 
         videos_wrap = QtWidgets.QWidget(self)
-        videos_wrap.setStyleSheet("background-color: #10141c;")
+        videos_wrap.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         videos = QtWidgets.QHBoxLayout(videos_wrap)
         videos.setContentsMargins(16, 16, 16, 16)
         videos.setSpacing(12)
         self._remote_view = QtWidgets.QLabel(tr("call.remote_video"), videos_wrap)
         self._local_view = QtWidgets.QLabel(tr("call.local_video"), videos_wrap)
         for lab in (self._remote_view, self._local_view):
+            lab.setObjectName("CallVideoPane")
+            lab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
             lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             lab.setMinimumSize(200, 160)
-            lab.setStyleSheet(
-                "background-color:#1a2030; border-radius:8px; color:#8a93a3;"
-            )
             videos.addWidget(lab, 1)
         root.addWidget(videos_wrap, 1)
 
         controls_wrap = QtWidgets.QWidget(self)
         controls_wrap.setObjectName("CallControlsBar")
+        controls_wrap.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         controls = QtWidgets.QHBoxLayout(controls_wrap)
         controls.setContentsMargins(16, 12, 16, 16)
         controls.setSpacing(8)
@@ -276,6 +506,59 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._core = core
         if core is not None:
             core.on_call_event = self._on_call_event
+
+    def apply_theme(self, theme_id: str) -> None:
+        """Follow ChatWindow ligth/night so the call page matches the rest of the UI."""
+        night = (theme_id or "night") == "night"
+        self._theme_id = "night" if night else "ligth"
+        if night:
+            overlay = "#10141c"
+            text = "#e8eaed"
+            muted = "#8a93a3"
+            pane = "#1a2030"
+            bar = "#161b26"
+            btn = "#2a3140"
+            btn_hover = "#363e50"
+            bar_border = "#2a3140"
+        else:
+            # Align with THEMES["ligth"] surfaces (sidebar/chat chrome), not a hard black slab.
+            overlay = "#f2f4f8"
+            text = "#1d1d1f"
+            muted = "#626875"
+            pane = "#e2e7f0"
+            bar = "#e8ebf2"
+            btn = "#dde3ee"
+            btn_hover = "#cfd7e6"
+            bar_border = "#d0d5de"
+        pal = self.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(overlay))
+        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(text))
+        pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(text))
+        self.setPalette(pal)
+        self.setStyleSheet(
+            f"QWidget#CallOverlay {{"
+            f"  background-color: {overlay}; color: {text}; border-radius: 12px; }}"
+            f"QWidget#CallOverlay QLabel {{ color: {text}; background: transparent; }}"
+            f"QWidget#CallOverlay QLabel#CallVideoPane {{"
+            f"  background-color: {pane}; border-radius: 10px; color: {muted}; }}"
+            f"QWidget#CallOverlay QPushButton {{"
+            f"  background-color: {btn}; color: {text}; border: none;"
+            f"  border-radius: 8px; padding: 8px 12px; min-height: 32px; }}"
+            f"QWidget#CallOverlay QPushButton:hover {{ background-color: {btn_hover}; }}"
+            "QWidget#CallOverlay QPushButton#CallHangupButton {"
+            "  background-color: #c62828; color: white; font-weight: bold; }"
+            "QWidget#CallOverlay QPushButton#CallAcceptButton {"
+            "  background-color: #2e7d32; color: white; }"
+            f"QWidget#CallHeaderBar {{"
+            f"  background-color: {bar};"
+            "  border-top-left-radius: 12px; border-top-right-radius: 12px; }"
+            f"QWidget#CallControlsBar {{"
+            f"  background-color: {bar}; border-top: 1px solid {bar_border};"
+            "  border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }"
+        )
+        mini = getattr(self, "_mini", None)
+        if mini is not None:
+            mini.apply_theme(self._theme_id)
 
     def _set_status(self, text: str) -> None:
         self._status_base = text
@@ -367,6 +650,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def hide_all(self) -> None:
         self._stop_media()
         self._mini.hide()
+        self._mini._user_moved = False
+        self._mini._active_since = None
+        self._mini._phase = "idle"
         self._set_action_buttons_enabled(True)
         self.closed.emit()
 
@@ -389,17 +675,27 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if self._manager is not None:
             self._manager.set_minimized(True)
             snap = self._manager.snapshot()
+            phase = str(snap.get("phase") or "")
+            if phase == "outgoing":
+                status = tr("call.calling")
+            elif phase == "incoming":
+                status = tr("call.incoming")
+            elif snap.get("media_ready"):
+                status = tr("call.in_call")
+            else:
+                status = tr("call.connecting")
             self._mini.update_flags(
-                mic=snap["mic"],
-                spk=snap["spk"],
-                cam=snap["cam"],
-                screen=snap["screen"],
+                mic=bool(snap.get("mic", True)),
+                spk=bool(snap.get("spk", True)),
+                cam=bool(snap.get("cam", False)),
+                screen=bool(snap.get("screen", False)),
                 peer=str(snap.get("peer") or ""),
+                phase=phase,
+                status=status,
             )
         win = self.window()
         if win is not None:
-            geo = win.geometry()
-            self._mini.move(geo.x() + geo.width() - 440, geo.y() + 80)
+            self._mini.place_default(win.geometry())
         self._mini.show()
         self._mini.raise_()
         if emit_signal:
@@ -410,7 +706,14 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self.show_overlay()
 
     def _on_settings(self) -> None:
-        dlg = CallSettingsDialog(self._prefs, self)
+        # Parent to the top-level window so CallOverlay QLabel { color: ... } does not
+        # paint light-on-light labels inside this dialog.
+        host = self.window() if self.window() is not None else self
+        dlg = CallSettingsDialog(
+            self._prefs,
+            host,
+            theme_id=getattr(self, "_theme_id", "night"),
+        )
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         self._prefs = dlg.result_prefs()
@@ -571,9 +874,27 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._cam_btn.setText(tr("call.cam_on") if cam else tr("call.cam_off"))
         self._screen_btn.setText(tr("call.screen_on") if screen else tr("call.screen_off"))
         peer = str(state.get("peer") or "")
-        if state.get("phase") == "outgoing":
+        phase = str(state.get("phase") or "")
+        if phase == "outgoing":
             self._set_status(tr("call.calling"))
-        self._mini.update_flags(mic=mic, spk=spk, cam=cam, screen=screen, peer=peer)
+            mini_status = tr("call.calling")
+        elif phase == "incoming":
+            mini_status = tr("call.incoming")
+        elif phase == "active":
+            mini_status = (
+                tr("call.in_call") if state.get("media_ready") else tr("call.connecting")
+            )
+        else:
+            mini_status = tr("call.title")
+        self._mini.update_flags(
+            mic=mic,
+            spk=spk,
+            cam=cam,
+            screen=screen,
+            peer=peer,
+            phase=phase,
+            status=mini_status,
+        )
 
     @staticmethod
     def _request_permission(perm: Any, callback: Any) -> None:
