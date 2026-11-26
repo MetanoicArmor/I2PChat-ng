@@ -206,6 +206,9 @@ class CallMiniBar(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
         self.setWindowFlag(QtCore.Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        # macOS hides Qt::Tool windows whenever the app is not frontmost, so the
+        # bar vanished as soon as the user switched apps and looked "lost".
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
         self._painted_bg = not sys.platform.startswith("darwin")
         self._dwm_patched = False
         self._popup_bg = QtGui.QColor(28, 31, 38)
@@ -411,11 +414,26 @@ class CallMiniBar(QtWidgets.QFrame):
     def place_default(self, host_geo: QtCore.QRect) -> None:
         """Position near the host window unless the user already dragged the bar."""
         if self._user_moved:
+            self.clamp_to_screen()
             return
         w = max(self.width(), 480)
         x = host_geo.x() + host_geo.width() - w - 24
         y = host_geo.y() + 72
         self.move(max(8, x), max(8, y))
+        self.clamp_to_screen()
+
+    def clamp_to_screen(self) -> None:
+        """Keep the bar fully reachable (monitor unplugged / window dragged away)."""
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w = max(self.width(), 1)
+        h = max(self.height(), 1)
+        x = min(max(self.x(), avail.left() + 4), max(avail.left() + 4, avail.right() - w - 4))
+        y = min(max(self.y(), avail.top() + 4), max(avail.top() + 4, avail.bottom() - h - 4))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def apply_theme(self, theme_id: str) -> None:
         """Match ChatWindow ligth/night so the floating bar does not stay dark-only."""
@@ -774,6 +792,13 @@ class CallOverlayWidget(QtWidgets.QWidget):
     def start_outgoing(self, *, video: bool) -> None:
         if self._core is None:
             return
+        # Audio/Video buttons are also the "back to call" affordance when the
+        # overlay was minimized to the floating bar (or buried under Status/Chat).
+        if self.has_live_call():
+            self._manager = self._core.get_call_manager()
+            self.show_overlay()
+            self._refresh_from_state()
+            return
         self._want_video_start = video
         self._prefs = load_call_prefs()
         self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
@@ -791,6 +816,18 @@ class CallOverlayWidget(QtWidgets.QWidget):
             await self._core.start_call(peer, video=video)
             self._manager = self._core.get_call_manager()
             self._refresh_from_state()
+        except RuntimeError as exc:
+            # Race: call became live between has_live_call() and start_call.
+            # Never hide_all() here — that kills the mini-bar while the session
+            # stays non-IDLE ("A call is already in progress" forever).
+            if "already in progress" in str(exc).lower():
+                if self._core is not None:
+                    self._manager = self._core.get_call_manager()
+                self.show_overlay()
+                self._refresh_from_state()
+                return
+            self.hide_all()
+            QtWidgets.QMessageBox.warning(self.window(), tr("call.title"), str(exc))
         except Exception as exc:
             self.hide_all()
             QtWidgets.QMessageBox.warning(self.window(), tr("call.title"), str(exc))
@@ -810,6 +847,12 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if self._manager is not None:
             self._manager.set_minimized(False)
         self.shown.emit()
+
+    def shutdown_ui(self) -> None:
+        """App exit: stop capture/audio and drop the floating bar without navigation."""
+        self._stop_media()
+        self._mini.hide()
+        self._set_action_buttons_enabled(False)
 
     def hide_all(self) -> None:
         self._stop_media()
@@ -836,6 +879,11 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self.minimize_to_bar(emit_signal=True)
 
     def minimize_to_bar(self, *, emit_signal: bool = True) -> None:
+        if self._manager is None and self._core is not None:
+            try:
+                self._manager = self._core.get_call_manager()
+            except Exception:
+                self._manager = None
         if self._manager is not None:
             self._manager.set_minimized(True)
             snap = self._manager.snapshot()
@@ -861,6 +909,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if win is not None:
             self._mini.place_default(win.geometry())
         self._mini.show()
+        # Real width is only known after layout on show(); clamp afterwards.
+        self._mini.adjustSize()
+        self._mini.clamp_to_screen()
         self._mini.raise_()
         if emit_signal:
             self.minimized.emit()

@@ -9954,6 +9954,15 @@ class I2PChatCore:
 
     async def disconnect(self) -> None:
         """Отключить выбранную live-сессию: сначала active_live_peer_id, иначе current_peer_addr при наличии потока."""
+        # Tear down any in-progress call first so CallSessionManager returns to
+        # IDLE; otherwise reconnect → start_call raises "already in progress"
+        # while the overlay/mini-bar may already be gone.
+        try:
+            await asyncio.wait_for(self.hangup_call(), timeout=4.0)
+        except asyncio.TimeoutError:
+            logger.warning("call hangup timed out during disconnect")
+        except Exception:
+            logger.debug("hangup_call during disconnect failed", exc_info=True)
         ap = self.active_live_peer_id
         if not ap:
             cur = self._normalize_peer_addr(self.current_peer_addr or "")
@@ -11305,6 +11314,15 @@ class I2PChatCore:
 
     async def shutdown(self) -> None:
         """Аккуратно остановить фоновые задачи и закрыть соединения."""
+        # End any call first (needs live control stream for CALL_HANGUP) and close its
+        # SAM DATAGRAM session; otherwise quit waits on sockets / i2pd stays busy.
+        if self._call_manager is not None:
+            try:
+                await asyncio.wait_for(self.hangup_call(), timeout=4.0)
+            except asyncio.TimeoutError:
+                logger.warning("call hangup timed out during shutdown")
+            except Exception:
+                logger.debug("call hangup during shutdown failed", exc_info=True)
         self.session_manager.transition_transport(
             TransportState.SHUTTING_DOWN, reason="shutdown"
         )

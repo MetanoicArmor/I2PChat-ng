@@ -10434,16 +10434,29 @@ class ChatWindow(QtWidgets.QMainWindow):
                 disconnect_base, _DISCONNECT_SHORTCUT_PORTABLE
             ),
         )
+        live_call = bool(
+            hasattr(self, "_call_overlay") and self._call_overlay.has_live_call()
+        )
         can_call = (
             self._active_group_id is None
-            and already_secure
             and bool(norm_target)
+            and (already_secure or live_call)
         )
         if hasattr(self, "audio_call_button"):
             self.audio_call_button.setVisible(self._active_group_id is None)
             self.video_call_button.setVisible(self._active_group_id is None)
             self.audio_call_button.setEnabled(can_call)
             self.video_call_button.setEnabled(can_call)
+            if live_call:
+                _set_tooltip_if_changed(
+                    self.audio_call_button, tr("call.return_to_call")
+                )
+                _set_tooltip_if_changed(
+                    self.video_call_button, tr("call.return_to_call")
+                )
+            else:
+                _set_tooltip_if_changed(self.audio_call_button, tr("call.audio"))
+                _set_tooltip_if_changed(self.video_call_button, tr("call.video"))
         self._refresh_send_controls()
 
     def _refresh_send_controls(self) -> None:
@@ -12028,15 +12041,20 @@ class ChatWindow(QtWidgets.QMainWindow):
             return
         if getattr(self, "_active_group_id", None):
             return
+        if not hasattr(self, "_call_overlay"):
+            return
+        self._call_overlay.attach_core(self.core)
+        # Live call already up (often minimized under Status/Chat): restore UI
+        # instead of dialing again → "A call is already in progress".
+        if self._call_overlay.has_live_call():
+            self._call_overlay.show_overlay()
+            return
         peer = getattr(self.core, "current_peer_addr", None) or ""
         if not peer:
             QtWidgets.QMessageBox.information(
                 self, tr("call.title"), tr("call.need_peer")
             )
             return
-        if not hasattr(self, "_call_overlay"):
-            return
-        self._call_overlay.attach_core(self.core)
         self._call_overlay.start_outgoing(video=video)
 
     def _ask_profile_password(self) -> str:
@@ -15283,6 +15301,13 @@ class ChatWindow(QtWidgets.QMainWindow):
                 if clicked is send_btn:
                     flush_offline = pending
         self._close_shutdown_scheduled = True
+        # Live call keeps camera/mic/DATAGRAM busy and the floating bar visible;
+        # stop them first so quit is not stuck on media or SAM sockets.
+        if hasattr(self, "_call_overlay"):
+            try:
+                self._call_overlay.shutdown_ui()
+            except Exception:
+                logger.debug("call overlay shutdown_ui failed", exc_info=True)
         # Не закрываем окно в Qt до конца async shutdown — иначе цикл событий
         # может завершиться до await core/router (Windows/qasync).
         event.ignore()
