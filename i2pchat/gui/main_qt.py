@@ -1862,19 +1862,57 @@ _TOOLTIP_THEME_COLORS: dict[str, tuple[str, str]] = {
 }
 
 
+# Компактный индикатор чекбокса (StatusPanel / диалоги), все ОС + Fusion.
+# В QSS width/height — content box; 1px border с каждой стороны даёт OUTER = content+2.
+# Хотим ~14px снаружи → content 12. Proxy фиксирует PM_Indicator* без QSS-border.
+CHECKBOX_INDICATOR_OUTER_PX = 14
+CHECKBOX_INDICATOR_CONTENT_PX = CHECKBOX_INDICATOR_OUTER_PX - 2  # под border: 1px
+
+
+class _CompactCheckboxProxyStyle(QtWidgets.QProxyStyle):
+    """Фиксирует PM_IndicatorWidth/Height на всех ОС (Fusion на Win/Linux/macOS)."""
+
+    def pixelMetric(
+        self,
+        metric: QtWidgets.QStyle.PixelMetric,
+        option: Optional[QtWidgets.QStyleOption] = None,
+        widget: Optional[QtWidgets.QWidget] = None,
+    ) -> int:
+        if metric in (
+            QtWidgets.QStyle.PixelMetric.PM_IndicatorWidth,
+            QtWidgets.QStyle.PixelMetric.PM_IndicatorHeight,
+        ):
+            return CHECKBOX_INDICATOR_OUTER_PX
+        return int(super().pixelMetric(metric, option, widget))
+
+
+def install_compact_checkbox_indicator_style(
+    app: Optional[QtWidgets.QApplication] = None,
+) -> None:
+    """Вызывать после app.setStyle / install_tooltip_wakeup_delay_style."""
+    a = app or QtWidgets.QApplication.instance()
+    if a is None:
+        return
+    cur = a.style()
+    if isinstance(cur, _CompactCheckboxProxyStyle):
+        return
+    a.setStyle(_CompactCheckboxProxyStyle(cur))
+
+
 def _dialog_checkbox_indicator_qss(theme_tid: str) -> str:
     """
-    Полная отрисовка индикаторов чекбоксов.
+    Полная отрисовка индикаторов чекбоксов (macOS / Windows / Linux + Fusion).
 
-    На macOS «голый» QCheckBox::indicator и QAbstractItemView::indicator
-    (чекбоксы у QListWidgetItem) часто дают чёрный квадрат и нечитаемую галочку
-    на светлой теме — в диалогах и на страницах главного окна (StatusPanel
-    «Подробный лог» и т.п.).
+    Без явных width/height/border/background Fusion часто даёт крупный или «чёрный»
+    квадрат. Один лист для главного окна (StatusPanel «Подробный лог») и диалогов.
+    Размер: content ``CHECKBOX_INDICATOR_CONTENT_PX`` + 1px border → ~14px снаружи
+    (на Win/Linux/macOS одинаково). Proxy подстраховывает PM_Indicator*.
     """
     svg_path = _resolve_path_under_gui("assets", "dialog_checkbox_check.svg")
     image_clause = ""
     if svg_path:
         # QSS resolves unquoted url(file:///...) relative to cwd, yielding paths like .../file:/home/...
+        # On Windows keep forward slashes; quoted path avoids drive-letter misparse.
         path_qss = os.path.normpath(svg_path).replace("\\", "/")
         image_clause = f'image: url("{path_qss}");'
     if theme_tid == "ligth":
@@ -1889,29 +1927,50 @@ def _dialog_checkbox_indicator_qss(theme_tid: str) -> str:
         hover_border = "#0a84ff"
         disabled_bg = "#1f1f23"
         disabled_border = "#4a505c"
+    px = CHECKBOX_INDICATOR_CONTENT_PX
+    # Дублируем размер в :checked/:unchecked — иначе QStyleSheetStyle на Fusion
+    # может игнорировать базовое правило.
+    size_block = (
+        f"width: {px}px; height: {px}px; "
+        f"min-width: {px}px; max-width: {px}px; "
+        f"min-height: {px}px; max-height: {px}px;"
+    )
     return f"""
             QCheckBox::indicator,
             QAbstractItemView::indicator {{
-                width: 18px;
-                height: 18px;
-                border-radius: 4px;
-                border: 2px solid {unchecked_border};
+                {size_block}
+                border-radius: 3px;
+                border: 1px solid {unchecked_border};
+                background-color: {unchecked_bg};
+                padding: 0px;
+                margin: 0px;
+            }}
+            QCheckBox::indicator {{
+                subcontrol-position: left center;
+                subcontrol-origin: padding;
+            }}
+            QCheckBox::indicator:unchecked,
+            QAbstractItemView::indicator:unchecked {{
+                {size_block}
+                border: 1px solid {unchecked_border};
                 background-color: {unchecked_bg};
             }}
             QCheckBox::indicator:hover,
             QAbstractItemView::indicator:hover {{
-                border: 2px solid {hover_border};
+                border: 1px solid {hover_border};
             }}
             QCheckBox::indicator:checked,
             QAbstractItemView::indicator:checked {{
+                {size_block}
                 background-color: #0a84ff;
-                border: 2px solid #0a84ff;
+                border: 1px solid #0a84ff;
                 {image_clause}
             }}
             QCheckBox::indicator:disabled,
             QAbstractItemView::indicator:disabled {{
+                {size_block}
                 background-color: {disabled_bg};
-                border: 2px solid {disabled_border};
+                border: 1px solid {disabled_border};
             }}
         """
 
@@ -15430,6 +15489,8 @@ def main() -> None:
     # Единый стиль и шрифт для всех платформ (более предсказуемый рендеринг)
     app.setStyle("Fusion")
     install_tooltip_wakeup_delay_style(app)
+    # После tooltip-proxy: компактный чекбокс на Win/Linux/macOS (Fusion PM_Indicator*).
+    install_compact_checkbox_indicator_style(app)
     # На Windows шрифты по умолчанию выглядят крупнее — задаём меньший размер
     font_pt = 10 if sys.platform == "win32" else 13
     if sys.platform == "darwin":

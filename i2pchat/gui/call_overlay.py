@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PyQt6 import QtCore, QtGui, QtMultimedia, QtWidgets
 
-from i2pchat.core.call_adapt import AdaptiveController, EffectiveMedia
+from i2pchat.core.call_adapt import MAX_FRAME_BYTES, AdaptiveController, EffectiveMedia
 from i2pchat.core.call_media import (
     FRAME_MS,
     SAMPLE_RATE,
@@ -175,10 +175,10 @@ class CallSettingsDialog(QtWidgets.QDialog):
 class CallMiniBar(QtWidgets.QFrame):
     """Плавающая панель звонка.
 
-    Скругление как у ActionsPopup/EmojiPicker/ChatSurface: WA_TranslucentBackground
-    + AA paint на Win/Linux (углы HWND прозрачные). На Windows дополнительно
-    NoDropShadowWindowHint и disable_dwm_rounded_frame, иначе DWM рисует
-    прямоугольную 1 px кайму поверх border-radius.
+    WA_TranslucentBackground + anti-aliased paintEvent на всех платформах
+    (углы прозрачные, фон непрозрачный). Один только QSS на macOS Tool-окне
+    часто даёт полностью прозрачный фон. На Windows дополнительно
+    NoDropShadowWindowHint и disable_dwm_rounded_frame.
     """
 
     expand_requested = QtCore.pyqtSignal()
@@ -209,7 +209,9 @@ class CallMiniBar(QtWidgets.QFrame):
         # macOS hides Qt::Tool windows whenever the app is not frontmost, so the
         # bar vanished as soon as the user switched apps and looked "lost".
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
-        self._painted_bg = not sys.platform.startswith("darwin")
+        # Always paint the shell: QSS-only fill on a translucent macOS Tool window
+        # often renders fully transparent (labels/buttons float on the desktop).
+        self._painted_bg = True
         self._dwm_patched = False
         self._popup_bg = QtGui.QColor(28, 31, 38)
         self._popup_border = QtGui.QColor(58, 63, 75)
@@ -457,25 +459,13 @@ class CallMiniBar(QtWidgets.QFrame):
                 "#e2e7f0",
                 "#d5dce8",
             )
-        # Win/Linux: фон рисуем в paintEvent (anti-aliased), QSS только для детей.
-        # macOS: достаточно QSS border-radius на прозрачном HWND.
-        r_outer = int(self._OUTER_RADIUS)
+        # Shell fill/border via paintEvent; QSS only styles children.
         r_btn = CALL_CONTROL_RADIUS
-        if self._painted_bg:
-            self._popup_bg = QtGui.QColor(bg)
-            self._popup_border = QtGui.QColor(border)
-            shell = (
-                f"QFrame#CallMiniBar {{ background: transparent; border: none;"
-                f" color: {fg}; }}"
-            )
-        else:
-            shell = (
-                f"QFrame#CallMiniBar {{ background: {bg}; border: 1px solid {border};"
-                f" border-radius: {r_outer}px; color: {fg}; }}"
-            )
+        self._popup_bg = QtGui.QColor(bg)
+        self._popup_border = QtGui.QColor(border)
         self.setStyleSheet(
-            shell
-            + f"QFrame#CallMiniBar QLabel {{ color: {fg}; background: transparent; }}"
+            f"QFrame#CallMiniBar {{ background: transparent; border: none; color: {fg}; }}"
+            f"QFrame#CallMiniBar QLabel {{ color: {fg}; background: transparent; }}"
             f"QFrame#CallMiniBar QLabel#CallMiniGrip {{ color: {muted}; font-size: 14px; }}"
             f"QFrame#CallMiniBar QLabel#CallMiniStatus {{"
             f" color: {fg}; font-weight: 600; font-size: 12px; }}"
@@ -491,8 +481,7 @@ class CallMiniBar(QtWidgets.QFrame):
             "QFrame#CallMiniBar QPushButton#CallHangupButton {"
             " background: #c62828; color: white; font-weight: bold; min-width: 34px; }"
         )
-        if self._painted_bg:
-            self.update()
+        self.update()
 
 
 class CallOverlayWidget(QtWidgets.QWidget):
@@ -1504,8 +1493,11 @@ class CallOverlayWidget(QtWidgets.QWidget):
                         height=rh,
                         fps=eff.video_fps,
                         bitrate_kbps=eff.video_bitrate_kbps,
+                        keyframe_interval_s=2.0,
                     )
                 else:
+                    # No-op unless size/fps/bitrate actually changed. Recreating
+                    # the codec every frame made each picture a huge keyframe.
                     self._vp8_enc.reconfigure(
                         width=rw,
                         height=rh,
@@ -1516,6 +1508,15 @@ class CallOverlayWidget(QtWidgets.QWidget):
                     rgb, width=rw, height=rh, force_key=self._force_vp8_key
                 )
                 self._force_vp8_key = False
+                if payload and len(payload) > MAX_FRAME_BYTES:
+                    # More than ~4 DATAGRAM fragments almost never reassembles.
+                    logger.info(
+                        "drop oversized vp8 frame (%d bytes > %d)",
+                        len(payload),
+                        MAX_FRAME_BYTES,
+                    )
+                    self._force_vp8_key = True
+                    return
                 if payload:
                     self._send_vp8_task(payload, keyframe=is_key)
                     return

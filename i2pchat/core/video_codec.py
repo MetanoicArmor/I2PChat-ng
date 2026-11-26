@@ -51,6 +51,8 @@ class Vp8Encoder:
         self.height = max(16, int(height) & ~1)
         self.fps = max(1, int(fps))
         self.bitrate = max(50_000, int(bitrate_kbps) * 1000)
+        # I2P DATAGRAM loses fragments; a short GOP recovers without a PLI, but
+        # not so short that every other frame is a large keyframe.
         self.keyframe_interval_s = max(0.5, float(keyframe_interval_s))
         self._last_key = 0.0
         self._pts = 0
@@ -60,11 +62,15 @@ class Vp8Encoder:
         self._codec.pix_fmt = "yuv420p"
         self._codec.time_base = Fraction(1, self.fps)
         self._codec.bit_rate = self.bitrate
+        # lag-in-frames=0: one packet per frame (no delayed alt-ref).
+        # max-intra-rate: keep keyframes from exploding into dozens of DATAGRAMs.
         self._codec.options = {
             "quality": "realtime",
             "cpu-used": "8",
             "deadline": "realtime",
             "error-resilient": "1",
+            "lag-in-frames": "0",
+            "max-intra-rate": "120",
         }
         self._codec.open()
 
@@ -76,10 +82,12 @@ class Vp8Encoder:
         fps: Optional[int] = None,
         bitrate_kbps: Optional[int] = None,
     ) -> None:
-        w = width if width is not None else self.width
-        h = height if height is not None else self.height
-        f = fps if fps is not None else self.fps
-        br = bitrate_kbps if bitrate_kbps is not None else self.bitrate // 1000
+        w = max(16, int(width if width is not None else self.width) & ~1)
+        h = max(16, int(height if height is not None else self.height) & ~1)
+        f = max(1, int(fps if fps is not None else self.fps))
+        br = max(50, int(bitrate_kbps if bitrate_kbps is not None else self.bitrate // 1000))
+        if w == self.width and h == self.height and f == self.fps and br == self.bitrate // 1000:
+            return
         interval = self.keyframe_interval_s
         try:
             self._codec.close()
