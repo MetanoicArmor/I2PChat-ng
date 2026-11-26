@@ -1864,9 +1864,12 @@ _TOOLTIP_THEME_COLORS: dict[str, tuple[str, str]] = {
 
 def _dialog_checkbox_indicator_qss(theme_tid: str) -> str:
     """
-    Полная отрисовка индикаторов в диалогах: на macOS «голый» QCheckBox::indicator и
-    QAbstractItemView::indicator (чекбоксы у QListWidgetItem) часто дают чёрный квадрат
-    и нечитаемую галочку на светлом фоне — те же правила, что для QCheckBox.
+    Полная отрисовка индикаторов чекбоксов.
+
+    На macOS «голый» QCheckBox::indicator и QAbstractItemView::indicator
+    (чекбоксы у QListWidgetItem) часто дают чёрный квадрат и нечитаемую галочку
+    на светлой теме — в диалогах и на страницах главного окна (StatusPanel
+    «Подробный лог» и т.п.).
     """
     svg_path = _resolve_path_under_gui("assets", "dialog_checkbox_check.svg")
     image_clause = ""
@@ -12590,6 +12593,7 @@ class ChatWindow(QtWidgets.QMainWindow):
                 "contacts_toggle_btn_width_px": self._CONTACTS_TOGGLE_BTN_WIDTH_PX,
                 "ui_grid_px": self._UI_GRID_PX,
             }
+            + _dialog_checkbox_indicator_qss(resolved)
         )
         delegate = self.chat_view.itemDelegate()
         if isinstance(delegate, ChatItemDelegate):

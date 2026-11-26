@@ -20,8 +20,10 @@ object AvatarStore {
     private const val MAX_BYTES = 256 * 1024
 
     fun isWireFilename(name: String): Boolean {
-        val base = File(name).name
-        return base == WIRE_FILENAME || base.startsWith(".i2pchat-avatar.")
+        val base = File(name).name.lowercase()
+        if (base == WIRE_FILENAME) return true
+        // Collision renames: ".i2pchat-avatar (1).jpg"
+        return base.startsWith(".i2pchat-avatar.") || base.startsWith(".i2pchat-avatar (")
     }
 
     fun profileAvatarsDir(appRoot: File, profile: String): File =

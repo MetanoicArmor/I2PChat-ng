@@ -246,8 +246,13 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
         return;
     }
 
+    // Preserve avatar wire name before/through sanitize; sealed .bin paths would
+    // also break on_file_received avatar detection by basename.
     const std::string safe_name = sanitize_filename(raw_name, now());
-    const bool seal = static_cast<bool>(config_.seal);
+    const bool is_avatar = safe_name == ".i2pchat-avatar.jpg" ||
+                           safe_name.rfind(".i2pchat-avatar.", 0) == 0 ||
+                           safe_name.rfind(".i2pchat-avatar (", 0) == 0;
+    const bool seal = static_cast<bool>(config_.seal) && !is_avatar;
     if (seal && !config_.seal->live()) {
         emit_error("Cannot store the incoming file");
         return;
@@ -260,6 +265,10 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
         if (seal) {
             storage_id = new_seal_id();
             target = config_.downloads_dir / (storage_id + ".bin");
+        } else if (is_avatar) {
+            target = config_.downloads_dir / safe_name;
+            std::error_code remove_ec;
+            std::filesystem::remove(target, remove_ec);
         } else {
             target = allocate_unique_filename(config_.downloads_dir, safe_name);
         }
@@ -305,13 +314,13 @@ void IncomingTransfers::begin_file(std::string_view body, std::uint64_t message_
         }
     }
 
-    if (!seal && shown_name != safe_name) {
+    if (!seal && !is_avatar && shown_name != safe_name) {
         emit_system("Filename collision detected: saved as " + shown_name);
     }
     if (incoming.pending) {
         emit_system("Incoming file offer awaiting your decision: " + shown_name + " (" +
                     std::to_string(size) + " bytes)");
-    } else {
+    } else if (!is_avatar) {
         emit_system("Receiving file: " + shown_name + " (" + std::to_string(size) +
                     " bytes)");
     }

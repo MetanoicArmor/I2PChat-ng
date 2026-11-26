@@ -62,12 +62,39 @@ std::pair<std::string, std::string> split_extension(const std::string& name) {
     return {name.substr(0, dot), name.substr(dot)};
 }
 
+constexpr std::string_view kAvatarWireFilename = ".i2pchat-avatar.jpg";
+
+bool is_avatar_wire_filename(std::string_view name) {
+    std::string base = trim(basename_of(name));
+    for (char& character : base) {
+        if (character >= 'A' && character <= 'Z') {
+            character = static_cast<char>(character - 'A' + 'a');
+        }
+    }
+    if (base == kAvatarWireFilename) {
+        return true;
+    }
+    // Collision renames from allocate_unique_filename: ".i2pchat-avatar (1).jpg"
+    if (base.rfind(".i2pchat-avatar.", 0) == 0 ||
+        base.rfind(".i2pchat-avatar (", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 std::string sanitize_filename(std::string_view name,
                               std::optional<std::int64_t> timestamp) {
     const std::int64_t stamp = timestamp.value_or(now_seconds());
     std::string cleaned = trim(basename_of(name));
+
+    // Reserved avatar wire name must survive sanitize on both send and receive;
+    // rewriting it to file_<ts> breaks peer avatar ingest.
+    if (is_avatar_wire_filename(cleaned)) {
+        return std::string(kAvatarWireFilename);
+    }
+
     for (char& character : cleaned) {
         if (is_unsafe(static_cast<unsigned char>(character))) {
             character = '_';

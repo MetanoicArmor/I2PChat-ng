@@ -26,8 +26,10 @@ inline constexpr std::size_t kMaxImageLines = 500;
 ///
 /// Directory components are dropped, characters that could confuse a shell or a
 /// filesystem are replaced, and a name that is empty or hidden is replaced
-/// outright. Unicode is preserved: a Cyrillic or CJK filename is not a security
-/// problem and mangling it would be a bug, not caution.
+/// outright — except the reserved avatar wire name ``.i2pchat-avatar.jpg``,
+/// which must survive send/receive sanitize so peers can ingest it. Unicode is
+/// preserved: a Cyrillic or CJK filename is not a security problem and mangling
+/// it would be a bug, not caution.
 ///
 /// `now_seconds` seeds the generated fallback name; it is a parameter so the
 /// result is reproducible in tests.

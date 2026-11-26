@@ -1368,8 +1368,16 @@ def sanitize_filename(name: str) -> str:
     """
     Очистка имени файла от потенциально опасных символов.
     Поддерживает Unicode (кириллица, иероглифы и т.д.).
+
+    Исключение: reserved avatar wire name ``.i2pchat-avatar.*`` — иначе push
+    аватара превращается в обычный ``file_<ts>`` и ingest на приёме не срабатывает.
     """
+    from i2pchat.storage.avatars import AVATAR_WIRE_FILENAME, is_avatar_wire_filename
+
     name = os.path.basename(name).strip()
+    if is_avatar_wire_filename(name):
+        # Canonicalize so collision suffixes / case variants still ingest.
+        return AVATAR_WIRE_FILENAME
     name = UNSAFE_FILENAME_CHARS.sub('_', name)
     if not name or name.startswith('.'):
         return f"file_{int(time.time())}"
@@ -11995,7 +12003,21 @@ class I2PChatCore:
                                     )
                                 )
                         filename, size_str = body.split("|")
-                        filename = sanitize_filename(filename)
+                        from i2pchat.storage.avatars import (
+                            AVATAR_WIRE_FILENAME,
+                            is_avatar_wire_filename,
+                        )
+
+                        # Detect avatar on the raw wire name *before* sanitize:
+                        # sanitize historically rewrote leading-dot names to
+                        # file_<ts>, which broke avatar ingest into a normal download.
+                        raw_base = os.path.basename(str(filename).strip())
+                        is_avatar = is_avatar_wire_filename(raw_base)
+                        filename = (
+                            AVATAR_WIRE_FILENAME
+                            if is_avatar
+                            else sanitize_filename(filename)
+                        )
                         size = int(size_str)
                         if size > self.MAX_FILE_SIZE:
                             self._emit_error(
@@ -12006,13 +12028,16 @@ class I2PChatCore:
                             sess.incoming_info = None
                             continue
                         safe_name = os.path.basename(filename)
-                        from i2pchat.storage.avatars import is_avatar_wire_filename
 
-                        # Avatar pushes are silent metadata: auto-accept, no offer UI.
-                        if is_avatar_wire_filename(safe_name):
-                            decision = True
+                        # Avatar pushes are silent metadata: auto-accept into
+                        # downloads (""), same as ordinary auto-accept. Never use
+                        # True — resolve_save_as expects a path string.
+                        if is_avatar:
+                            decision = ""
                         else:
-                            decision = await self._request_file_offer_decision(safe_name, size)
+                            decision = await self._request_file_offer_decision(
+                                safe_name, size
+                            )
                         if decision is None:
                             prj = peer_id or self._normalize_peer_addr(
                                 self.current_peer_addr or ""
@@ -12045,10 +12070,23 @@ class I2PChatCore:
                             )
                         elif chosen:
                             safe_path = chosen
+                        elif is_avatar:
+                            # Prefer the exact wire basename so E-end ingest and
+                            # FILE_ACK token stay aligned with the sender.
+                            safe_path = os.path.join(get_downloads_dir(), safe_name)
+                            if os.path.exists(safe_path):
+                                try:
+                                    os.remove(safe_path)
+                                except OSError:
+                                    safe_path = allocate_unique_filename(
+                                        get_downloads_dir(), safe_name
+                                    )
                         else:
-                            safe_path = allocate_unique_filename(get_downloads_dir(), safe_name)
+                            safe_path = allocate_unique_filename(
+                                get_downloads_dir(), safe_name
+                            )
                         final_name = os.path.basename(safe_path)
-                        if final_name != safe_name:
+                        if final_name != safe_name and not is_avatar:
                             self._emit_system(
                                 f"Filename collision detected: saved as {final_name}"
                             )
@@ -12058,10 +12096,11 @@ class I2PChatCore:
                             filename=safe_path, size=size, received=0
                         )
                         self._file_xfer_debug_last_recv_emit_mono = None
-                        self._emit_system(
-                            f"Receiving file: {final_name} ({size} bytes)"
-                        )
-                        self._emit_file_event(sess.incoming_info)
+                        if not is_avatar:
+                            self._emit_system(
+                                f"Receiving file: {final_name} ({size} bytes)"
+                            )
+                            self._emit_file_event(sess.incoming_info)
                     except Exception as e:
                         self._emit_error(f"Invalid file header: {e}")
 

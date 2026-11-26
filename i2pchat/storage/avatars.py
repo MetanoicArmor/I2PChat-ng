@@ -413,4 +413,9 @@ def import_own_avatar_b64(
 
 def is_avatar_wire_filename(name: str) -> bool:
     base = os.path.basename(name or "").strip().lower()
-    return base == AVATAR_WIRE_FILENAME or base.startswith(".i2pchat-avatar.")
+    if base == AVATAR_WIRE_FILENAME:
+        return True
+    # Collision renames: ".i2pchat-avatar (1).jpg"
+    return base.startswith(".i2pchat-avatar.") or base.startswith(
+        ".i2pchat-avatar ("
+    )

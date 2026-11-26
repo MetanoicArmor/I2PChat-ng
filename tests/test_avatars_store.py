@@ -66,7 +66,20 @@ class AvatarStoreTests(unittest.TestCase):
     def test_wire_filename(self) -> None:
         self.assertTrue(is_avatar_wire_filename(AVATAR_WIRE_FILENAME))
         self.assertTrue(is_avatar_wire_filename("/tmp/.i2pchat-avatar.jpg"))
+        self.assertTrue(is_avatar_wire_filename(".i2pchat-avatar (1).jpg"))
         self.assertFalse(is_avatar_wire_filename("photo.jpg"))
+        self.assertFalse(is_avatar_wire_filename(".bashrc"))
+
+    def test_sanitize_preserves_avatar_wire_name(self) -> None:
+        from i2pchat.core.i2p_chat_core import sanitize_filename
+
+        self.assertEqual(sanitize_filename(AVATAR_WIRE_FILENAME), AVATAR_WIRE_FILENAME)
+        self.assertEqual(
+            sanitize_filename("/tmp/.i2pchat-avatar.jpg"), AVATAR_WIRE_FILENAME
+        )
+        # Ordinary hidden names are still rewritten.
+        rewritten = sanitize_filename(".bashrc")
+        self.assertTrue(rewritten.startswith("file_"), rewritten)
 
 
 if __name__ == "__main__":
