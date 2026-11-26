@@ -7,6 +7,7 @@ from i2pchat.core.call_prefs import PRESET_ECONOMY, PRESET_MAX, PRESET_NORMAL, C
 from i2pchat.core.call_signals import codecs_include, intersect_codecs, normalize_codec_list
 from i2pchat.core.call_signals import call_id_hash16
 from i2pchat.core.media_framing import (
+    TYPE_KEYFRAME_REQ,
     TYPE_VIDEO_DELTA,
     TYPE_VIDEO_KEY,
     FrameReassembler,
@@ -105,3 +106,4 @@ def test_video_key_delta_framing_roundtrip():
     assert reasm.feed(delta) == b"delta"
     assert TYPE_VIDEO_KEY == 2
     assert TYPE_VIDEO_DELTA == 4
+    assert TYPE_KEYFRAME_REQ == 6

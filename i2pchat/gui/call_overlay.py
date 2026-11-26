@@ -27,6 +27,7 @@ from i2pchat.core.call_prefs import (
     save_call_prefs,
 )
 from i2pchat.core.media_framing import (
+    TYPE_KEYFRAME_REQ,
     TYPE_OPUS,
     TYPE_PCM16,
     TYPE_VIDEO_DELTA,
@@ -634,6 +635,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._vp8_enc: Optional[Vp8Encoder] = None
         self._vp8_dec: Optional[Vp8Decoder] = None
         self._force_vp8_key = False
+        self._last_remote_video_at = 0.0
+        self._last_pli_at = 0.0
+        self._pli_hits = 0
 
     def _ceiling_from_prefs(self) -> EffectiveMedia:
         return EffectiveMedia(
@@ -749,12 +753,48 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if rx > 0 and base == tr("call.media_pending"):
             base = tr("call.connected")
             self._status_base = base
-        extra = tr("call.stats", tx=tx, rx=rx)
+        eff = self._effective
+        extra = (
+            tr(
+                "call.quality_live",
+                edge=eff.video_max_edge,
+                fps=eff.video_fps,
+                kbps=eff.video_bitrate_kbps,
+            )
+            + " · "
+            + tr("call.stats", tx=tx, rx=rx)
+        )
+        self._maybe_request_keyframe(snap)
         if st.get("control_closed"):
             extra += " · " + tr("call.media_error")
         elif self._mic_denied:
             extra += " · " + tr("call.mic_denied")
         self._status.setText(f"{base} · {extra}")
+
+    def _shrink_send_edge(self) -> None:
+        """Step the outgoing picture down so the next keyframe fits in a few datagrams."""
+        steps = (720, 640, 480, 400, 320, 240, 160)
+        edge = int(self._effective.video_max_edge)
+        smaller = [e for e in steps if e < edge]
+        if not smaller:
+            return
+        self._effective.video_max_edge = smaller[0]
+        logger.info("call video edge -> %s (keyframe too large or peer asked again)", smaller[0])
+
+    def _maybe_request_keyframe(self, snap: dict[str, Any]) -> None:
+        """Peer picture stuck: ask them for a keyframe. Does not touch our encoder."""
+        if not (snap.get("remote_cam") or snap.get("remote_screen")):
+            return
+        now = time.monotonic()
+        if now - self._last_pli_at < 1.2:
+            return
+        if self._last_remote_video_at and now - self._last_remote_video_at < 1.5:
+            return
+        mgr = self._manager
+        if mgr is None:
+            return
+        self._last_pli_at = now
+        self._spawn(mgr.request_keyframe())
 
     def _spawn(self, coro: Any) -> None:
         try:
@@ -924,9 +964,13 @@ class CallOverlayWidget(QtWidgets.QWidget):
         save_call_prefs(self._prefs)
         self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
         self._reset_adapt()
+        # Next frame is a keyframe at the new size so the peer sees it at once.
+        self._force_vp8_key = True
+        self._pli_hits = 0
         if self._manager is not None:
             self._manager.prefs = self._prefs
         self._sync_screen_timer_interval()
+        self._update_stats()
 
     def _toggle(self, which: str) -> None:
         if self._core is None:
@@ -1470,10 +1514,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
         min_interval = 1.0 / max(1, eff.video_fps)
         if self._video_inflight or time.monotonic() - self._last_video_sent < min_interval:
             return
-        self._show_local_preview(img)
         use_vp8 = bool(getattr(self._manager, "uses_vp8", lambda: False)())
         if use_vp8 and vp8_available():
-            # Scale to even edge for VP8.
+            # Scale to even edge for VP8. Preview this frame — it is what we send.
             edge = eff.video_max_edge
             w, h = img.width(), img.height()
             m = max(w, h)
@@ -1485,6 +1528,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
                     QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                     QtCore.Qt.TransformationMode.SmoothTransformation,
                 )
+            self._show_local_preview(img)
             rgb, rw, rh = qimage_to_rgb24(img)
             try:
                 if self._vp8_enc is None:
@@ -1509,12 +1553,14 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 )
                 self._force_vp8_key = False
                 if payload and len(payload) > MAX_FRAME_BYTES:
-                    # More than ~4 DATAGRAM fragments almost never reassembles.
+                    # A dropped keyframe freezes the peer until the next GOP.
+                    # Next camera frame is a smaller keyframe instead of silence.
                     logger.info(
-                        "drop oversized vp8 frame (%d bytes > %d)",
+                        "vp8 frame %d bytes > %d; shrinking edge",
                         len(payload),
                         MAX_FRAME_BYTES,
                     )
+                    self._shrink_send_edge()
                     self._force_vp8_key = True
                     return
                 if payload:
@@ -1523,6 +1569,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
             except Exception:
                 logger.debug("vp8 encode failed; falling back to JPEG", exc_info=True)
                 self._close_vp8()
+        else:
+            self._show_local_preview(img)
         quality = 35 if screen else eff.jpeg_quality
         jpeg = jpeg_from_qimage(
             img,
@@ -1567,6 +1615,14 @@ class CallOverlayWidget(QtWidgets.QWidget):
         snap = self._manager.snapshot()
         ptype = int(payload.get("ptype") or 0)
         data = payload.get("payload") or b""
+        if ptype == TYPE_KEYFRAME_REQ:
+            # Peer cannot decode us. Send a keyframe; repeated asks mean shrink.
+            self._force_vp8_key = True
+            self._pli_hits += 1
+            if self._pli_hits >= 2:
+                self._shrink_send_edge()
+                self._pli_hits = 0
+            return
         if ptype in (TYPE_OPUS, TYPE_PCM16):
             if not snap.get("spk") or self._audio_out_io is None:
                 return
@@ -1576,6 +1632,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         elif ptype == TYPE_VIDEO_JPEG:
             img = qimage_from_jpeg(data)
             if img is not None:
+                self._last_remote_video_at = time.monotonic()
                 self._show_remote_image(img)
         elif ptype in (TYPE_VIDEO_KEY, TYPE_VIDEO_DELTA):
             try:
@@ -1584,13 +1641,18 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 decoded = self._vp8_dec.decode(data)
             except Exception:
                 logger.debug("vp8 remote decode failed", exc_info=True)
-                self._force_vp8_key = True
+                self._last_remote_video_at = 0.0
+                self._maybe_request_keyframe(snap)
                 return
             if not decoded:
                 if ptype == TYPE_VIDEO_DELTA:
-                    self._force_vp8_key = True
+                    # Their delta is useless without a keyframe. Ask them, not ourselves.
+                    self._last_remote_video_at = 0.0
+                    self._maybe_request_keyframe(snap)
                 return
             rgb, w, h = decoded
             img = rgb24_to_qimage(rgb, w, h)
             if img is not None:
+                self._last_remote_video_at = time.monotonic()
+                self._pli_hits = 0
                 self._show_remote_image(img)

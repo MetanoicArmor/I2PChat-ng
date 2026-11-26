@@ -19,6 +19,7 @@ object CallMediaFraming {
     const val TYPE_VIDEO_JPEG = 3
     const val TYPE_VIDEO_DELTA = 4 // VP8 delta
     const val TYPE_PCM16 = 5
+    const val TYPE_KEYFRAME_REQ = 6 // empty: please send a VP8 keyframe
 
     data class Packet(
         val callHash: ByteArray,

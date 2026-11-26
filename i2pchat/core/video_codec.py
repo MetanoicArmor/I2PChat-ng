@@ -63,14 +63,15 @@ class Vp8Encoder:
         self._codec.time_base = Fraction(1, self.fps)
         self._codec.bit_rate = self.bitrate
         # lag-in-frames=0: one packet per frame (no delayed alt-ref).
-        # max-intra-rate: keep keyframes from exploding into dozens of DATAGRAMs.
+        # max-intra-rate is a percent of the average frame. 80 keeps a keyframe
+        # near one or two DATAGRAMs; the first frame still often ignores it.
         self._codec.options = {
             "quality": "realtime",
             "cpu-used": "8",
             "deadline": "realtime",
             "error-resilient": "1",
             "lag-in-frames": "0",
-            "max-intra-rate": "120",
+            "max-intra-rate": "80",
         }
         self._codec.open()
 

@@ -30,6 +30,7 @@ TYPE_VIDEO_KEY = 2  # VP8 keyframe
 TYPE_VIDEO_JPEG = 3
 TYPE_VIDEO_DELTA = 4  # VP8 delta / P-frame
 TYPE_PCM16 = 5  # fallback when Opus is unavailable
+TYPE_KEYFRAME_REQ = 6  # empty payload: peer missed a keyframe, please send one
 
 FLAG_PCM_FALLBACK = 0x02
 

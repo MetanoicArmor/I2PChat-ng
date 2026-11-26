@@ -31,6 +31,7 @@ from i2pchat.core.call_signals import (
     parse_call_signal,
 )
 from i2pchat.core.media_framing import (
+    TYPE_KEYFRAME_REQ,
     TYPE_OPUS,
     TYPE_PCM16,
     TYPE_VIDEO_DELTA,
@@ -150,6 +151,7 @@ class CallSessionManager:
         self._next_resolve_at = 0.0
         self._reset_stats()
         self._setup_task: Optional[asyncio.Task[Optional[DatagramSession]]] = None
+        self._dg_close_task: Optional[asyncio.Task[None]] = None
         self._generation = 0
 
     def _reset_stats(self) -> None:
@@ -272,6 +274,7 @@ class CallSessionManager:
         if dg is None:
             # Prefetch missing/failed — open now (hangup bumps generation).
             try:
+                await self._await_previous_dg_close()
                 dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
             except asyncio.CancelledError as exc:
                 raise RuntimeError("Call ended while accepting") from exc
@@ -281,7 +284,7 @@ class CallSessionManager:
         async with self._lock:
             if self._generation != gen or self.state.phase != CallPhase.INCOMING:
                 if dg is not None and dg is not self._dg:
-                    asyncio.create_task(self._close_dg(dg))
+                    self._schedule_dg_close(dg)
                 raise RuntimeError("Call ended while accepting")
             assert dg is not None
             self._dg = dg
@@ -469,6 +472,12 @@ class CallSessionManager:
         ptype = TYPE_VIDEO_KEY if keyframe else TYPE_VIDEO_DELTA
         await self._send_media(ptype, payload, ts_ms=ts_ms)
 
+    async def request_keyframe(self) -> None:
+        """Ask the peer for a VP8 keyframe. Empty datagram, no camera required."""
+        if self.state.phase != CallPhase.ACTIVE:
+            return
+        await self._send_media(TYPE_KEYFRAME_REQ, b"", ts_ms=None)
+
     def uses_vp8(self) -> bool:
         return codecs_include(self.state.codecs, "vp8") and vp8_available()
 
@@ -482,6 +491,7 @@ class CallSessionManager:
     ) -> Optional[DatagramSession]:
         dg: Optional[DatagramSession] = None
         try:
+            await self._await_previous_dg_close()
             dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
             if self._generation != gen:
                 await self._close_dg(dg)
@@ -529,6 +539,7 @@ class CallSessionManager:
     async def _prefetch_datagram(self, gen: int) -> Optional[DatagramSession]:
         dg: Optional[DatagramSession] = None
         try:
+            await self._await_previous_dg_close()
             dg = await self._open_datagram_impl(f"call-{uuid.uuid4().hex[:10]}")
             async with self._lock:
                 if self._generation != gen or self.state.phase != CallPhase.INCOMING:
@@ -761,12 +772,41 @@ class CallSessionManager:
             task.cancel()
         self._emit("ended", reason=reason, peer=peer, call_id=call_id)
         if dg is not None:
-            # Close off the critical path so hangup stays snappy.
-            asyncio.create_task(self._close_dg(dg), name="call-dg-close")
+            # Close off the signal path so hangup stays snappy, but the next
+            # call must wait: opening a new DATAGRAM while the old reader is
+            # still dying makes one direction (usually RX) go silent.
+            self._schedule_dg_close(dg)
 
     async def _teardown_unlocked(self, reason: str) -> None:
         await self._begin_teardown_unlocked(reason)
         await self._finish_teardown_unlocked(reason)
+
+    def _schedule_dg_close(self, dg: DatagramSession) -> None:
+        prev = self._dg_close_task
+
+        async def _run() -> None:
+            if prev is not None and not prev.done():
+                try:
+                    await asyncio.wait_for(prev, timeout=2.0)
+                except Exception:
+                    logger.debug("previous datagram close", exc_info=True)
+            await self._close_dg(dg)
+
+        try:
+            self._dg_close_task = asyncio.create_task(_run(), name="call-dg-close")
+        except RuntimeError:
+            self._dg_close_task = None
+
+    async def _await_previous_dg_close(self) -> None:
+        task = self._dg_close_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.5)
+        except asyncio.TimeoutError:
+            logger.info("previous call datagram still closing; opening a new session")
+        except Exception:
+            logger.debug("previous datagram close", exc_info=True)
 
     @staticmethod
     async def _close_dg(dg: DatagramSession) -> None:
