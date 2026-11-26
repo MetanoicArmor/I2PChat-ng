@@ -40,18 +40,18 @@ PRESET_VALUES: dict[str, dict[str, int]] = {
 
 @dataclass
 class CallPrefs:
-    audio_bitrate_kbps: int = 32
-    video_bitrate_kbps: int = 250
-    video_fps: int = 8
-    video_max_edge: int = 480
-    preset: str = PRESET_NORMAL
+    audio_bitrate_kbps: int = 48
+    video_bitrate_kbps: int = 600
+    video_fps: int = 15
+    video_max_edge: int = 720
+    preset: str = PRESET_MAX
     start_mic: bool = True
     start_spk: bool = True
 
     def apply_preset(self, preset_id: str) -> "CallPrefs":
-        key = (preset_id or PRESET_NORMAL).strip().lower()
+        key = (preset_id or PRESET_MAX).strip().lower()
         if key not in PRESET_VALUES:
-            key = PRESET_NORMAL
+            key = PRESET_MAX
         vals = PRESET_VALUES[key]
         self.preset = key
         self.audio_bitrate_kbps = vals["audio_bitrate_kbps"]
@@ -65,8 +65,8 @@ class CallPrefs:
         self.video_bitrate_kbps = max(50, min(800, int(self.video_bitrate_kbps)))
         self.video_fps = max(3, min(20, int(self.video_fps)))
         self.video_max_edge = max(160, min(720, int(self.video_max_edge)))
-        preset = (self.preset or PRESET_NORMAL).strip().lower()
-        self.preset = preset if preset in PRESET_VALUES else PRESET_NORMAL
+        preset = (self.preset or PRESET_MAX).strip().lower()
+        self.preset = preset if preset in PRESET_VALUES else PRESET_MAX
         return self
 
     @property
@@ -82,7 +82,7 @@ def call_prefs_path(profile: Optional[str] = None) -> Path:
 
 def load_call_prefs(profile: Optional[str] = None) -> CallPrefs:
     path = call_prefs_path(profile)
-    prefs = CallPrefs().apply_preset(PRESET_NORMAL)
+    prefs = CallPrefs().apply_preset(PRESET_MAX)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
@@ -100,9 +100,9 @@ def load_call_prefs(profile: Optional[str] = None) -> CallPrefs:
     ):
         if key in raw:
             setattr(prefs, key, raw[key])
-    # Legacy files without preset: keep numeric fields, mark as normal ceiling.
+    # Legacy files without preset: keep numeric fields, label as max ceiling.
     if "preset" not in raw:
-        prefs.preset = PRESET_NORMAL
+        prefs.preset = PRESET_MAX
     return prefs.clamp()
 
 

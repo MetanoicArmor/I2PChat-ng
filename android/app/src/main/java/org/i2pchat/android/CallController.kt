@@ -1,6 +1,9 @@
 package org.i2pchat.android
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
@@ -19,7 +22,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 // media / signaling helpers live in CallSignals + CallMediaFraming
 
 enum class CallPhase {
@@ -40,15 +46,23 @@ data class CallUiState(
     val remoteScreen: Boolean = false,
     val minimized: Boolean = false,
     val error: String = "",
-    val audioBitrateKbps: Int = 32,
-    val videoBitrateKbps: Int = 250,
-    val videoFps: Int = 8,
-    val videoMaxEdge: Int = 480,
-    val preset: String = "normal",
+    val audioBitrateKbps: Int = 48,
+    val videoBitrateKbps: Int = 600,
+    val videoFps: Int = 15,
+    val videoMaxEdge: Int = 720,
+    val preset: String = "max",
     val codecs: String = CallSignals.DEFAULT_CODECS,
-    val lastRemoteJpeg: ByteArray? = null,
-    val lastRemoteVp8: ByteArray? = null,
+    /** Latest decoded picture from the peer (JPEG or VP8). */
+    val remoteFrame: Bitmap? = null,
+    /** Small preview of what we are sending (camera or screen). */
+    val localFrame: Bitmap? = null,
     val mediaReady: Boolean = false,
+    /** Live quality readout: effective edge/fps/kbps and packet counters. */
+    val liveEdge: Int = 0,
+    val liveFps: Int = 0,
+    val liveKbps: Int = 0,
+    val txPackets: Long = 0,
+    val rxPackets: Long = 0,
 )
 
 /**
@@ -61,6 +75,7 @@ class CallController(
     private val scope: CoroutineScope,
     private val samHost: () -> String,
     private val samPort: () -> Int,
+    private val tunnelLength: () -> Int = { 4 },
     private val sendSignal: (peer: String, signal: String) -> Boolean,
 ) {
     private val _state = MutableStateFlow(CallUiState())
@@ -72,19 +87,53 @@ class CallController(
     private var resolveJob: Job? = null
     @Volatile private var resolveFailures = 0
     @Volatile private var nextResolveAtMs = 0L
-    private var seq = AtomicInteger(0)
+    private val seq = AtomicInteger(0)
+    private val audioSeq = AtomicInteger(0)
     private var audioJob: Job? = null
-    private var audioTrack: AudioTrack? = null
     private var setupJob: Job? = null
+
+    // --- media pipeline (per call) ---
+    private val playout = PlayoutBuffer()
+    private val seqTracker = AudioSeqTracker()
+    private var opusEnc: OpusFrameEncoder? = null
+    private var opusDec: OpusFrameDecoder? = null
+    @Volatile private var lastRxFrame: ShortArray = ShortArray(0)
+    @Volatile private var playbackRunning = false
+    private var playbackThread: Thread? = null
+    private var audioRx: ExecutorService? = null
+    private var videoRx: ExecutorService? = null
+    private val audioRxPending = AtomicInteger(0)
+    private val videoRxPending = AtomicInteger(0)
+    private var vp8Dec: Vp8FrameDecoder? = null
+    @Volatile private var gotRemoteKey = false
+    @Volatile private var lastKeyReqMs = 0L
+    private var lastDroppedSeen = 0
+    private var videoSender: CallVideoSender? = null
+    private var camera: CallCamera? = null
+    private var statsJob: Job? = null
+    private var adapt: AdaptiveController? = null
+    @Volatile private var eff: EffectiveMedia = EffectiveMedia(48, 600, 15, 720)
+    private var pliHits = 0
+    private val txPackets = AtomicLong(0)
+    private val txDropped = AtomicLong(0)
+    private val rxPackets = AtomicLong(0)
+    private val rxDropped = AtomicLong(0)
+    private var lastVideoBytes = 0L
+
+    init {
+        CallRuntime.controller = this
+    }
     private var generation = 0
     private val mutex = Mutex()
+    private val inviteTimes = mutableListOf<Long>()
+    private val invitePeerAt = HashMap<String, Long>()
     private val remoteCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val prefs by lazy {
         appContext.getSharedPreferences("call_prefs", Context.MODE_PRIVATE)
     }
 
     fun loadPrefsIntoState() {
-        val preset = prefs.getString("preset", "normal") ?: "normal"
+        val preset = prefs.getString("preset", "max") ?: "max"
         val defaults = presetValues(preset)
         _state.update {
             it.copy(
@@ -111,13 +160,19 @@ class CallController(
             .putInt("video_max_edge", edge.coerceIn(160, 720))
             .apply()
         loadPrefsIntoState()
+        adapt?.reset(
+            EffectiveMedia(
+                _state.value.audioBitrateKbps, _state.value.videoBitrateKbps,
+                _state.value.videoFps, _state.value.videoMaxEdge,
+            ),
+        )
     }
 
     private fun presetValues(preset: String): Quadruple {
         return when (preset) {
             "economy" -> Quadruple(24, 100, 5, 240)
-            "max" -> Quadruple(48, 600, 15, 720)
-            else -> Quadruple(32, 250, 8, 480)
+            "normal" -> Quadruple(32, 250, 8, 480)
+            else -> Quadruple(48, 600, 15, 720) // max (default)
         }
     }
 
@@ -185,13 +240,14 @@ class CallController(
                 _state.update {
                     it.copy(
                         phase = CallPhase.Active,
-                        cam = it.wantVideo,
+                        // Camera stays off until the user turns it on.
+                        cam = false,
                         codecs = negotiated,
                         mediaReady = ready,
                     )
                 }
                 sendMediaState()
-                startAudioLoop()
+                startMedia()
             } catch (t: Throwable) {
                 if (generation == gen) {
                     Log.w(TAG, "accept failed", t)
@@ -234,30 +290,38 @@ class CallController(
     fun toggleSpk() = toggle { it.copy(spk = !it.spk) }
     fun toggleCam() = toggle {
         val on = !it.cam
-        it.copy(cam = on, screen = if (on) false else it.screen)
-    }
-    fun toggleScreen() = toggle {
-        val on = !it.screen
-        it.copy(screen = on, cam = if (on) false else it.cam)
+        it.copy(cam = on, screen = if (on) false else it.screen, error = "")
     }
 
     private fun toggle(transform: (CallUiState) -> CallUiState) {
         scope.launch(Dispatchers.IO) {
+            val before = _state.value
             _state.update(transform)
-            if (_state.value.phase == CallPhase.Active) sendMediaState()
+            if (_state.value.phase == CallPhase.Active) {
+                sendMediaState()
+                if (before.cam != _state.value.cam) {
+                    if (_state.value.cam && before.screen) {
+                        CallForegroundService.stopProjection(appContext)
+                    }
+                    syncVideoSources()
+                }
+            }
         }
     }
 
     fun onCallSignal(peer: String, payload: String) {
         val parsed = CallSignals.parse(payload) ?: return
+        if (!CallSignals.isCallId(parsed.callId)) return
         scope.launch(Dispatchers.IO) {
             when (parsed.kind) {
                 CallSignals.INVITE -> {
+                    if (!CallSignals.isDatagramToken(parsed.datagramB32)) return@launch
                     mutex.withLock {
-                        if (_state.value.phase != CallPhase.Idle) {
+                        if (_state.value.phase != CallPhase.Idle || !inviteAllowed(peer)) {
                             sendSignal(peer, CallSignals.buildReject(parsed.callId, "busy"))
                             return@launch
                         }
+                        noteInvite(peer)
                         generation += 1
                         val gen = generation
                         remoteDestB64 = parsed.datagramB32
@@ -283,7 +347,9 @@ class CallController(
                 }
                 CallSignals.ACCEPT -> {
                     val snap = _state.value
+                    if (!CallSignals.samePeer(peer, snap.peer)) return@launch
                     if (snap.phase != CallPhase.Outgoing || snap.callId != parsed.callId) return@launch
+                    if (!CallSignals.isDatagramToken(parsed.datagramB32)) return@launch
                     val ready = applyRemoteToken(parsed.datagramB32)
                     val negotiated = CallSignals.intersectCodecs(
                         CallSignals.localOfferCodecs(),
@@ -297,15 +363,19 @@ class CallController(
                         )
                     }
                     sendMediaState()
-                    startAudioLoop()
+                    startMedia()
                 }
                 CallSignals.REJECT, CallSignals.HANGUP -> {
-                    if (parsed.callId == _state.value.callId) {
+                    val snap = _state.value
+                    if (!CallSignals.samePeer(peer, snap.peer)) return@launch
+                    if (parsed.callId == snap.callId && snap.phase != CallPhase.Idle) {
                         beginLocalTeardown(parsed.reason.ifBlank { "ended" })
                     }
                 }
                 CallSignals.MEDIA -> {
-                    if (parsed.callId != _state.value.callId) return@launch
+                    val snap = _state.value
+                    if (!CallSignals.samePeer(peer, snap.peer)) return@launch
+                    if (parsed.callId != snap.callId || snap.phase == CallPhase.Idle) return@launch
                     _state.update {
                         it.copy(
                             remoteMic = parsed.mic,
@@ -318,38 +388,14 @@ class CallController(
         }
     }
 
-    fun sendJpeg(jpeg: ByteArray) {
-        val snap = _state.value
-        if (snap.phase != CallPhase.Active || !(snap.cam || snap.screen)) return
-        val target = remoteSendTarget()
-        if (target.isEmpty()) return
-        val dg = datagram ?: return
-        sendFramed(dg, target, snap.callId, CallMediaFraming.TYPE_VIDEO_JPEG, jpeg)
-    }
-
-    fun sendVp8(payload: ByteArray, keyframe: Boolean) {
-        val snap = _state.value
-        if (snap.phase != CallPhase.Active || !(snap.cam || snap.screen)) return
-        if (!CallSignals.codecsInclude(snap.codecs, "vp8")) return
-        val target = remoteSendTarget()
-        if (target.isEmpty()) return
-        val dg = datagram ?: return
-        val type = if (keyframe) CallMediaFraming.TYPE_VIDEO_KEY else CallMediaFraming.TYPE_VIDEO_DELTA
-        sendFramed(dg, target, snap.callId, type, payload)
-    }
-
+    /** True when we can encode VP8 for the peer (negotiated and a working encoder exists). */
     fun usesVp8(): Boolean =
-        CallSignals.codecsInclude(_state.value.codecs, "vp8") && CallVp8Encoder.isSupported()
+        CallSignals.codecsInclude(_state.value.codecs, "vp8") && Vp8FrameEncoder.isSupported()
 
     private suspend fun outgoingSetup(gen: Int, peer: String, callId: String, video: Boolean) {
         var dg: SamDatagramSession? = null
         try {
-            dg = SamDatagramSession.open(
-                sessionId = "call-${UUID.randomUUID().toString().take(10)}",
-                samHost = samHost(),
-                samPort = samPort(),
-                onDatagram = ::onDatagram,
-            )
+            dg = openDatagram()
             if (generation != gen) {
                 dg.close()
                 return
@@ -377,12 +423,7 @@ class CallController(
     private suspend fun prefetchDatagram(gen: Int) {
         var dg: SamDatagramSession? = null
         try {
-            dg = SamDatagramSession.open(
-                sessionId = "call-${UUID.randomUUID().toString().take(10)}",
-                samHost = samHost(),
-                samPort = samPort(),
-                onDatagram = ::onDatagram,
-            )
+            dg = openDatagram()
             if (generation != gen || _state.value.phase != CallPhase.Incoming) {
                 dg.close()
                 return
@@ -403,12 +444,7 @@ class CallController(
         if (generation != gen) return null
         datagram?.let { return it }
         // Prefetch missed — open now.
-        val dg = SamDatagramSession.open(
-            sessionId = "call-${UUID.randomUUID().toString().take(10)}",
-            samHost = samHost(),
-            samPort = samPort(),
-            onDatagram = ::onDatagram,
-        )
+        val dg = openDatagram()
         if (generation != gen) {
             dg.close()
             return null
@@ -426,8 +462,31 @@ class CallController(
     }
 
     /** Remember the peer's address; never blocks on a lookup. Returns true when it is a full destination. */
+    private fun inviteAllowed(peer: String): Boolean {
+        val now = System.currentTimeMillis()
+        inviteTimes.removeAll { now - it >= INVITE_WINDOW_MS }
+        if (inviteTimes.size >= INVITE_BURST) return false
+        val last = invitePeerAt[CallSignals.samePeerKey(peer)] ?: return true
+        return now - last >= INVITE_COOLDOWN_MS
+    }
+
+    private fun noteInvite(peer: String) {
+        val now = System.currentTimeMillis()
+        inviteTimes.add(now)
+        invitePeerAt[CallSignals.samePeerKey(peer)] = now
+        if (invitePeerAt.size > 64) {
+            val cutoff = now - INVITE_WINDOW_MS
+            val stale = invitePeerAt.filterValues { it < cutoff }.keys
+            stale.forEach { invitePeerAt.remove(it) }
+        }
+    }
+
     private fun applyRemoteToken(token: String): Boolean {
         val t = token.trim()
+        if (!CallSignals.isDatagramToken(t)) {
+            remoteDestB64 = ""
+            return false
+        }
         remoteDestB64 = t
         resolveFailures = 0
         nextResolveAtMs = 0L
@@ -461,10 +520,11 @@ class CallController(
         val gen = generation
         resolveJob = scope.launch(Dispatchers.IO) {
             val name = b32HostName(token)
+            if (!CallSignals.isNamingName(name)) return@launch
             runCatching {
                 SamDatagramSession.namingLookup(samHost(), samPort(), name)
             }.onSuccess { b64 ->
-                if (generation == gen && remoteDestB64 == token) {
+                if (generation == gen && remoteDestB64 == token && CallSignals.isDatagramToken(b64)) {
                     remoteCache[token] = b64
                     remoteDestB64 = b64
                     _state.update { it.copy(mediaReady = isFullDest(b64)) }
@@ -473,30 +533,81 @@ class CallController(
                 resolveFailures += 1
                 val delayMs = minOf(30_000L, 1_000L shl minOf(resolveFailures, 5))
                 nextResolveAtMs = System.currentTimeMillis() + delayMs
-                Log.i(TAG, "naming lookup failed for $name (retry in ${delayMs}ms): ${it.message}")
+                Log.i(TAG, "naming lookup failed (retry in ${delayMs}ms)")
             }
         }
     }
 
-    /** One media frame -> N datagrams sharing a seq (see CallMediaFraming). */
-    private fun sendFramed(dg: SamDatagramSession, target: String, callId: String, type: Int, payload: ByteArray) {
-        val hash = CallSignals.callIdHash16(callId)
-        val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
-        val frameSeq = seq.incrementAndGet()
-        val chunks = CallMediaFraming.fragment(payload)
-        for ((idx, chunk) in chunks.withIndex()) {
-            val pkt = CallMediaFraming.Packet(
-                callHash = hash,
-                seq = frameSeq,
-                tsMs = now,
-                type = type,
-                flags = 0,
-                payload = chunk,
-                fragIdx = idx,
-                fragTotal = chunks.size,
-            )
-            if (runCatching { dg.send(target, pkt.encode()) }.isFailure) return
+    private fun openDatagram(): SamDatagramSession {
+        val len = tunnelLength().coerceIn(1, 7).toString()
+        return SamDatagramSession.open(
+            sessionId = "call-${UUID.randomUUID().toString().take(10)}",
+            samHost = samHost(),
+            samPort = samPort(),
+            onDatagram = ::onDatagram,
+            // Own tunnels for media: hop count follows the router setting, a few parallel
+            // tunnels plus a spare so one slow tunnel does not stall the call.
+            options = mapOf(
+                "inbound.length" to len,
+                "outbound.length" to len,
+                "inbound.quantity" to "3",
+                "outbound.quantity" to "3",
+                "inbound.backupQuantity" to "1",
+                "outbound.backupQuantity" to "1",
+            ),
+        )
+    }
+
+    /**
+     * One media frame -> N datagrams sharing a seq (see CallMediaFraming). Fragmented video
+     * frames also get one XOR parity datagram and are paced so they do not burst into a tunnel.
+     * Audio uses its own seq counter, flagged so the receiver can spot lost frames.
+     */
+    private fun sendFramed(type: Int, payload: ByteArray, paced: Boolean = false): Boolean {
+        val snap = _state.value
+        if (snap.phase != CallPhase.Active) return false
+        val target = remoteSendTarget()
+        val dg = datagram
+        if (target.isEmpty() || dg == null) {
+            txDropped.incrementAndGet()
+            return false
         }
+        val isAudio = type == CallMediaFraming.TYPE_OPUS || type == CallMediaFraming.TYPE_PCM16
+        val hash = CallSignals.callIdHash16(snap.callId)
+        val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
+        val frameSeq = if (isAudio) audioSeq.incrementAndGet() else seq.incrementAndGet()
+        val flags = if (isAudio) CallMediaFraming.FLAG_AUDIO_SEQ else 0
+        val chunks = CallMediaFraming.fragment(payload)
+        val packets = ArrayList<CallMediaFraming.Packet>(chunks.size + 1)
+        for ((idx, chunk) in chunks.withIndex()) {
+            packets.add(
+                CallMediaFraming.Packet(
+                    callHash = hash, seq = frameSeq, tsMs = now, type = type, flags = flags,
+                    payload = chunk, fragIdx = idx, fragTotal = chunks.size,
+                ),
+            )
+        }
+        val isVideo = type == CallMediaFraming.TYPE_VIDEO_KEY ||
+            type == CallMediaFraming.TYPE_VIDEO_DELTA ||
+            type == CallMediaFraming.TYPE_VIDEO_JPEG
+        if (isVideo && chunks.size >= 2) {
+            packets.add(
+                CallMediaFraming.Packet(
+                    callHash = hash, seq = frameSeq, tsMs = now,
+                    type = CallMediaFraming.TYPE_PARITY, flags = 0,
+                    payload = CallMediaFraming.buildParityPayload(type, chunks),
+                ),
+            )
+        }
+        for ((i, pkt) in packets.withIndex()) {
+            if (paced && i > 0) Thread.sleep(FRAGMENT_PACE_MS)
+            if (runCatching { dg.send(target, pkt.encode()) }.isFailure) {
+                txDropped.incrementAndGet()
+                return false
+            }
+            txPackets.incrementAndGet()
+        }
+        return true
     }
 
     private fun sendMediaState() {
@@ -506,101 +617,418 @@ class CallController(
     }
 
     private fun onDatagram(from: String, payload: ByteArray) {
-        val pkt = CallMediaFraming.decode(payload) ?: return
         val snap = _state.value
-        if (snap.callId.isNotBlank() &&
-            !pkt.callHash.contentEquals(CallSignals.callIdHash16(snap.callId))
-        ) {
+        if (snap.phase != CallPhase.Active || snap.callId.isEmpty()) {
+            rxDropped.incrementAndGet()
             return
         }
+        if (payload.size > CallMediaFraming.HEADER_SIZE + CallMediaFraming.MAX_PACKET_PAYLOAD) {
+            rxDropped.incrementAndGet()
+            return
+        }
+        val pkt = CallMediaFraming.decode(payload)
+        if (pkt == null) {
+            rxDropped.incrementAndGet()
+            return
+        }
+        if (!pkt.callHash.contentEquals(CallSignals.callIdHash16(snap.callId))) {
+            rxDropped.incrementAndGet()
+            return
+        }
+        if (!I2pDestinationUtil.sameDatagramSender(from, remoteDestB64)) {
+            rxDropped.incrementAndGet()
+            return
+        }
+        rxPackets.incrementAndGet()
         val body = reassembler.feed(pkt) ?: return
         when (pkt.type) {
             CallMediaFraming.TYPE_PCM16, CallMediaFraming.TYPE_OPUS -> {
-                if (!snap.spk) return
-                if (pkt.type == CallMediaFraming.TYPE_PCM16) {
-                    runCatching { audioTrack?.write(body, 0, body.size) }
+                val ex = audioRx ?: return
+                if (audioRxPending.get() >= MAX_AUDIO_BACKLOG) {
+                    rxDropped.incrementAndGet()
+                    return
+                }
+                audioRxPending.incrementAndGet()
+                ex.execute {
+                    try {
+                        handleAudio(pkt, body)
+                    } finally {
+                        audioRxPending.decrementAndGet()
+                    }
                 }
             }
-            CallMediaFraming.TYPE_VIDEO_JPEG -> {
-                _state.update { it.copy(lastRemoteJpeg = body) }
+            CallMediaFraming.TYPE_VIDEO_JPEG,
+            CallMediaFraming.TYPE_VIDEO_KEY,
+            CallMediaFraming.TYPE_VIDEO_DELTA -> {
+                val ex = videoRx ?: return
+                if (videoRxPending.get() >= MAX_VIDEO_BACKLOG) {
+                    // Falling behind: drop this picture and ask for a fresh keyframe.
+                    rxDropped.incrementAndGet()
+                    requestRemoteKeyframe()
+                    return
+                }
+                videoRxPending.incrementAndGet()
+                ex.execute {
+                    try {
+                        handleVideo(pkt.type, body)
+                    } finally {
+                        videoRxPending.decrementAndGet()
+                    }
+                }
             }
-            CallMediaFraming.TYPE_VIDEO_KEY, CallMediaFraming.TYPE_VIDEO_DELTA -> {
-                // Keep raw VP8 for optional decode path; JPEG peers still use lastRemoteJpeg.
-                _state.update { it.copy(lastRemoteVp8 = body) }
+            CallMediaFraming.TYPE_KEYFRAME_REQ -> onKeyframeRequested()
+        }
+    }
+
+    private fun handleAudio(pkt: CallMediaFraming.Packet, body: ByteArray) {
+        if (!_state.value.spk) return
+        if (pkt.type == CallMediaFraming.TYPE_PCM16) {
+            playout.push(pcm16ToShorts(body))
+            return
+        }
+        val dec = opusDec ?: return
+        val tracked = (pkt.flags and CallMediaFraming.FLAG_AUDIO_SEQ) != 0
+        val missing = seqTracker.onPacket(pkt.seq, tracked)
+        if (missing < 0) return // late or duplicate
+        if (missing > 0) {
+            // MediaCodec offers no PLC/FEC access: fade out a repeat of the last frame instead.
+            for (f in concealFrames(lastRxFrame, missing)) playout.push(f)
+        }
+        val pcm = dec.decode(body)
+        if (pcm.isNotEmpty()) {
+            lastRxFrame = if (pcm.size > CallAudioFormat.FRAME_SAMPLES) {
+                pcm.copyOfRange(pcm.size - CallAudioFormat.FRAME_SAMPLES, pcm.size)
+            } else {
+                pcm
             }
+            playout.push(pcm)
+        }
+    }
+
+    private fun handleVideo(type: Int, body: ByteArray) {
+        if (body.size > CallMediaFraming.MAX_RX_FRAME_BYTES) return
+        if (type == CallMediaFraming.TYPE_VIDEO_JPEG) {
+            val bmp = decodeBoundedJpeg(body)
+            if (bmp != null) _state.update { it.copy(remoteFrame = bmp) }
+            return
+        }
+        if (CallMediaFraming.vp8KeyframeRejected(body)) {
+            requestRemoteKeyframe()
+            return
+        }
+        if (type == CallMediaFraming.TYPE_VIDEO_KEY) gotRemoteKey = true
+        if (!gotRemoteKey) {
+            // A delta frame is useless before the first keyframe.
+            requestRemoteKeyframe()
+            return
+        }
+        val dec = vp8Dec ?: Vp8FrameDecoder().also { vp8Dec = it }
+        val frame = dec.decode(body)
+        if (frame == null) {
+            requestRemoteKeyframe()
+            return
+        }
+        val bmp = runCatching { Yuv.toBitmap(frame) }.getOrNull() ?: return
+        _state.update { it.copy(remoteFrame = bmp) }
+    }
+
+    private fun decodeBoundedJpeg(body: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(body, 0, body.size, bounds)
+        if (!CallMediaFraming.videoDimensionsAllowed(bounds.outWidth, bounds.outHeight)) return null
+        return runCatching { BitmapFactory.decodeByteArray(body, 0, body.size) }.getOrNull()
+    }
+
+    /** Ask the peer for a keyframe (throttled). */
+    private fun requestRemoteKeyframe() {
+        val now = System.currentTimeMillis()
+        if (now - lastKeyReqMs < KEYFRAME_REQ_MIN_MS) return
+        lastKeyReqMs = now
+        sendFramed(CallMediaFraming.TYPE_KEYFRAME_REQ, ByteArray(0))
+    }
+
+    /** The peer cannot decode our video: send a keyframe; repeated asks mean shrink. */
+    private fun onKeyframeRequested() {
+        videoSender?.requestKeyframe()
+        pliHits += 1
+        if (pliHits >= 2) {
+            pliHits = 0
+            adapt?.let { eff = it.bump() }
+        }
+    }
+
+    // --- video capture glue --------------------------------------------------------------
+
+    fun onScreenFrame(frame: I420Frame) {
+        if (_state.value.screen) videoSender?.submit(frame)
+    }
+
+    /** MediaProjection stopped (user, system, or error). */
+    fun onScreenCaptureEnded() {
+        scope.launch(Dispatchers.IO) {
+            if (_state.value.screen) {
+                _state.update { it.copy(screen = false, localFrame = if (it.cam) it.localFrame else null) }
+                if (_state.value.phase == CallPhase.Active) sendMediaState()
+                syncVideoSources()
+            }
+        }
+    }
+
+    /** Start/stop screen sharing; the projection token itself is handed to [CallForegroundService]. */
+    fun setScreenSharing(on: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            if (on) {
+                _state.update { it.copy(screen = true, cam = false) }
+            } else {
+                CallForegroundService.stopProjection(appContext)
+                _state.update { it.copy(screen = false, localFrame = if (it.cam) it.localFrame else null) }
+            }
+            if (_state.value.phase == CallPhase.Active) sendMediaState()
+            syncVideoSources()
+        }
+    }
+
+    /** Turn the camera / sender on or off to match the call state. */
+    private fun syncVideoSources() {
+        val s = _state.value
+        val active = s.phase == CallPhase.Active
+        val wantCam = active && s.cam
+        val wantSend = active && (s.cam || s.screen)
+        val cam = camera ?: CallCamera(appContext) { f ->
+            if (_state.value.cam) videoSender?.submit(f)
+        }.also { camera = it }
+        if (wantCam) {
+            cam.minIntervalMs = 1000L / eff.fps.coerceAtLeast(1)
+            if (!cam.isRunning && !cam.start(s.videoMaxEdge.coerceAtMost(CAMERA_MAX_EDGE))) {
+                Log.w(TAG, "camera unavailable (permission?)")
+                _state.update { it.copy(cam = false, error = "camera") }
+                sendMediaState()
+            }
+        } else if (cam.isRunning) {
+            cam.stop()
+        }
+        if (wantSend) {
+            videoSender?.start()
+        } else {
+            videoSender?.stop()
+            _state.update { if (it.localFrame != null) it.copy(localFrame = null) else it }
+        }
+        if (active) CallForegroundService.sync(appContext)
+    }
+
+    // --- audio ---------------------------------------------------------------------------
+
+    private fun startMedia() {
+        val s = _state.value
+        resetMediaCounters()
+        eff = EffectiveMedia(s.audioBitrateKbps, s.videoBitrateKbps, s.videoFps, s.videoMaxEdge)
+        adapt = AdaptiveController(eff)
+        audioRx = Executors.newSingleThreadExecutor { r -> Thread(r, "call-audio-rx") }
+        videoRx = Executors.newSingleThreadExecutor { r -> Thread(r, "call-video-rx") }
+        videoSender = CallVideoSender(
+            effective = { eff },
+            useVp8 = { usesVp8() },
+            emit = { type, payload -> sendFramed(type, payload, paced = true) },
+            onPreview = { bmp -> _state.update { it.copy(localFrame = bmp) } },
+            onOversize = { adapt?.let { eff = it.bump() } },
+        )
+        if (CallSignals.codecsInclude(s.codecs, "opus")) {
+            if (opusDec == null && OpusFrameDecoder.isSupported()) opusDec = OpusFrameDecoder()
+            if (opusEnc == null && OpusFrameEncoder.isSupported()) {
+                opusEnc = OpusFrameEncoder(s.audioBitrateKbps * 1000)
+            }
+        }
+        startAudioLoop()
+        startPlayback()
+        startStatsLoop()
+        syncVideoSources()
+    }
+
+    private fun resetMediaCounters() {
+        txPackets.set(0); txDropped.set(0); rxPackets.set(0); rxDropped.set(0)
+        audioSeq.set(0)
+        seqTracker.reset()
+        lastRxFrame = ShortArray(0)
+        gotRemoteKey = false
+        lastKeyReqMs = 0L
+        lastDroppedSeen = reassembler.droppedFrames
+        lastVideoBytes = 0L
+        pliHits = 0
+        playout.clear()
+    }
+
+    private fun startStatsLoop() {
+        statsJob?.cancel()
+        statsJob = scope.launch(Dispatchers.IO) {
+            while (isActive && _state.value.phase == CallPhase.Active) {
+                kotlinx.coroutines.delay(STATS_INTERVAL_MS)
+                val ctrl = adapt ?: continue
+                val dropped = reassembler.droppedFrames
+                val rxDrop = rxDropped.get() + dropped
+                val prevLevel = eff.level
+                eff = ctrl.observe(txPackets.get(), txDropped.get(), rxPackets.get(), rxDrop)
+                if (eff.level > prevLevel) videoSender?.requestKeyframe()
+                if (dropped > lastDroppedSeen) {
+                    // Frames were lost on the way: a keyframe resyncs the picture sooner.
+                    lastDroppedSeen = dropped
+                    if (_state.value.remoteCam || _state.value.remoteScreen) requestRemoteKeyframe()
+                }
+                camera?.minIntervalMs = 1000L / eff.fps.coerceAtLeast(1)
+                val sent = videoSender?.bytesSent?.get() ?: 0L
+                val kbps = ((sent - lastVideoBytes) * 8 / STATS_INTERVAL_MS).toInt()
+                lastVideoBytes = sent
+                val e = eff
+                _state.update {
+                    it.copy(
+                        liveEdge = e.edge, liveFps = e.fps, liveKbps = kbps,
+                        txPackets = txPackets.get(), rxPackets = rxPackets.get(),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun startPlayback() {
+        playbackRunning = false
+        playbackThread?.interrupt()
+        playbackRunning = true
+        playbackThread = Thread({
+            val rate = CallAudioFormat.SAMPLE_RATE
+            val outMin = AudioTrack.getMinBufferSize(
+                rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            )
+            val track = runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(rate)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build(),
+                    )
+                    .setBufferSizeInBytes(maxOf(outMin, CallAudioFormat.FRAME_SAMPLES * 2 * 4))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            }.getOrNull()
+            if (track == null) {
+                playbackRunning = false
+                return@Thread
+            }
+            runCatching { track.play() }
+            try {
+                while (playbackRunning) {
+                    val pcm = playout.pull(CallAudioFormat.FRAME_SAMPLES)
+                    if (pcm == null) {
+                        Thread.sleep(5)
+                        continue
+                    }
+                    track.write(pcm, 0, pcm.size) // blocking: paces us at real time
+                }
+            } catch (_: InterruptedException) {
+                // stopped
+            } finally {
+                runCatching { track.stop() }
+                runCatching { track.release() }
+            }
+        }, "call-playback").apply {
+            isDaemon = true
+            start()
         }
     }
 
     private fun startAudioLoop() {
         audioJob?.cancel()
         audioJob = scope.launch(Dispatchers.IO) {
-            val sampleRate = 16_000
-            val frame = sampleRate * 20 / 1000
+            val rate = CallAudioFormat.SAMPLE_RATE
+            val frame = CallAudioFormat.FRAME_SAMPLES
             val minBuf = AudioRecord.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
+                rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             )
             val recorder = runCatching {
                 AudioRecord(
                     MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    sampleRate,
+                    rate,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
-                    maxOf(minBuf, frame * 4),
+                    maxOf(minBuf, frame * 2 * 4),
                 )
             }.getOrNull() ?: return@launch
-            val outMin = AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-            )
-            audioTrack = AudioTrack.Builder()
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(maxOf(outMin, frame * 4))
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            audioTrack?.play()
             runCatching { recorder.startRecording() }
             val buf = ShortArray(frame)
-            val pcmAcc = java.io.ByteArrayOutputStream()
+            var acc = ShortArray(frame * 8)
+            var accN = 0
+            val enc = opusEnc?.takeIf { it.available }
+            val pcmPack = java.io.ByteArrayOutputStream()
             try {
                 while (isActive && _state.value.phase == CallPhase.Active) {
                     val n = recorder.read(buf, 0, buf.size)
                     if (n <= 0) continue
                     val snap = _state.value
-                    if (!snap.mic) continue
-                    val target = remoteSendTarget()
-                    if (target.isEmpty()) {
-                        pcmAcc.reset()
+                    if (!snap.mic || remoteSendTarget().isEmpty()) {
+                        accN = 0
+                        pcmPack.reset()
                         continue
                     }
-                    for (i in 0 until n) {
-                        val v = buf[i].toInt()
-                        pcmAcc.write(v and 0xff)
-                        pcmAcc.write((v shr 8) and 0xff)
+                    if (accN + n > acc.size) acc = acc.copyOf(acc.size * 2)
+                    System.arraycopy(buf, 0, acc, accN, n)
+                    accN += n
+                    while (accN >= frame) {
+                        val chunk = acc.copyOfRange(0, frame)
+                        System.arraycopy(acc, frame, acc, 0, accN - frame)
+                        accN -= frame
+                        if (enc != null) {
+                            for (pkt in enc.encode(chunk)) sendFramed(CallMediaFraming.TYPE_OPUS, pkt)
+                        } else {
+                            // PCM fallback: 3 x 20 ms per datagram, less per-datagram I2P overhead.
+                            pcmPack.write(shortsToPcm16(chunk))
+                            if (pcmPack.size() >= frame * 2 * AUDIO_FRAMES_PER_PACKET) {
+                                val bytes = pcmPack.toByteArray()
+                                pcmPack.reset()
+                                sendFramed(CallMediaFraming.TYPE_PCM16, bytes)
+                            }
+                        }
                     }
-                    // 3 x 20 ms per datagram: fewer packets, less per-datagram I2P overhead.
-                    if (pcmAcc.size() < frame * 2 * AUDIO_FRAMES_PER_PACKET) continue
-                    val bytes = pcmAcc.toByteArray()
-                    pcmAcc.reset()
-                    val dg = datagram ?: continue
-                    sendFramed(dg, target, snap.callId, CallMediaFraming.TYPE_PCM16, bytes)
                 }
             } finally {
                 runCatching { recorder.stop() }
                 runCatching { recorder.release() }
-                runCatching { audioTrack?.stop() }
-                runCatching { audioTrack?.release() }
-                audioTrack = null
             }
         }
+    }
+
+    private fun stopMedia() {
+        audioJob?.cancel()
+        audioJob = null
+        statsJob?.cancel()
+        statsJob = null
+        playbackRunning = false
+        playbackThread?.interrupt()
+        playbackThread = null
+        videoSender?.stop()
+        videoSender = null
+        runCatching { camera?.stop() }
+        camera = null
+        audioRx?.shutdownNow()
+        audioRx = null
+        videoRx?.shutdownNow()
+        videoRx = null
+        videoRxPending.set(0)
+        runCatching { vp8Dec?.release() }
+        vp8Dec = null
+        runCatching { opusDec?.release() }
+        opusDec = null
+        runCatching { opusEnc?.release() }
+        opusEnc = null
+        adapt = null
+        playout.clear()
+        CallForegroundService.stopProjection(appContext)
+        CallForegroundService.stop(appContext)
     }
 
     private fun beginLocalTeardown(reason: String) {
@@ -611,8 +1039,7 @@ class CallController(
     }
 
     private fun teardown(reason: String) {
-        audioJob?.cancel()
-        audioJob = null
+        stopMedia()
         val dg = datagram
         datagram = null
         remoteDestB64 = ""
@@ -625,6 +1052,7 @@ class CallController(
             videoBitrateKbps = _state.value.videoBitrateKbps,
             videoFps = _state.value.videoFps,
             videoMaxEdge = _state.value.videoMaxEdge,
+            preset = _state.value.preset,
         )
         scope.launch(Dispatchers.IO) { runCatching { dg?.close() } }
         Log.i(TAG, "call ended: $reason")
@@ -634,5 +1062,14 @@ class CallController(
         private const val TAG = "CallController"
         private const val REMOTE_DEST_MIN = 80
         private const val AUDIO_FRAMES_PER_PACKET = 3
+        private const val FRAGMENT_PACE_MS = 2L
+        private const val MAX_VIDEO_BACKLOG = 3
+        private const val MAX_AUDIO_BACKLOG = 12
+        private const val INVITE_COOLDOWN_MS = 5_000L
+        private const val INVITE_WINDOW_MS = 60_000L
+        private const val INVITE_BURST = 6
+        private const val KEYFRAME_REQ_MIN_MS = 1_500L
+        private const val STATS_INTERVAL_MS = 2_000L
+        private const val CAMERA_MAX_EDGE = 640
     }
 }

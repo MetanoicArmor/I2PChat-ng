@@ -417,6 +417,7 @@ class ChatBridge(application: Application) : AndroidViewModel(application), Nati
         scope = viewModelScope,
         samHost = { _state.value.router.samHost },
         samPort = { _state.value.router.samPort },
+        tunnelLength = { _state.value.router.tunnelLength },
         sendSignal = { peer, signal ->
             NativeEngine.available && NativeEngine.nativeSendSignal(peer, signal)
         },

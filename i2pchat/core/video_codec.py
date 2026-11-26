@@ -10,10 +10,42 @@ import time
 from fractions import Fraction
 from typing import Optional, Tuple
 
+from i2pchat.core.media_framing import MAX_RX_FRAME_BYTES
+
 logger = logging.getLogger(__name__)
 
+# A call picture larger than this is not something either client sends (the
+# preset ceiling is 720px). Reject it before the decoder allocates the frame.
+MAX_VIDEO_EDGE = 1280
+MAX_VIDEO_PIXELS = 1280 * 720
 
 _VP8_AVAIL: Optional[bool] = None
+
+
+def video_dimensions_allowed(width: int, height: int) -> bool:
+    if width <= 0 or height <= 0:
+        return False
+    if width > MAX_VIDEO_EDGE or height > MAX_VIDEO_EDGE:
+        return False
+    return width * height <= MAX_VIDEO_PIXELS
+
+
+def vp8_keyframe_rejected(payload: bytes) -> bool:
+    """True when ``payload`` must not be handed to a VP8 decoder.
+
+    A keyframe carries its width and height in the uncompressed header (RFC 6386
+    §9.1). Interframes keep the size of the last accepted keyframe, so only an
+    oversized keyframe — or an oversized buffer — is refused here.
+    """
+    if len(payload) > MAX_RX_FRAME_BYTES:
+        return True
+    if len(payload) < 10 or payload[0] & 1:
+        return False
+    if payload[3:6] != b"\x9d\x01\x2a":
+        return True
+    width = payload[6] | ((payload[7] & 0x3F) << 8)
+    height = payload[8] | ((payload[9] & 0x3F) << 8)
+    return not video_dimensions_allowed(width, height)
 
 
 def vp8_available() -> bool:
@@ -156,7 +188,7 @@ class Vp8Decoder:
         """Return (rgb24, width, height) or None."""
         import av
 
-        if not payload:
+        if not payload or vp8_keyframe_rejected(payload):
             return None
         try:
             packet = av.Packet(payload)
@@ -168,6 +200,8 @@ class Vp8Decoder:
             return None
         frame = frames[-1].reformat(format="rgb24")
         w, h = frame.width, frame.height
+        if not video_dimensions_allowed(w, h):
+            return None
         # plane 0 holds tightly packed rgb24 for this format in PyAV
         data = bytes(frame.planes[0])
         need = w * h * 3

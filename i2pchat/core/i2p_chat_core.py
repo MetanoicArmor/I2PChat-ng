@@ -2928,6 +2928,7 @@ class I2PChatCore:
                 send_signal=self.send_control_to_peer,
                 on_event=_on_event,
                 profile=self.profile,
+                tunnel_length=self.tunnel_length,
             )
         return self._call_manager
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
+from i2pchat.core.call_media import opus_available
 from i2pchat.core.call_prefs import CallPrefs, load_call_prefs
 from i2pchat.core.call_signals import (
     CALL_ACCEPT,
@@ -29,21 +30,28 @@ from i2pchat.core.call_signals import (
     intersect_codecs,
     new_call_id,
     parse_call_signal,
+    same_datagram_sender,
+    valid_call_id,
+    valid_datagram_token,
 )
 from i2pchat.core.media_framing import (
+    FLAG_AUDIO_SEQ,
     TYPE_KEYFRAME_REQ,
     TYPE_OPUS,
+    TYPE_PARITY,
     TYPE_PCM16,
     TYPE_VIDEO_DELTA,
     TYPE_VIDEO_JPEG,
     TYPE_VIDEO_KEY,
     FrameReassembler,
     MediaPacket,
+    build_parity_payload,
     decode_media_packet,
     fragment_payload,
 )
 from i2pchat.core.video_codec import vp8_available
 from i2pchat.sam.datagram import DatagramSession, create_datagram_session, naming_lookup_b64
+from i2pchat.storage.contact_book import normalize_peer_address, same_i2p_destination
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +63,21 @@ ACCEPT_SETUP_TIMEOUT_S = 30.0
 REMOTE_DEST_MIN_LEN = 80
 RESOLVE_TIMEOUT_S = 20.0
 RESOLVE_BACKOFF_MAX_S = 30.0
+
+# Call media goes over its own DATAGRAM session; these are its tunnel defaults
+# (hop count follows the router setting, 4 unless the user changed it).
+CALL_TUNNEL_QUANTITY = 3
+CALL_TUNNEL_BACKUP_QUANTITY = 1
+# Spread the fragments of one video frame instead of bursting them into the tunnel.
+VIDEO_FRAGMENT_PACE_S = 0.002
+# One XOR parity packet per fragmented video frame (recovers any single lost fragment).
+VIDEO_PARITY_ENABLED = True
+_VIDEO_PTYPES = (TYPE_VIDEO_KEY, TYPE_VIDEO_DELTA, TYPE_VIDEO_JPEG)
+# A malicious contact can hang up and invite again to force new tunnels.
+# One invite from the same peer every few seconds, and only a handful per minute.
+INVITE_COOLDOWN_S = 5.0
+INVITE_WINDOW_S = 60.0
+INVITE_BURST = 6
 
 
 def is_full_destination(token: str) -> bool:
@@ -115,7 +138,9 @@ class CallState:
 
 def local_offer_codecs() -> str:
     """Advertise codecs this build can actually encode/decode."""
-    parts = ["opus"]
+    parts: list[str] = []
+    if opus_available():
+        parts.append("opus")
     if vp8_available():
         parts.append("vp8")
     parts.append("jpeg")
@@ -133,8 +158,12 @@ class CallSessionManager:
         on_event: Optional[OnCallEvent] = None,
         profile: Optional[str] = None,
         open_datagram: Optional[OpenDatagram] = None,
+        tunnel_length: Optional[int] = None,
+        tunnel_quantity: int = CALL_TUNNEL_QUANTITY,
     ) -> None:
         self.sam_address = sam_address
+        self.tunnel_length = tunnel_length
+        self.tunnel_quantity = tunnel_quantity
         self.send_signal = send_signal
         self.on_event = on_event
         self.profile = profile
@@ -143,6 +172,7 @@ class CallSessionManager:
         self.prefs: CallPrefs = load_call_prefs(profile)
         self._dg: Optional[DatagramSession] = None
         self._seq = 0
+        self._audio_seq = 0
         self._lock = asyncio.Lock()
         self._remote_b64_cache: dict[str, str] = {}
         self._reassembler = FrameReassembler()
@@ -153,6 +183,8 @@ class CallSessionManager:
         self._setup_task: Optional[asyncio.Task[Optional[DatagramSession]]] = None
         self._dg_close_task: Optional[asyncio.Task[None]] = None
         self._generation = 0
+        self._invite_times: list[float] = []
+        self._invite_peer_at: dict[str, float] = {}
 
     def _reset_stats(self) -> None:
         self._tx_packets = 0
@@ -178,6 +210,7 @@ class CallSessionManager:
             "rx_packets": self._rx_packets,
             "rx_frames": self._rx_frames,
             "rx_dropped": self._rx_dropped + self._reassembler.dropped_frames,
+            "rx_recovered": self._reassembler.recovered_frames,
             "remote_resolved": is_full_destination(self.state.remote_datagram_b64),
             "control_closed": bool(dg_stats.get("control_closed", False)),
         }
@@ -213,6 +246,7 @@ class CallSessionManager:
             "media_ready": s.media_ready,
             "codecs": s.codecs,
             "uses_vp8": self.uses_vp8(),
+            "uses_opus": self.uses_opus(),
             "audio_bitrate_kbps": self.prefs.audio_bitrate_kbps,
             "video_bitrate_kbps": self.prefs.video_bitrate_kbps,
             "video_fps": self.prefs.video_fps,
@@ -256,7 +290,6 @@ class CallSessionManager:
             self.prefs = prefs
             peer = self.state.peer
             call_id = self.state.call_id
-            want_video = self.state.want_video
             remote_token = self.state.remote_datagram_b64
             gen = self._generation
             setup = self._setup_task
@@ -293,8 +326,9 @@ class CallSessionManager:
             self.state.local_datagram_b64 = dg.local_destination_b64
             self.state.local_mic = prefs.start_mic
             self.state.local_spk = prefs.start_spk
-            if want_video:
-                self.state.local_cam = True
+            # An incoming video call does not turn the camera on. The user enables
+            # it afterwards; the incoming screen says so before they accept.
+            self.state.local_cam = False
             self.state.max_bitrate = prefs.max_bitrate_bps
             token = datagram_token(dg)
             negotiated = intersect_codecs(local_offer_codecs(), self.state.codecs)
@@ -383,16 +417,45 @@ class CallSessionManager:
         self.state.minimized = bool(minimized)
         self._emit("minimized")
 
+    def _peer_key(self, peer: str) -> str:
+        return normalize_peer_address(peer) or (peer or "").strip().lower()
+
+    def _invite_allowed(self, peer: str) -> bool:
+        now = time.monotonic()
+        self._invite_times = [t for t in self._invite_times if now - t < INVITE_WINDOW_S]
+        if len(self._invite_times) >= INVITE_BURST:
+            return False
+        last = self._invite_peer_at.get(self._peer_key(peer))
+        if last is not None and now - last < INVITE_COOLDOWN_S:
+            return False
+        return True
+
+    def _note_invite(self, peer: str) -> None:
+        now = time.monotonic()
+        self._invite_times.append(now)
+        self._invite_peer_at[self._peer_key(peer)] = now
+        if len(self._invite_peer_at) > 64:
+            cutoff = now - INVITE_WINDOW_S
+            self._invite_peer_at = {
+                key: seen for key, seen in self._invite_peer_at.items() if seen >= cutoff
+            }
+
     async def handle_signal(self, peer: str, payload: str) -> bool:
         parsed = parse_call_signal(payload)
         if parsed is None:
             return False
+        if not valid_call_id(parsed.call_id):
+            return True
         if parsed.kind == CALL_INVITE:
+            if not valid_datagram_token(parsed.datagram_b32):
+                logger.debug("Ignoring call invite with a rejected datagram address")
+                return True
             async with self._lock:
-                if self.state.phase != CallPhase.IDLE:
+                if self.state.phase != CallPhase.IDLE or not self._invite_allowed(peer):
                     busy_peer = peer
                     busy_id = parsed.call_id
                 else:
+                    self._note_invite(peer)
                     self._generation += 1
                     gen = self._generation
                     self._reset_call_runtime()
@@ -415,8 +478,12 @@ class CallSessionManager:
             return True
 
         async with self._lock:
+            if not same_i2p_destination(peer, self.state.peer):
+                return True
             if parsed.kind == CALL_ACCEPT:
                 if self.state.phase != CallPhase.OUTGOING or parsed.call_id != self.state.call_id:
+                    return True
+                if not valid_datagram_token(parsed.datagram_b32):
                     return True
                 self.state.remote_datagram_b64 = parsed.datagram_b32
                 self.state.codecs = intersect_codecs(
@@ -480,6 +547,10 @@ class CallSessionManager:
 
     def uses_vp8(self) -> bool:
         return codecs_include(self.state.codecs, "vp8") and vp8_available()
+
+    def uses_opus(self) -> bool:
+        """Send Opus only when the peer advertised it (Android without an Opus codec does not)."""
+        return codecs_include(self.state.codecs, "opus") and opus_available()
 
     async def _outgoing_setup(
         self,
@@ -580,21 +651,46 @@ class CallSessionManager:
             return
         call_hash = call_id_hash16(self.state.call_id)
         now = int(time.time() * 1000) if ts_ms is None else int(ts_ms)
-        self._seq = (self._seq + 1) & 0xFFFFFFFF
-        frame_seq = self._seq
+        is_audio = ptype in (TYPE_OPUS, TYPE_PCM16)
+        if is_audio:
+            # Dedicated counter: the receiver reads gaps as lost audio frames.
+            self._audio_seq = (self._audio_seq + 1) & 0xFFFFFFFF
+            frame_seq = self._audio_seq
+            flags = FLAG_AUDIO_SEQ
+        else:
+            self._seq = (self._seq + 1) & 0xFFFFFFFF
+            frame_seq = self._seq
+            flags = 0
         chunks = fragment_payload(payload)
         total = len(chunks)
-        for idx, chunk in enumerate(chunks):
-            pkt = MediaPacket(
+        packets = [
+            MediaPacket(
                 call_hash=call_hash,
                 seq=frame_seq,
                 ts_ms=now,
                 ptype=ptype,
-                flags=0,
+                flags=flags,
                 payload=chunk,
                 frag_idx=idx,
                 frag_total=total,
             )
+            for idx, chunk in enumerate(chunks)
+        ]
+        if VIDEO_PARITY_ENABLED and total >= 2 and ptype in _VIDEO_PTYPES:
+            packets.append(
+                MediaPacket(
+                    call_hash=call_hash,
+                    seq=frame_seq,
+                    ts_ms=now,
+                    ptype=TYPE_PARITY,
+                    flags=0,
+                    payload=build_parity_payload(ptype, chunks),
+                )
+            )
+        for i, pkt in enumerate(packets):
+            # Audio is never paced; only multi-packet video frames are spread out.
+            if i and not is_audio:
+                await asyncio.sleep(VIDEO_FRAGMENT_PACE_S)
             try:
                 await dg.send(target, pkt.encode())
                 self._tx_packets += 1
@@ -604,23 +700,22 @@ class CallSessionManager:
                 return
 
     async def _on_datagram(self, from_dest: str, payload: bytes) -> None:
+        if self.state.phase != CallPhase.ACTIVE or not self.state.call_id:
+            self._rx_dropped += 1
+            return
         pkt = decode_media_packet(payload)
         if pkt is None:
             self._rx_dropped += 1
             return
-        if self.state.call_id and pkt.call_hash != call_id_hash16(self.state.call_id):
+        if pkt.call_hash != call_id_hash16(self.state.call_id):
             self._rx_dropped += 1
             return
-        remote = self.state.remote_datagram_b64
-        if (
-            is_full_destination(remote)
-            and from_dest
-            and from_dest != remote
-            and not self._from_mismatch_logged
-        ):
-            # Soft check only: base64 spelling can differ while still being the same peer.
-            self._from_mismatch_logged = True
-            logger.info("DATAGRAM sender differs from advertised destination (%s…)", from_dest[:24])
+        if not same_datagram_sender(from_dest, self.state.remote_datagram_b64):
+            self._rx_dropped += 1
+            if not self._from_mismatch_logged:
+                self._from_mismatch_logged = True
+                logger.info("Dropping call media: sender does not match the peer")
+            return
         self._rx_packets += 1
         if not self._first_rx_logged:
             self._first_rx_logged = True
@@ -635,6 +730,7 @@ class CallSessionManager:
             ptype=pkt.ptype,
             ts_ms=pkt.ts_ms,
             seq=pkt.seq,
+            flags=pkt.flags,
             payload=body,
             from_dest=from_dest,
         )
@@ -644,8 +740,22 @@ class CallSessionManager:
             session_id,
             sam_address=self.sam_address,
             destination=None,
+            options=self._tunnel_options(),
             on_datagram=self._on_datagram,
         )
+
+    def _tunnel_options(self) -> dict[str, str]:
+        opts: dict[str, str] = {}
+        if self.tunnel_length:
+            length = str(max(1, min(7, int(self.tunnel_length))))
+            opts["inbound.length"] = length
+            opts["outbound.length"] = length
+        qty = max(1, int(self.tunnel_quantity))
+        opts["inbound.quantity"] = str(qty)
+        opts["outbound.quantity"] = str(qty)
+        opts["inbound.backupQuantity"] = str(CALL_TUNNEL_BACKUP_QUANTITY)
+        opts["outbound.backupQuantity"] = str(CALL_TUNNEL_BACKUP_QUANTITY)
+        return opts
 
     def _reset_call_runtime(self) -> None:
         self._reset_stats()
@@ -662,16 +772,18 @@ class CallSessionManager:
     def _apply_remote_token(self, token: str, gen: int) -> None:
         """Remember the peer's datagram address; never block the signal path on lookups."""
         token = (token or "").strip()
+        if not valid_datagram_token(token):
+            self.state.remote_datagram_b64 = ""
+            self.state.media_ready = False
+            self._emit("media_pending")
+            return
         self.state.remote_datagram_b64 = token
         if is_full_destination(token):
             self.state.media_ready = True
             return
         self.state.media_ready = False
         if token:
-            logger.info(
-                "Peer sent a short DATAGRAM address (%s…); resolving in background",
-                token[:24],
-            )
+            logger.info("Peer sent a short DATAGRAM address; resolving in background")
             self._schedule_resolve(token, gen)
         self._emit("media_pending")
 
@@ -689,7 +801,10 @@ class CallSessionManager:
             return cached
         # i2pd 3.x resolves ``<b32>.b32.i2p`` itself in DATAGRAM SEND.
         self._schedule_resolve(remote, self._generation)
-        return b32_host_name(remote)
+        target = b32_host_name(remote)
+        if not valid_datagram_token(target):
+            return ""
+        return target
 
     def _schedule_resolve(self, token: str, gen: int) -> None:
         """Single-flight NAMING LOOKUP with exponential backoff."""
@@ -719,9 +834,15 @@ class CallSessionManager:
             self._resolve_failures += 1
             delay = min(RESOLVE_BACKOFF_MAX_S, 2.0 ** self._resolve_failures)
             self._next_resolve_at = time.monotonic() + delay
-            logger.info("DATAGRAM naming lookup for %s failed (%s); retry in %.0fs", name, exc, delay)
+            logger.info(
+                "DATAGRAM naming lookup failed (%s); retry in %.0fs",
+                type(exc).__name__,
+                delay,
+            )
             return
         if self._generation != gen or self.state.remote_datagram_b64 != token:
+            return
+        if not valid_datagram_token(b64):
             return
         self._remote_b64_cache[token] = b64
         self.state.remote_datagram_b64 = b64

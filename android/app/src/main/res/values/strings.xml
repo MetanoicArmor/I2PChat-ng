@@ -283,6 +283,11 @@
     <string name="import_netdb_failed">netDb import failed: %1$s</string>
     <string name="import_netdb_bundled_only">netDb import is only available with the built-in i2pd.</string>
     <string name="import_netdb_read_failed">Could not read the selected ZIP file.</string>
+    <string name="call_channel">Ongoing call</string>
+    <string name="call_notification">Call in progress. Tap to return.</string>
+    <string name="call_camera_permission_denied">Camera permission is required to send video.</string>
+    <string name="call_screen_denied">Screen sharing was not allowed.</string>
+    <string name="call_quality_live">%1$dp · %2$d fps · %3$d kbps · TX %4$d / RX %5$d</string>
     <string name="call_audio">Audio call</string>
     <string name="call_video">Video call</string>
     <string name="call_title">Call</string>
@@ -308,6 +313,8 @@
     <string name="call_reject">Reject</string>
     <string name="call_calling">Calling…</string>
     <string name="call_incoming_from">Incoming call from %1$s</string>
+    <string name="call_incoming_audio">Incoming voice call</string>
+    <string name="call_incoming_video">Incoming video call. Your camera stays off until you turn it on.</string>
     <string name="call_connected">Connected</string>
     <string name="call_in_call">In call</string>
     <string name="call_remote_video">Remote</string>

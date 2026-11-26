@@ -13,8 +13,10 @@ object NotificationHelper {
     const val ROUTER_CHANNEL = "i2pchat_router"
     const val CHAT_CHANNEL = "i2pchat_session"
     const val MESSAGE_CHANNEL = "i2pchat_messages"
+    const val CALL_CHANNEL = "i2pchat_call"
     const val ROUTER_ID = 41
     const val CHAT_ID = 42
+    const val CALL_ID = 43
 
     fun init(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -29,6 +31,13 @@ object NotificationHelper {
             NotificationChannel(
                 CHAT_CHANNEL,
                 context.getString(R.string.chat_channel),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CALL_CHANNEL,
+                context.getString(R.string.call_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ),
         )
@@ -69,6 +78,23 @@ object NotificationHelper {
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setOngoing(true)
+            .setContentIntent(open)
+            .build()
+    }
+
+    fun callNotification(context: Context, text: String): Notification {
+        val open = PendingIntent.getActivity(
+            context,
+            2,
+            openApp(context),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return NotificationCompat.Builder(context, CALL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_notify)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(text)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentIntent(open)
             .build()
     }

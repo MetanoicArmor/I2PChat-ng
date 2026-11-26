@@ -266,6 +266,11 @@
     <string name="import_netdb_failed">Не удалось импортировать netDb: %1$s</string>
     <string name="import_netdb_bundled_only">Импорт netDb доступен только со встроенным i2pd.</string>
     <string name="import_netdb_read_failed">Не удалось прочитать выбранный ZIP-файл.</string>
+    <string name="call_channel">Текущий звонок</string>
+    <string name="call_notification">Идёт звонок. Нажмите, чтобы вернуться.</string>
+    <string name="call_camera_permission_denied">Для отправки видео нужен доступ к камере.</string>
+    <string name="call_screen_denied">Демонстрация экрана не разрешена.</string>
+    <string name="call_quality_live">%1$dp · %2$d кадр/с · %3$d кбит/с · TX %4$d / RX %5$d</string>
     <string name="call_audio">Аудиозвонок</string>
     <string name="call_video">Видеозвонок</string>
     <string name="call_title">Звонок</string>
@@ -291,6 +296,8 @@
     <string name="call_reject">Отклонить</string>
     <string name="call_calling">Вызов…</string>
     <string name="call_incoming_from">Входящий звонок от %1$s</string>
+    <string name="call_incoming_audio">Входящий голосовой звонок</string>
+    <string name="call_incoming_video">Входящий видеозвонок. Камера выключена, пока вы её не включите.</string>
     <string name="call_connected">Соединено</string>
     <string name="call_in_call">В звонке</string>
     <string name="call_remote_video">Собеседник</string>

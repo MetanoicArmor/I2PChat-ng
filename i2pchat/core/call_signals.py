@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+from i2pchat.sam.destination import Destination
 
 CALL_INVITE = "CALL_INVITE"
 CALL_ACCEPT = "CALL_ACCEPT"
@@ -47,6 +50,63 @@ def new_call_id() -> str:
 
 def call_id_hash16(call_id: str) -> bytes:
     return hashlib.sha256(call_id.encode("utf-8")).digest()[:16]
+
+
+# Call ids travel back inside signaling, so the charset stays narrow on purpose.
+_CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+# 52-char b32 host, with or without the ``.b32.i2p`` suffix.
+_B32_TOKEN_RE = re.compile(r"^[a-z2-7]{52}(?:\.b32\.i2p)?$")
+_B32_HOST_RE = re.compile(r"^[a-z2-7]{52}$")
+# I2P base64 (alphabet ``A-Za-z0-9-~`` plus ``=`` padding). No whitespace, no dots.
+_FULL_DEST_RE = re.compile(r"^[A-Za-z0-9~=-]{80,1024}$")
+
+
+def valid_call_id(call_id: str) -> bool:
+    return _CALL_ID_RE.fullmatch(call_id or "") is not None
+
+
+def valid_datagram_token(token: str) -> bool:
+    """True for a b32 host or a full I2P destination safe to place in a SAM command."""
+    text = (token or "").strip()
+    if not text:
+        return False
+    if _B32_TOKEN_RE.fullmatch(text.lower()) is not None:
+        return True
+    return _FULL_DEST_RE.fullmatch(text) is not None
+
+
+def datagram_identity(token: str) -> str:
+    """Bare b32 of a datagram address, or ``""`` when it cannot be derived."""
+    text = (token or "").strip()
+    if not text:
+        return ""
+    host = text.lower()
+    if host.endswith(".b32.i2p"):
+        host = host[: -len(".b32.i2p")]
+    if _B32_HOST_RE.fullmatch(host):
+        return host
+    if len(text) < 80 or "." in text:
+        return ""
+    try:
+        return Destination(text).base32
+    except Exception:
+        return ""
+
+
+def same_datagram_sender(from_dest: str, remote_token: str) -> bool:
+    """True when ``from_dest`` is the destination the peer advertised for this call.
+
+    Identity is the b32 hash, so two base64 spellings of one destination still match.
+    Unparseable tokens (tests, or a peer that echoed the same raw string) match only
+    when the strings are identical.
+    """
+    left = datagram_identity(from_dest)
+    right = datagram_identity(remote_token)
+    if left and right:
+        return left == right
+    advertised = (from_dest or "").strip()
+    expected = (remote_token or "").strip()
+    return bool(advertised) and advertised == expected
 
 
 @dataclass(frozen=True)

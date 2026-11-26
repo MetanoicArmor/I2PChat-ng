@@ -1,8 +1,13 @@
 package org.i2pchat.android
 
 import android.Manifest
-import android.graphics.BitmapFactory
+import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.media.projection.MediaProjectionManager
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -105,6 +110,15 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                         color = Color(0xFFB0B8C4),
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    if (call.phase == CallPhase.Incoming) {
+                        Text(
+                            stringResource(
+                                if (call.wantVideo) R.string.call_incoming_video else R.string.call_incoming_audio,
+                            ),
+                            color = Color(0xFF8A93A3),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.call_settings), tint = Color.White)
@@ -113,16 +127,27 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                     Icon(Icons.Default.CloseFullscreen, contentDescription = stringResource(R.string.call_minimize), tint = Color.White)
                 }
             }
+            if (call.phase == CallPhase.Active && call.liveEdge > 0) {
+                Text(
+                    stringResource(
+                        R.string.call_quality_live,
+                        call.liveEdge, call.liveFps, call.liveKbps,
+                        call.txPackets.toInt(), call.rxPackets.toInt(),
+                    ),
+                    color = Color(0xFF8A93A3),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
             Spacer(Modifier.height(12.dp))
             Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 VideoPane(
                     label = stringResource(R.string.call_remote_video),
-                    jpeg = call.lastRemoteJpeg,
+                    frame = call.remoteFrame,
                     modifier = Modifier.weight(1f),
                 )
                 VideoPane(
                     label = stringResource(R.string.call_local_video),
-                    jpeg = null,
+                    frame = call.localFrame,
                     modifier = Modifier.weight(1f),
                     placeholder = if (call.cam || call.screen) {
                         stringResource(R.string.call_cam_on)
@@ -136,7 +161,7 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(
                         onClick = {
-                            permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA))
+                            permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
                             bridge.acceptCall()
                         },
                         modifier = Modifier.weight(1f),
@@ -188,6 +213,27 @@ fun CallMiniPanel(bridge: ChatBridge, call: CallUiState) {
 
 @Composable
 private fun CallControlsRow(bridge: ChatBridge, call: CallUiState, compact: Boolean) {
+    val context = LocalContext.current
+    val camPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { ok ->
+        if (ok) {
+            bridge.callController.toggleCam()
+        } else {
+            Toast.makeText(context, context.getString(R.string.call_camera_permission_denied), Toast.LENGTH_SHORT).show()
+        }
+    }
+    val screenLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            bridge.callController.setScreenSharing(true)
+            CallForegroundService.startProjection(context, result.resultCode, data)
+        } else {
+            Toast.makeText(context, context.getString(R.string.call_screen_denied), Toast.LENGTH_SHORT).show()
+        }
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -207,11 +253,38 @@ private fun CallControlsRow(bridge: ChatBridge, call: CallUiState, compact: Bool
                 tint = Color.White,
             )
         }
-        IconButton(onClick = { bridge.callController.toggleCam() }) {
-            Icon(Icons.Default.Cameraswitch, contentDescription = stringResource(R.string.call_cam), tint = Color.White)
+        IconButton(
+            onClick = {
+                val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED
+                if (call.cam || hasCam) {
+                    bridge.callController.toggleCam()
+                } else {
+                    camPermLauncher.launch(Manifest.permission.CAMERA)
+                }
+            },
+        ) {
+            Icon(
+                Icons.Default.Cameraswitch,
+                contentDescription = stringResource(R.string.call_cam),
+                tint = if (call.cam) Color(0xFF7CE2A1) else Color.White,
+            )
         }
-        IconButton(onClick = { bridge.callController.toggleScreen() }) {
-            Icon(Icons.Default.ScreenShare, contentDescription = stringResource(R.string.call_screen), tint = Color.White)
+        IconButton(
+            onClick = {
+                if (call.screen) {
+                    bridge.callController.setScreenSharing(false)
+                } else {
+                    val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    screenLauncher.launch(mpm.createScreenCaptureIntent())
+                }
+            },
+        ) {
+            Icon(
+                Icons.Default.ScreenShare,
+                contentDescription = stringResource(R.string.call_screen),
+                tint = if (call.screen) Color(0xFF7CE2A1) else Color.White,
+            )
         }
         if (compact) {
             IconButton(onClick = { bridge.callController.setMinimized(false) }) {
@@ -227,7 +300,7 @@ private fun CallControlsRow(bridge: ChatBridge, call: CallUiState, compact: Bool
 @Composable
 private fun VideoPane(
     label: String,
-    jpeg: ByteArray?,
+    frame: Bitmap?,
     modifier: Modifier = Modifier,
     placeholder: String = label,
 ) {
@@ -237,15 +310,12 @@ private fun VideoPane(
         color = Color(0xFF1A2030),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            val bmp = remember(jpeg) {
-                jpeg?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
-            }
-            if (bmp != null) {
+            if (frame != null && !frame.isRecycled) {
                 Image(
-                    bitmap = bmp.asImageBitmap(),
+                    bitmap = frame.asImageBitmap(),
                     contentDescription = label,
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
+                    contentScale = ContentScale.Fit,
                 )
             } else {
                 Text(placeholder, color = Color(0xFF8A93A3))

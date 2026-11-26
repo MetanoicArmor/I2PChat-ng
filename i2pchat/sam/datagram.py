@@ -26,6 +26,10 @@ OnDatagram = Callable[[str, bytes], Awaitable[None] | None]
 # i2pd reads the whole ``DATAGRAM SEND`` (header line + payload) into an 8192-byte
 # buffer (SAM_SOCKET_BUFFER_SIZE); anything larger stalls the control socket.
 MAX_SEND_PAYLOAD = 7_000
+# Inbound UDP is only the peer's datagram. Cap the size and how many handlers
+# may be queued so a burst cannot pile up unbounded tasks on the event loop.
+MAX_RECV_BYTES = 16_384
+MAX_INFLIGHT_RECV = 32
 
 
 @dataclass(slots=True)
@@ -136,6 +140,7 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
         self.on_datagram: Optional[OnDatagram] = None
         self.owner: Optional["DatagramSession"] = None
         self.transport: Optional[asyncio.DatagramTransport] = None
+        self._inflight = 0
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -146,6 +151,8 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:  # noqa: ANN001
         # i2pd forwards repliable datagrams as: <from_dest>\n<payload>
+        if not data or len(data) > MAX_RECV_BYTES or self._inflight >= MAX_INFLIGHT_RECV:
+            return
         if b"\n" not in data:
             return
         header, payload = data.split(b"\n", 1)
@@ -153,7 +160,7 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
             from_dest = header.decode("ascii").strip()
         except UnicodeDecodeError:
             return
-        if not from_dest:
+        if not from_dest or any(ch.isspace() or ch == "\x00" for ch in from_dest):
             return
         owner = self.owner
         if owner is not None:
@@ -163,7 +170,20 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
             return
         result = cb(from_dest, payload)
         if asyncio.iscoroutine(result):
-            self.loop.create_task(result)
+            self._inflight += 1
+            task = self.loop.create_task(result)
+            task.add_done_callback(self._finish_recv)
+
+    def _finish_recv(self, task: "asyncio.Task[None]") -> None:
+        self._inflight = max(0, self._inflight - 1)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception:
+            return
+        if exc is not None:
+            logger.debug("DATAGRAM receive handler failed", exc_info=exc)
 
     def error_received(self, exc: Exception) -> None:
         logger.debug("DATAGRAM UDP error: %s", exc)

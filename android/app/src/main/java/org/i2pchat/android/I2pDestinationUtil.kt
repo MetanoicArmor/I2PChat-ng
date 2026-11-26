@@ -29,6 +29,33 @@ object I2pDestinationUtil {
         return Base64.decode(std, Base64.DEFAULT)
     }
 
+    /** Bare b32 of a datagram address, or empty when it cannot be derived. */
+    fun datagramIdentity(token: String): String {
+        val text = token.trim()
+        if (text.isEmpty()) return ""
+        var host = text.lowercase()
+        if (host.endsWith(".b32.i2p")) host = host.removeSuffix(".b32.i2p")
+        if (host.length == 52 && host.all { it in "abcdefghijklmnopqrstuvwxyz234567" }) return host
+        if (text.length < 80 || '.' in text) return ""
+        return runCatching {
+            val b32 = normalize(text).base32
+            if (b32.length == 52) b32 else ""
+        }.getOrDefault("")
+    }
+
+    /**
+     * True when [fromDest] is the destination advertised for this call.
+     * Compared by b32, so two base64 spellings of one destination still match.
+     */
+    fun sameDatagramSender(fromDest: String, remoteToken: String): Boolean {
+        val left = datagramIdentity(fromDest)
+        val right = datagramIdentity(remoteToken)
+        if (left.isNotEmpty() && right.isNotEmpty()) return left == right
+        val advertised = fromDest.trim()
+        val expected = remoteToken.trim()
+        return advertised.isNotEmpty() && advertised == expected
+    }
+
     fun encodeI2pB64(data: ByteArray): String {
         val std = Base64.encodeToString(data, Base64.NO_WRAP)
         return std.replace('+', '-').replace('/', '~')

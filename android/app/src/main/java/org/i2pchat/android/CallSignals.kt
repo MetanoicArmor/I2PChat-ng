@@ -1,9 +1,15 @@
 package org.i2pchat.android
 
 import java.security.MessageDigest
-import kotlin.random.Random
+import java.security.SecureRandom
 
 object CallSignals {
+    private val secureRandom = SecureRandom()
+    private val callIdPattern = Regex("^[A-Za-z0-9._:-]{1,80}$")
+    private val b32Pattern = Regex("^[a-z2-7]{52}(?:\\.b32\\.i2p)?$")
+    private val namingPattern = Regex("^[a-z2-7]{52}\\.b32\\.i2p$")
+    private val fullDestPattern = Regex("^[A-Za-z0-9~=-]{80,1024}$")
+
     const val INVITE = "CALL_INVITE"
     const val ACCEPT = "CALL_ACCEPT"
     const val REJECT = "CALL_REJECT"
@@ -12,8 +18,10 @@ object CallSignals {
     const val DEFAULT_CODECS = "opus,vp8,jpeg"
 
     fun localOfferCodecs(): String {
-        val parts = mutableListOf("opus")
-        if (CallVp8Encoder.isSupported()) parts.add("vp8")
+        // Offer only what we can *decode*: the peer picks its encoder from this list.
+        val parts = mutableListOf<String>()
+        if (OpusFrameDecoder.isSupported()) parts.add("opus")
+        if (Vp8FrameDecoder.isSupported()) parts.add("vp8")
         parts.add("jpeg")
         return parts.joinToString(",")
     }
@@ -32,7 +40,34 @@ object CallSignals {
     fun codecsInclude(codecs: String, name: String): Boolean =
         codecs.split(",").any { it.trim().equals(name, ignoreCase = true) }
 
-    fun newCallId(): String = "${System.currentTimeMillis() / 1000}-${Random.nextBytes(8).joinToString("") { "%02x".format(it) }}"
+    fun newCallId(): String {
+        val bytes = ByteArray(8)
+        secureRandom.nextBytes(bytes)
+        val hex = bytes.joinToString("") { "%02x".format(it) }
+        return "${System.currentTimeMillis() / 1000}-$hex"
+    }
+
+    fun isCallId(id: String): Boolean = callIdPattern.matches(id)
+
+    /** b32 host or full I2P destination, safe to place in a SAM command. */
+    fun isDatagramToken(token: String): Boolean {
+        val text = token.trim()
+        if (text.isEmpty()) return false
+        if (b32Pattern.matches(text.lowercase())) return true
+        return fullDestPattern.matches(text)
+    }
+
+    /** Name passed to ``NAMING LOOKUP`` — only a ``<b32>.b32.i2p`` host. */
+    fun isNamingName(name: String): Boolean = namingPattern.matches(name.trim().lowercase())
+
+    /** Chat peer ids are base32 hosts; the ``.b32.i2p`` suffix is optional. */
+    fun samePeerKey(raw: String): String = raw.trim().lowercase().removeSuffix(".b32.i2p")
+
+    fun samePeer(left: String, right: String): Boolean {
+        val a = samePeerKey(left)
+        val b = samePeerKey(right)
+        return a.isNotEmpty() && a == b
+    }
 
     fun callIdHash16(callId: String): ByteArray {
         val dig = MessageDigest.getInstance("SHA-256").digest(callId.toByteArray(Charsets.UTF_8))

@@ -267,6 +267,116 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mgr.stats()["rx_dropped"], 1)
         await mgr.hangup()
 
+    async def test_accept_from_another_peer_does_not_redirect_media(self) -> None:
+        mgr, dg, _, _ = await self._active_outgoing("R" * 100)
+        # _active_outgoing already completed the real accept. A second accept
+        # from someone else must not move the call.
+        evil = "E" * 120
+        await mgr.handle_signal("mallory.b32.i2p", CallAccept(mgr.state.call_id, "opus,jpeg", 1, evil).encode())
+        self.assertEqual(mgr.state.phase, CallPhase.ACTIVE)
+        self.assertNotEqual(mgr.state.remote_datagram_b64, evil)
+        await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+        self.assertTrue(dg.sent)
+        self.assertNotEqual(dg.sent[-1][0], evil)
+        await mgr.hangup()
+
+    async def test_hangup_from_another_peer_is_ignored(self) -> None:
+        from i2pchat.core.call_signals import CallHangup
+
+        mgr, _, _, _ = await self._active_outgoing("R" * 100)
+        await mgr.handle_signal("mallory.b32.i2p", CallHangup(mgr.state.call_id).encode())
+        self.assertEqual(mgr.state.phase, CallPhase.ACTIVE)
+        await mgr.hangup()
+
+    async def test_datagram_from_another_destination_is_dropped(self) -> None:
+        mgr, _, _, events = await self._active_outgoing("R" * 100)
+        pkt = MediaPacket(
+            call_hash=call_id_hash16(mgr.state.call_id),
+            seq=1,
+            ts_ms=1,
+            ptype=TYPE_PCM16,
+            flags=0,
+            payload=b"\x00" * 10,
+        )
+        await mgr._on_datagram("S" * 100, pkt.encode())
+        self.assertFalse(any(k == "media_packet" for k, _ in events))
+        await mgr.hangup()
+
+    async def test_media_before_accept_is_dropped(self) -> None:
+        signals: list[str] = []
+
+        async def open_dg(session_id: str) -> FakeDatagram:
+            return FakeDatagram()
+
+        async def send_signal(peer: str, body: str) -> bool:
+            signals.append(body)
+            return True
+
+        events: list[tuple[str, dict]] = []
+        mgr = CallSessionManager(
+            sam_address=("127.0.0.1", 7656),
+            send_signal=send_signal,
+            on_event=lambda k, p: events.append((k, p)),
+            open_datagram=open_dg,  # type: ignore[arg-type]
+        )
+        invite = CallInvite("cid-9", True, True, "opus,jpeg", 320000, "R" * 100)
+        await mgr.handle_signal("peer.b32.i2p", invite.encode())
+        self.assertEqual(mgr.state.phase, CallPhase.INCOMING)
+        pkt = MediaPacket(
+            call_hash=call_id_hash16("cid-9"),
+            seq=1,
+            ts_ms=1,
+            ptype=TYPE_PCM16,
+            flags=0,
+            payload=b"\x00" * 8,
+        )
+        await mgr._on_datagram("R" * 100, pkt.encode())
+        self.assertFalse(any(k == "media_packet" for k, _ in events))
+        state = await mgr.accept_incoming()
+        self.assertFalse(state.local_cam)
+        self.assertTrue(state.want_video)
+        await mgr.hangup()
+
+    async def test_bad_invite_does_not_open_tunnels_and_repeat_is_busy(self) -> None:
+        opened = 0
+        signals: list[str] = []
+
+        async def open_dg(session_id: str) -> FakeDatagram:
+            nonlocal opened
+            opened += 1
+            return FakeDatagram()
+
+        async def send_signal(peer: str, body: str) -> bool:
+            signals.append(body)
+            return True
+
+        mgr = CallSessionManager(
+            sam_address=("127.0.0.1", 7656),
+            send_signal=send_signal,
+            open_datagram=open_dg,  # type: ignore[arg-type]
+        )
+        poisoned = CallInvite("cid-3", True, False, "opus,jpeg", 1, "bad\nSESSION")
+        await mgr.handle_signal("peer.b32.i2p", poisoned.encode())
+        self.assertEqual(mgr.state.phase, CallPhase.IDLE)
+        self.assertEqual(opened, 0)
+
+        ok = CallInvite("cid-4", True, False, "opus,jpeg", 1, "R" * 100)
+        await mgr.handle_signal("peer.b32.i2p", ok.encode())
+        self.assertEqual(mgr.state.phase, CallPhase.INCOMING)
+        for _ in range(50):
+            if opened:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(opened, 1)
+        await mgr.reject_incoming()
+        self.assertEqual(mgr.state.phase, CallPhase.IDLE)
+
+        again = CallInvite("cid-5", True, False, "opus,jpeg", 1, "R" * 100)
+        await mgr.handle_signal("peer.b32.i2p", again.encode())
+        self.assertEqual(mgr.state.phase, CallPhase.IDLE)
+        self.assertTrue(any(s.endswith("|busy") for s in signals))
+        self.assertEqual(opened, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

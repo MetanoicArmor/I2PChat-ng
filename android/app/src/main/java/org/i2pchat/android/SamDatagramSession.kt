@@ -41,6 +41,7 @@ class SamDatagramSession private constructor(
                 try {
                     val packet = DatagramPacket(buf, buf.size)
                     udp.receive(packet)
+                    if (packet.length <= 0 || packet.length > MAX_RECV_BYTES) continue
                     val data = packet.data.copyOf(packet.length)
                     val nl = data.indexOf('\n'.code.toByte())
                     if (nl <= 0) continue
@@ -57,6 +58,7 @@ class SamDatagramSession private constructor(
     fun send(destinationB64: String, payload: ByteArray) {
         if (closed.get()) return
         require(payload.size <= MAX_SEND_PAYLOAD) { "DATAGRAM payload too large: ${payload.size}" }
+        require(CallSignals.isDatagramToken(destinationB64)) { "DATAGRAM destination rejected" }
         val header = "DATAGRAM SEND SIZE=${payload.size} DESTINATION=$destinationB64\n"
             .toByteArray(StandardCharsets.US_ASCII)
         synchronized(sendLock) {
@@ -76,12 +78,15 @@ class SamDatagramSession private constructor(
     companion object {
         // i2pd reads a whole DATAGRAM SEND into an 8192-byte buffer (SAM_SOCKET_BUFFER_SIZE).
         const val MAX_SEND_PAYLOAD = 7_000
+        const val MAX_RECV_BYTES = 16 * 1024
 
         fun open(
             sessionId: String,
             samHost: String,
             samPort: Int,
             onDatagram: (String, ByteArray) -> Unit,
+            /** Extra I2CP options for SESSION CREATE, e.g. `inbound.length`. */
+            options: Map<String, String> = emptyMap(),
         ): SamDatagramSession {
             val udp = DatagramSocket(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
             val localUdpPort = udp.localPort
@@ -93,9 +98,12 @@ class SamDatagramSession private constructor(
             out.write("HELLO VERSION MIN=3.0 MAX=3.2\n".toByteArray(StandardCharsets.US_ASCII))
             out.flush()
             expectOk(reader.readLine(), "HELLO")
+            val extra = options.entries
+                .filter { it.key.isNotBlank() && it.value.none { c -> c.isWhitespace() } }
+                .joinToString("") { " ${it.key}=${it.value}" }
             val create =
                 "SESSION CREATE STYLE=DATAGRAM ID=$sessionId DESTINATION=TRANSIENT " +
-                    "SIGNATURE_TYPE=7 HOST=127.0.0.1 PORT=$localUdpPort\n"
+                    "SIGNATURE_TYPE=7 HOST=127.0.0.1 PORT=$localUdpPort$extra\n"
             out.write(create.toByteArray(StandardCharsets.US_ASCII))
             out.flush()
             val status = reader.readLine() ?: throw IllegalStateException("Empty SESSION STATUS")
@@ -139,7 +147,8 @@ class SamDatagramSession private constructor(
                 out.write("HELLO VERSION MIN=3.0 MAX=3.2\n".toByteArray(StandardCharsets.US_ASCII))
                 out.flush()
                 expectOk(reader.readLine(), "HELLO")
-                val safe = name.trim().replace(" ", "")
+                val safe = name.trim()
+                require(CallSignals.isNamingName(safe)) { "NAMING LOOKUP name rejected" }
                 out.write("NAMING LOOKUP NAME=$safe\n".toByteArray(StandardCharsets.US_ASCII))
                 out.flush()
                 val line = reader.readLine() ?: throw IllegalStateException("Empty NAMING LOOKUP reply")

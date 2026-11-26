@@ -21,12 +21,14 @@ from i2pchat.core.call_media import (
 )
 from i2pchat.core.call_prefs import (
     PRESET_IDS,
-    PRESET_NORMAL,
+    PRESET_MAX,
+    PRESET_VALUES,
     CallPrefs,
     load_call_prefs,
     save_call_prefs,
 )
 from i2pchat.core.media_framing import (
+    FLAG_AUDIO_SEQ,
     TYPE_KEYFRAME_REQ,
     TYPE_OPUS,
     TYPE_PCM16,
@@ -56,6 +58,15 @@ logger = logging.getLogger(__name__)
 PCM_FRAMES_PER_PACKET = 3  # 3 x 20 ms PCM per DATAGRAM
 PLAY_PREBUFFER_MS = 120
 PLAY_MAX_BUFFER_MS = 500
+# Adaptive jitter buffer: grows after underruns, relaxes after a calm stretch.
+PLAY_PREBUFFER_MAX_MS = 260
+PLAY_PREBUFFER_STEP_UP_MS = 40
+PLAY_PREBUFFER_STEP_DOWN_MS = 20
+PLAY_PREBUFFER_CALM_S = 20.0
+# Opus expected-loss hint (drives in-band FEC redundancy).
+OPUS_LOSS_BASE_PCT = 15
+OPUS_LOSS_PER_LEVEL_PCT = 4
+OPUS_LOSS_MAX_PCT = 35
 
 # Радиусы как у главного чата (ChatSurface / menus / buttons): macOS-style chrome.
 # Кратно сетке UI: surface 14, content 12, controls 9.
@@ -65,6 +76,8 @@ CALL_CONTROL_RADIUS = 9
 
 
 class CallSettingsDialog(QtWidgets.QDialog):
+    """Preset-first call quality dialog: pick a mode, tweak details if needed."""
+
     def __init__(
         self,
         prefs: CallPrefs,
@@ -77,95 +90,265 @@ class CallSettingsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setObjectName("CallSettingsDialog")
         self.setWindowTitle(tr("call.settings"))
+        self.setMinimumWidth(440)
         self._prefs = prefs.clamp()
-        form = QtWidgets.QFormLayout(self)
-        self._preset = QtWidgets.QComboBox(self)
         self._preset_ids = list(PRESET_IDS)
+        self._updating = False
+        self._selected_preset = (
+            self._prefs.preset if self._prefs.preset in self._preset_ids else PRESET_MAX
+        )
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        lead = QtWidgets.QLabel(tr("call.settings_lead"), self)
+        lead.setObjectName("CallSettingsLead")
+        lead.setWordWrap(True)
+        root.addWidget(lead)
+
+        presets_row = QtWidgets.QHBoxLayout()
+        presets_row.setSpacing(8)
+        self._preset_group = QtWidgets.QButtonGroup(self)
+        self._preset_group.setExclusive(True)
+        self._preset_btns: dict[str, QtWidgets.QPushButton] = {}
         for pid in self._preset_ids:
-            self._preset.addItem(tr(f"call.preset.{pid}"), pid)
-        idx = self._preset_ids.index(self._prefs.preset) if self._prefs.preset in self._preset_ids else 1
-        self._preset.setCurrentIndex(idx)
-        self._preset.currentIndexChanged.connect(self._on_preset_changed)
-        self._audio = QtWidgets.QSpinBox(self)
-        self._audio.setRange(12, 64)
-        self._audio.setValue(self._prefs.audio_bitrate_kbps)
-        self._audio.setSuffix(" kbps")
-        self._video = QtWidgets.QSpinBox(self)
-        self._video.setRange(50, 800)
-        self._video.setValue(self._prefs.video_bitrate_kbps)
-        self._video.setSuffix(" kbps")
-        self._fps = QtWidgets.QSpinBox(self)
-        self._fps.setRange(3, 20)
-        self._fps.setValue(self._prefs.video_fps)
-        self._edge = QtWidgets.QSpinBox(self)
-        self._edge.setRange(160, 720)
-        self._edge.setValue(self._prefs.video_max_edge)
-        form.addRow(tr("call.preset"), self._preset)
-        form.addRow(tr("call.audio_bitrate"), self._audio)
-        form.addRow(tr("call.video_bitrate"), self._video)
-        form.addRow(tr("call.video_fps"), self._fps)
-        form.addRow(tr("call.video_edge"), self._edge)
+            btn = QtWidgets.QPushButton(tr(f"call.preset.{pid}"), self)
+            btn.setObjectName("CallPresetButton")
+            btn.setCheckable(True)
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.setMinimumHeight(40)
+            btn.setProperty("presetId", pid)
+            self._preset_group.addButton(btn)
+            self._preset_btns[pid] = btn
+            presets_row.addWidget(btn, 1)
+        self._preset_group.buttonClicked.connect(self._on_preset_button)
+        root.addLayout(presets_row)
+
+        self._preset_desc = QtWidgets.QLabel("", self)
+        self._preset_desc.setObjectName("CallSettingsDesc")
+        self._preset_desc.setWordWrap(True)
+        root.addWidget(self._preset_desc)
+
+        self._summary = QtWidgets.QLabel("", self)
+        self._summary.setObjectName("CallSettingsSummary")
+        self._summary.setWordWrap(True)
+        root.addWidget(self._summary)
+
+        self._advanced = QtWidgets.QToolButton(self)
+        self._advanced.setObjectName("CallSettingsAdvancedToggle")
+        self._advanced.setText(tr("call.settings_advanced"))
+        self._advanced.setCheckable(True)
+        self._advanced.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._advanced.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self._advanced.setAutoRaise(True)
+        self._advanced.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._advanced.toggled.connect(self._on_advanced_toggled)
+        root.addWidget(self._advanced, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
+        self._advanced_box = QtWidgets.QWidget(self)
+        self._advanced_box.setObjectName("CallSettingsAdvanced")
+        adv = QtWidgets.QFormLayout(self._advanced_box)
+        adv.setContentsMargins(0, 4, 0, 0)
+        adv.setHorizontalSpacing(14)
+        adv.setVerticalSpacing(10)
+        adv.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self._audio = self._make_spin(12, 64, self._prefs.audio_bitrate_kbps, " kbps", 4)
+        self._video = self._make_spin(50, 800, self._prefs.video_bitrate_kbps, " kbps", 25)
+        self._fps = self._make_spin(3, 20, self._prefs.video_fps, "", 1)
+        self._edge = self._make_spin(160, 720, self._prefs.video_max_edge, " px", 40)
+        for spin in (self._audio, self._video, self._fps, self._edge):
+            spin.valueChanged.connect(self._on_manual_changed)
+        adv.addRow(tr("call.audio_bitrate_short"), self._audio)
+        adv.addRow(tr("call.video_bitrate_short"), self._video)
+        adv.addRow(tr("call.video_fps_short"), self._fps)
+        adv.addRow(tr("call.video_edge_short"), self._edge)
+        self._advanced_box.hide()
+        root.addWidget(self._advanced_box)
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
+        ok_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        cancel_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        if ok_btn is not None:
+            ok_btn.setText(tr("call.settings_ok"))
+            ok_btn.setDefault(True)
+        if cancel_btn is not None:
+            cancel_btn.setText(tr("call.settings_cancel"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        root.addWidget(buttons)
+
+        # Open with a named preset applied so summary matches the buttons.
+        if not self._values_match_preset(self._selected_preset):
+            # Keep user's custom numbers; still highlight nearest preset button.
+            pass
+        self._select_preset_button(self._selected_preset)
+        if self._values_match_preset(self._selected_preset):
+            self._apply_preset_values(self._selected_preset)
+        else:
+            self._advanced.setChecked(True)
+        self._refresh_copy()
         self.apply_theme(theme_id)
 
-    def _on_preset_changed(self, index: int) -> None:
-        if index < 0 or index >= len(self._preset_ids):
+    def _make_spin(
+        self, lo: int, hi: int, value: int, suffix: str, step: int
+    ) -> QtWidgets.QSpinBox:
+        spin = QtWidgets.QSpinBox(self)
+        spin.setRange(lo, hi)
+        spin.setValue(value)
+        spin.setSingleStep(step)
+        if suffix:
+            spin.setSuffix(suffix)
+        spin.setMinimumHeight(34)
+        spin.setMinimumWidth(120)
+        spin.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        return spin
+
+    def _select_preset_button(self, preset_id: str) -> None:
+        btn = self._preset_btns.get(preset_id)
+        if btn is not None:
+            btn.setChecked(True)
+
+    def _on_preset_button(self, button: QtWidgets.QAbstractButton) -> None:
+        pid = str(button.property("presetId") or PRESET_MAX)
+        self._selected_preset = pid
+        self._apply_preset_values(pid)
+        self._refresh_copy()
+
+    def _apply_preset_values(self, preset_id: str) -> None:
+        tmp = CallPrefs().apply_preset(preset_id)
+        self._updating = True
+        try:
+            self._audio.setValue(tmp.audio_bitrate_kbps)
+            self._video.setValue(tmp.video_bitrate_kbps)
+            self._fps.setValue(tmp.video_fps)
+            self._edge.setValue(tmp.video_max_edge)
+        finally:
+            self._updating = False
+
+    def _on_manual_changed(self, _value: int = 0) -> None:
+        if self._updating:
             return
-        tmp = CallPrefs().apply_preset(self._preset_ids[index])
-        self._audio.setValue(tmp.audio_bitrate_kbps)
-        self._video.setValue(tmp.video_bitrate_kbps)
-        self._fps.setValue(tmp.video_fps)
-        self._edge.setValue(tmp.video_max_edge)
+        # Keep the closest named preset as the adapt ceiling label when possible.
+        for pid in self._preset_ids:
+            if self._values_match_preset(pid):
+                self._selected_preset = pid
+                self._select_preset_button(pid)
+                break
+        self._refresh_copy()
+
+    def _on_advanced_toggled(self, on: bool) -> None:
+        self._advanced_box.setVisible(on)
+        self._advanced.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if on else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.adjustSize()
+
+    def _values_match_preset(self, preset_id: str) -> bool:
+        vals = PRESET_VALUES.get(preset_id)
+        if not vals:
+            return False
+        return (
+            self._audio.value() == vals["audio_bitrate_kbps"]
+            and self._video.value() == vals["video_bitrate_kbps"]
+            and self._fps.value() == vals["video_fps"]
+            and self._edge.value() == vals["video_max_edge"]
+        )
+
+    def _refresh_copy(self) -> None:
+        pid = self._selected_preset
+        if self._values_match_preset(pid):
+            self._preset_desc.setText(tr(f"call.preset.{pid}.desc"))
+        else:
+            self._preset_desc.setText(tr("call.preset.custom.desc"))
+        self._summary.setText(
+            tr(
+                "call.settings_summary",
+                edge=self._edge.value(),
+                fps=self._fps.value(),
+                video=self._video.value(),
+                audio=self._audio.value(),
+            )
+        )
 
     def apply_theme(self, theme_id: str) -> None:
         night = (theme_id or "night") == "night"
         if night:
-            bg, fg, field, border, btn, btn_fg = (
+            bg, fg, muted, field, border, btn, btn_fg, accent, accent_fg = (
                 "#141417",
                 "#f5f5f7",
+                "#9aa3b2",
                 "#1f1f23",
                 "#3d4450",
                 "#2a2d36",
                 "#f5f5f7",
+                "#0a84ff",
+                "#ffffff",
             )
         else:
-            bg, fg, field, border, btn, btn_fg = (
+            bg, fg, muted, field, border, btn, btn_fg, accent, accent_fg = (
                 "#f5f6f8",
                 "#1d1d1f",
+                "#626875",
                 "#ffffff",
                 "#d0d5de",
                 "#e2e7f0",
                 "#1d1d1f",
+                "#0a84ff",
+                "#ffffff",
             )
+        r = CALL_CONTROL_RADIUS
         self.setStyleSheet(
             f"QDialog#CallSettingsDialog {{"
-            f"  background-color: {bg}; color: {fg};"
-            f"  border-radius: {CALL_SURFACE_RADIUS}px; }}"
+            f"  background-color: {bg}; color: {fg}; }}"
             f"QDialog#CallSettingsDialog QLabel {{ color: {fg}; background: transparent; }}"
-            f"QDialog#CallSettingsDialog QSpinBox,"
-            f"QDialog#CallSettingsDialog QComboBox {{"
+            f"QDialog#CallSettingsDialog QLabel#CallSettingsLead,"
+            f"QDialog#CallSettingsDialog QLabel#CallSettingsDesc {{"
+            f"  color: {muted}; font-size: 12px; }}"
+            f"QDialog#CallSettingsDialog QLabel#CallSettingsSummary {{"
+            f"  color: {fg}; font-size: 13px; font-weight: 600;"
+            f"  padding: 10px 12px; background: {field}; border: 1px solid {border};"
+            f"  border-radius: {r}px; }}"
+            f"QDialog#CallSettingsDialog QPushButton#CallPresetButton {{"
             f"  background: {field}; color: {fg}; border: 1px solid {border};"
-            f"  border-radius: {CALL_CONTROL_RADIUS}px; padding: 6px 8px; min-height: 28px; }}"
+            f"  border-radius: {r}px; padding: 8px 10px; font-weight: 600; }}"
+            f"QDialog#CallSettingsDialog QPushButton#CallPresetButton:hover {{"
+            f"  border-color: {accent}; }}"
+            f"QDialog#CallSettingsDialog QPushButton#CallPresetButton:checked {{"
+            f"  background: {accent}; color: {accent_fg}; border-color: {accent}; }}"
+            f"QDialog#CallSettingsDialog QToolButton#CallSettingsAdvancedToggle {{"
+            f"  color: {muted}; background: transparent; border: none;"
+            f"  padding: 4px 0; font-size: 12px; }}"
+            f"QDialog#CallSettingsDialog QSpinBox {{"
+            f"  background: {field}; color: {fg}; border: 1px solid {border};"
+            f"  border-radius: {r}px; padding: 4px 10px 4px 8px; min-height: 32px; }}"
             f"QDialog#CallSettingsDialog QSpinBox::up-button,"
             f"QDialog#CallSettingsDialog QSpinBox::down-button {{"
-            f"  background: {btn}; width: 18px; }}"
-            f"QDialog#CallSettingsDialog QComboBox QAbstractItemView {{"
-            f"  background: {field}; color: {fg}; selection-background-color: {btn}; }}"
+            f"  subcontrol-origin: border; background: {btn}; border-left: 1px solid {border};"
+            f"  width: 26px; }}"
+            f"QDialog#CallSettingsDialog QSpinBox::up-button {{"
+            f"  subcontrol-position: top right; border-top-right-radius: {r}px; }}"
+            f"QDialog#CallSettingsDialog QSpinBox::down-button {{"
+            f"  subcontrol-position: bottom right; border-bottom-right-radius: {r}px; }}"
+            f"QDialog#CallSettingsDialog QSpinBox::up-button:hover,"
+            f"QDialog#CallSettingsDialog QSpinBox::down-button:hover {{"
+            f"  background: {border}; }}"
             f"QDialog#CallSettingsDialog QPushButton {{"
             f"  background: {btn}; color: {btn_fg}; border: none;"
-            f"  border-radius: {CALL_CONTROL_RADIUS}px; padding: 8px 14px; min-height: 28px; }}"
+            f"  border-radius: {r}px; padding: 8px 16px; min-height: 30px; }}"
             f"QDialog#CallSettingsDialog QPushButton:hover {{ background: {border}; }}"
+            f"QDialog#CallSettingsDialog QPushButton:default {{"
+            f"  background: {accent}; color: {accent_fg}; }}"
         )
 
     def result_prefs(self) -> CallPrefs:
-        pid = self._preset.currentData()
-        self._prefs.preset = str(pid or PRESET_NORMAL)
+        self._prefs.preset = str(self._selected_preset or PRESET_MAX)
         self._prefs.audio_bitrate_kbps = self._audio.value()
         self._prefs.video_bitrate_kbps = self._video.value()
         self._prefs.video_fps = self._fps.value()
@@ -401,7 +584,7 @@ class CallMiniBar(QtWidgets.QFrame):
         elif self._phase == "outgoing":
             self._status.setText(tr("call.calling"))
         elif self._phase == "incoming":
-            self._status.setText(tr("call.incoming"))
+            self._status.setText(tr("call.incoming_audio"))
         elif self._phase == "active":
             self._status.setText(tr("call.in_call"))
         else:
@@ -611,6 +794,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._pcm_out_acc = bytearray()
         self._play_buf = bytearray()
         self._play_started = False
+        self._prebuf_ms = PLAY_PREBUFFER_MS
+        self._prebuf_changed_at = 0.0
         self._last_play_data = 0.0
         self._media_epoch = 0
         self._mic_denied = False
@@ -747,6 +932,12 @@ class CallOverlayWidget(QtWidgets.QWidget):
                 if self._effective.level > prev_level:
                     self._force_vp8_key = True
                 self._sync_screen_timer_interval()
+                self._codec.set_loss_hint(
+                    min(
+                        OPUS_LOSS_MAX_PCT,
+                        OPUS_LOSS_BASE_PCT + OPUS_LOSS_PER_LEVEL_PCT * self._effective.level,
+                    )
+                )
         tx = int(st.get("tx_packets") or 0)
         rx = int(st.get("rx_packets") or 0)
         base = self._status_base
@@ -863,7 +1054,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
 
     def show_incoming(self, state: dict[str, Any]) -> None:
         self.show_overlay()
-        self._set_status(tr("call.incoming"))
+        self._set_status(self._incoming_text(bool(state.get("want_video"))))
         self._accept_btn.show()
         self._reject_btn.show()
         self._hangup_btn.hide()
@@ -920,7 +1111,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             if phase == "outgoing":
                 status = tr("call.calling")
             elif phase == "incoming":
-                status = tr("call.incoming")
+                status = self._incoming_text(bool(snap.get("want_video")))
             elif snap.get("media_ready"):
                 status = tr("call.in_call")
             else:
@@ -1039,6 +1230,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             except Exception:
                 phase = ""
             if phase == "incoming":
+                self._set_status(self._incoming_text(bool(state.get("want_video"))))
                 self._accept_btn.show()
                 self._reject_btn.show()
                 self._hangup_btn.hide()
@@ -1129,7 +1321,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._set_status(tr("call.calling"))
             mini_status = tr("call.calling")
         elif phase == "incoming":
-            mini_status = tr("call.incoming")
+            mini_status = self._incoming_text(bool(state.get("want_video")))
+            self._set_status(mini_status)
         elif phase == "active":
             mini_status = (
                 tr("call.in_call") if state.get("media_ready") else tr("call.connecting")
@@ -1405,6 +1598,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._pcm_out_acc.clear()
         self._play_buf.clear()
         self._play_started = False
+        self._prebuf_ms = PLAY_PREBUFFER_MS
+        self._prebuf_changed_at = 0.0
         self._video_inflight = False
 
     def _poll_audio(self) -> None:
@@ -1425,7 +1620,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
         while len(self._pcm_buf) >= frame_bytes:
             chunk = bytes(self._pcm_buf[:frame_bytes])
             del self._pcm_buf[:frame_bytes]
-            encoded, is_opus = self._codec.encode(chunk)
+            encoded, is_opus = self._codec.encode(
+                chunk, allow_opus=bool(snap.get("uses_opus", True))
+            )
             if is_opus:
                 self._spawn(self._manager.send_audio_frame(encoded, opus=True))
                 continue
@@ -1451,15 +1648,30 @@ class CallOverlayWidget(QtWidgets.QWidget):
         io = self._audio_out_io
         if sink is None or io is None:
             return
+        now = time.monotonic()
         if not self._play_started:
-            if len(self._play_buf) < SAMPLE_RATE * 2 * PLAY_PREBUFFER_MS // 1000:
+            if len(self._play_buf) < SAMPLE_RATE * 2 * self._prebuf_ms // 1000:
                 return
             self._play_started = True
         if not self._play_buf:
-            # Starved for a while: re-prebuffer so playback does not stutter.
-            if time.monotonic() - self._last_play_data > 0.3:
+            # Starved for a while: re-prebuffer so playback does not stutter, and
+            # keep a deeper buffer next time (the path is jittery).
+            if now - self._last_play_data > 0.3:
                 self._play_started = False
+                if self._prebuf_ms < PLAY_PREBUFFER_MAX_MS:
+                    self._prebuf_ms = min(
+                        PLAY_PREBUFFER_MAX_MS, self._prebuf_ms + PLAY_PREBUFFER_STEP_UP_MS
+                    )
+                self._prebuf_changed_at = now
             return
+        if (
+            self._prebuf_ms > PLAY_PREBUFFER_MS
+            and now - self._prebuf_changed_at > PLAY_PREBUFFER_CALM_S
+        ):
+            self._prebuf_ms = max(
+                PLAY_PREBUFFER_MS, self._prebuf_ms - PLAY_PREBUFFER_STEP_DOWN_MS
+            )
+            self._prebuf_changed_at = now
         n = min(int(sink.bytesFree()), len(self._play_buf))
         n -= n % 2
         if n <= 0:
@@ -1609,10 +1821,15 @@ class CallOverlayWidget(QtWidgets.QWidget):
             )
         )
 
+    def _incoming_text(self, want_video: bool) -> str:
+        return tr("call.incoming_video") if want_video else tr("call.incoming_audio")
+
     def _on_media_packet(self, payload: dict[str, Any]) -> None:
         if self._manager is None:
             return
         snap = self._manager.snapshot()
+        if str(snap.get("phase") or "") != "active":
+            return
         ptype = int(payload.get("ptype") or 0)
         data = payload.get("payload") or b""
         if ptype == TYPE_KEYFRAME_REQ:
@@ -1626,8 +1843,13 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if ptype in (TYPE_OPUS, TYPE_PCM16):
             if not snap.get("spk") or self._audio_out_io is None:
                 return
-            pcm = self._codec.decode(data, opus=(ptype == TYPE_OPUS))
-            if pcm:
+            frames = self._codec.decode_stream(
+                data,
+                opus=(ptype == TYPE_OPUS),
+                seq=int(payload.get("seq") or 0),
+                seq_tracked=bool(int(payload.get("flags") or 0) & FLAG_AUDIO_SEQ),
+            )
+            for pcm in frames:
                 self._enqueue_playback(pcm)
         elif ptype == TYPE_VIDEO_JPEG:
             img = qimage_from_jpeg(data)

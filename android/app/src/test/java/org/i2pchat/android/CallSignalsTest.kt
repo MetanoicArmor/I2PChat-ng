@@ -23,6 +23,25 @@ class CallSignalsTest {
     }
 
     @Test
+    fun callIdAndDatagramTokenRejectInjection() {
+        assertTrue(CallSignals.isCallId(CallSignals.newCallId()))
+        assertTrue(CallSignals.newCallId() != CallSignals.newCallId())
+        assertFalse(CallSignals.isCallId("bad\nid"))
+        assertFalse(CallSignals.isCallId(""))
+
+        val b32 = "a".repeat(52)
+        assertTrue(CallSignals.isDatagramToken(b32))
+        assertTrue(CallSignals.isDatagramToken("$b32.b32.i2p"))
+        assertTrue(CallSignals.isDatagramToken("A".repeat(120)))
+        assertFalse(CallSignals.isDatagramToken("bad\nSESSION"))
+        assertFalse(CallSignals.isDatagramToken("xyz.b32.i2p"))
+        assertTrue(CallSignals.isNamingName("$b32.b32.i2p"))
+        assertFalse(CallSignals.isNamingName("bad\nname.b32.i2p"))
+        assertTrue(CallSignals.samePeer(b32, "$b32.b32.i2p"))
+        assertFalse(CallSignals.samePeer(b32, "b".repeat(52)))
+    }
+
+    @Test
     fun mediaFlags() {
         val body = CallSignals.buildMedia("cid", mic = false, cam = true, screen = false, spk = true)
         val parsed = CallSignals.parse(body)!!
