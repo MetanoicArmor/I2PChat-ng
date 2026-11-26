@@ -1,4 +1,4 @@
-Param(
+﻿Param(
     [string]$VenvDir = ".venv"
 )
 
@@ -19,7 +19,7 @@ function Invoke-NativeChecked {
 }
 
 function Stop-I2PChatProcessesLockingDist {
-    # Запущенный dist\I2PChat\*.exe держит _sodium.pyd — Remove-Item падает с PermissionDenied.
+    # Запущенный dist\I2PChat\*.exe держит _sodium.pyd - Remove-Item падает с PermissionDenied.
     foreach ($procName in @("I2PChat", "I2PChat-tui")) {
         Get-Process -Name $procName -ErrorAction SilentlyContinue | ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -108,7 +108,7 @@ else {
     if (-not $uvPy) {
         & py -3 -c "import sys; print(sys.version)" | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw "No usable Python 3 found (need 3.12–3.14 for PyInstaller 6.19; install 3.14 recommended)."
+            throw "No usable Python 3 found (need 3.12-3.14 for PyInstaller 6.19; install 3.14 recommended)."
         }
         $uvPy = "3"
     }
@@ -271,7 +271,7 @@ Compress-Archive -Path "$ZipStage\\*" -DestinationPath $ZipFile -CompressionLeve
 Remove-Item -Recurse -Force $ZipStage
 Write-Host "Packed: $ZipFile"
 
-# TUI-only zip: same layout (I2PChat/…) but without GUI exe — for winget/Homebrew-style -tui packages.
+# TUI-only zip: same layout (I2PChat/...) but without GUI exe - for winget/Homebrew-style -tui packages.
 $TuiZipFile = "dist\\I2PChat-windows-tui-x64-v$ReleaseVersion.zip"
 if (Test-Path $TuiZipFile) {
     Remove-Item -Force $TuiZipFile
@@ -293,7 +293,7 @@ Compress-Archive -Path "$TuiStage\\*" -DestinationPath $TuiZipFile -CompressionL
 Remove-Item -Recurse -Force $TuiStage
 Write-Host "Packed (TUI only): $TuiZipFile"
 
-# Second pass: PyInstaller without embedded i2pd — zips for winget / Microsoft validation (no Riskware.I2PD.A).
+# Second pass: PyInstaller without embedded i2pd - zips for winget / Microsoft validation (no Riskware.I2PD.A).
 Write-Host ""
 Write-Host '==> Rebuild for winget (I2PCHAT_OMIT_BUNDLED_I2PD=1, no embedded i2pd)'
 Stop-I2PChatProcessesLockingDist

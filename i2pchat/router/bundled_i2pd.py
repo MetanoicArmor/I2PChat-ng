@@ -1167,12 +1167,25 @@ class BundledI2pdManager:
         while loop.time() < deadline:
             if proc.returncode is not None:
                 rc = proc.returncode
+                # Another instance may already own the port/pidfile (typical exit 1).
+                # Prefer adopting a live SAM over surfacing a confusing dialog.
+                try:
+                    await probe_sam_hello(rt.sam_host, rt.sam_port, timeout=2.0)
+                    return
+                except Exception:
+                    pass
                 if sys.platform == "darwin":
                     hint = (
                         "See {log} — common causes: missing Boost/OpenSSL *.dylib "
                         "next to vendor/i2pd/darwin-*/i2pd (run "
                         "scripts/stage_i2pd_darwin_dylibs.sh); or another instance "
                         "holding the pidfile (exit 1)."
+                    ).format(log=rt.log_path)
+                elif sys.platform == "win32":
+                    hint = (
+                        "See {log} — common causes: another instance holding the "
+                        "pidfile (exit 1); antivirus quarantining i2pd.exe "
+                        "(Dr.Web/Windows Defender); or a stale i2pd.pid."
                     ).format(log=rt.log_path)
                 else:
                     hint = (
@@ -1186,7 +1199,7 @@ class BundledI2pdManager:
                         "i2pd vs libi2pd.so/OpenSSL (re-stage matching libs, or use "
                         "distro i2pd / rebuild vendor from i2pchat-bundled-i2pd)."
                     )
-                elif rc == 1:
+                elif rc == 1 and sys.platform != "win32":
                     hint = (
                         f"See {rt.log_path} — exit 1 is often a pidfile lock "
                         f"({os.path.join(os.path.dirname(rt.log_path), 'i2pd.pid')}) "

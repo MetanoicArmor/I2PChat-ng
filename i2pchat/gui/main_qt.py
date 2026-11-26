@@ -846,7 +846,9 @@ THEMES: dict[str, dict[str, object]] = {
                 border-radius: 9px;
                 padding: 8px 10px;
             }
-            QPlainTextEdit#BlindBoxDiagnosticsSummary {
+            QPlainTextEdit#BlindBoxDiagnosticsSummary,
+            QPlainTextEdit#StatusEventsLog,
+            QPlainTextEdit#StatusVerboseLog {
                 color: #1d1d1f;
             }
             QLineEdit#PeerAddressEdit {
@@ -1074,6 +1076,8 @@ THEMES: dict[str, dict[str, object]] = {
                 max-width: 22px;
             }
             QLabel { color: #1d1d1f; }
+            QCheckBox { color: #1d1d1f; spacing: 10px; }
+            QRadioButton { color: #1d1d1f; spacing: 8px; }
             QLabel#StatusLabel {
                 background-color: #f8f9fc;
                 border: none;
@@ -1456,7 +1460,9 @@ THEMES: dict[str, dict[str, object]] = {
                 border-radius: 8px;
                 padding: 8px 10px;
             }
-            QPlainTextEdit#BlindBoxDiagnosticsSummary {
+            QPlainTextEdit#BlindBoxDiagnosticsSummary,
+            QPlainTextEdit#StatusEventsLog,
+            QPlainTextEdit#StatusVerboseLog {
                 color: #f5f5f7;
             }
             QLineEdit#PeerAddressEdit {
@@ -1675,6 +1681,8 @@ THEMES: dict[str, dict[str, object]] = {
                 max-width: 22px;
             }
             QLabel { color: #f5f5f7; }
+            QCheckBox { color: #f5f5f7; spacing: 10px; }
+            QRadioButton { color: #f5f5f7; spacing: 8px; }
             QLabel#StatusLabel {
                 background-color: rgba(255, 255, 255, 0.06);
                 border: none;
@@ -1906,6 +1914,13 @@ def _dialog_checkbox_indicator_qss(theme_tid: str) -> str:
 
 
 def _apply_application_tooltip_stylesheet(theme_id: Optional[str]) -> None:
+    """Tooltips + Fusion base palette.
+
+    On Windows/Linux Fusion keeps a light palette unless set explicitly, so
+    widgets without a QSS `color` (QCheckBox label, etc.) stay near-black on
+    a dark window. macOS often looks fine via system appearance; set palette
+    everywhere so the fallback matches the theme.
+    """
     app = QtWidgets.QApplication.instance()
     if app is None:
         return
@@ -1914,6 +1929,70 @@ def _apply_application_tooltip_stylesheet(theme_id: Optional[str]) -> None:
     bg = QtGui.QColor(bg_hex)
     fg = QtGui.QColor(fg_hex)
     pal = QtGui.QPalette(app.palette())
+    if tid == "night":
+        window = QtGui.QColor("#101114")
+        base = QtGui.QColor("#1a1c22")
+        alt = QtGui.QColor("#22252d")
+        text = QtGui.QColor("#f5f5f7")
+        muted = QtGui.QColor("#8d95a6")
+        button = QtGui.QColor("#2b2b30")
+        highlight = QtGui.QColor("#0a84ff")
+        for grp in (
+            QtGui.QPalette.ColorGroup.Active,
+            QtGui.QPalette.ColorGroup.Inactive,
+        ):
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Window, window)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.WindowText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Base, base)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.AlternateBase, alt)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Text, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Button, button)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.ButtonText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.BrightText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.PlaceholderText, muted)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Highlight, highlight)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#ffffff"))
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Link, highlight)
+        disabled = QtGui.QPalette.ColorGroup.Disabled
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Window, window)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.WindowText, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Base, base)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Text, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Button, button)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.ButtonText, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.PlaceholderText, muted)
+    else:
+        window = QtGui.QColor("#e6eaf2")
+        base = QtGui.QColor("#ffffff")
+        alt = QtGui.QColor("#f2f4f8")
+        text = QtGui.QColor("#1d1d1f")
+        muted = QtGui.QColor("#767d8b")
+        button = QtGui.QColor("#f0f2f6")
+        highlight = QtGui.QColor("#0a84ff")
+        for grp in (
+            QtGui.QPalette.ColorGroup.Active,
+            QtGui.QPalette.ColorGroup.Inactive,
+        ):
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Window, window)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.WindowText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Base, base)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.AlternateBase, alt)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Text, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Button, button)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.ButtonText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.BrightText, text)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.PlaceholderText, muted)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Highlight, highlight)
+            pal.setColor(grp, QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#ffffff"))
+            pal.setColor(grp, QtGui.QPalette.ColorRole.Link, highlight)
+        disabled = QtGui.QPalette.ColorGroup.Disabled
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Window, window)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.WindowText, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Base, base)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Text, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.Button, button)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.ButtonText, muted)
+        pal.setColor(disabled, QtGui.QPalette.ColorRole.PlaceholderText, muted)
     for grp in (
         QtGui.QPalette.ColorGroup.Active,
         QtGui.QPalette.ColorGroup.Inactive,
