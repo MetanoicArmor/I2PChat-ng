@@ -34,6 +34,21 @@ def test_target_frame_bytes_scales():
     assert small >= 800
 
 
+def test_no_rx_yet_is_not_treated_as_loss():
+    """LeaseSet warmup: we are sending and nothing has come back. Stay at the ceiling."""
+    ceil = EffectiveMedia(32, 800, 20, 720, jpeg_quality=40)
+    ctrl = AdaptiveController(ceil)
+    ctrl.observe({"tx_packets": 0, "tx_dropped": 0, "rx_packets": 0, "rx_dropped": 0})
+    eff = ctrl.effective
+    for i in range(1, 8):
+        eff = ctrl.observe(
+            {"tx_packets": i * 50, "tx_dropped": 0, "rx_packets": 0, "rx_dropped": 0}
+        )
+    assert eff.level == 0
+    assert eff.video_max_edge == 720
+    assert eff.video_fps == 20
+
+
 def test_adapt_steps_down_on_drops():
     ceil = EffectiveMedia(32, 250, 8, 480, jpeg_quality=40)
     ctrl = AdaptiveController(ceil)

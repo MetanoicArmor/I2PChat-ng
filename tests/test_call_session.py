@@ -204,6 +204,7 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(call_session_mod, "naming_lookup_b64", failing_lookup):
             token = "q" * 52
             mgr, dg, _, _ = await self._active_outgoing(token)
+            mgr._rx_packets = 1  # path is up; this test is about the send target
             self.assertFalse(mgr.state.media_ready)
             for _ in range(30):
                 await mgr.send_audio_frame(b"\x00" * 640, opus=False)
@@ -222,6 +223,7 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(call_session_mod, "naming_lookup_b64", ok_lookup):
             mgr, dg, _, events = await self._active_outgoing("q" * 52)
+            mgr._rx_packets = 1
             await mgr.send_audio_frame(b"\x00" * 640, opus=False)
             for _ in range(50):
                 if mgr.state.media_ready:
@@ -271,6 +273,22 @@ class CallMediaPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(media), 1)
         self.assertEqual(media[0]["ptype"], TYPE_VIDEO_JPEG)
         self.assertEqual(media[0]["payload"], frame)
+        await mgr.hangup()
+
+    async def test_cold_path_sends_one_frame_per_second(self) -> None:
+        mgr, dg, _, _ = await self._active_outgoing("R" * 100)
+        mgr.state.local_cam = True
+        for _ in range(8):
+            await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+            await mgr.send_jpeg_frame(b"\xff" * 20)
+        self.assertEqual(len(dg.sent), 1)
+        mgr._probe_at = 0.0
+        await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+        self.assertEqual(len(dg.sent), 2)
+        mgr._rx_packets = 1
+        await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+        await mgr.send_audio_frame(b"\x00" * 640, opus=False)
+        self.assertEqual(len(dg.sent), 4)
         await mgr.hangup()
 
     async def test_foreign_call_hash_is_dropped(self) -> None:

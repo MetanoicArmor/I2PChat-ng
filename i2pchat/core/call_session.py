@@ -180,6 +180,7 @@ class CallSessionManager:
         self._resolve_task: Optional[asyncio.Task[None]] = None
         self._resolve_failures = 0
         self._next_resolve_at = 0.0
+        self._probe_at = 0.0
         self._reset_stats()
         self._setup_task: Optional[asyncio.Task[Optional[DatagramSession]]] = None
         self._dg_close_task: Optional[asyncio.Task[None]] = None
@@ -196,6 +197,7 @@ class CallSessionManager:
         self._first_rx_logged = False
         self._from_mismatch_logged = False
         self._control_closed_logged = False
+        self._probe_at = 0.0
 
     def stats(self) -> dict[str, Any]:
         dg = self._dg
@@ -634,9 +636,26 @@ class CallSessionManager:
                     self._setup_task = None
             return None
 
+    def _hold_until_path(self) -> bool:
+        """True while outbound datagrams must stay at one frame per second.
+
+        i2pd drops a datagram when the peer's LeaseSet is not in the netdb yet
+        (``Datagram: No routing path``) and does not queue it. A video flood
+        during that window never arrives, and the sender still counts it as TX.
+        """
+        if self._rx_packets > 0:
+            return False
+        now = time.monotonic()
+        if now - self._probe_at < 1.0:
+            return True
+        self._probe_at = now
+        return False
+
     async def _send_media(self, ptype: int, payload: bytes, *, ts_ms: Optional[int]) -> None:
         dg = self._dg
         if dg is None or self.state.phase != CallPhase.ACTIVE:
+            return
+        if self._hold_until_path():
             return
         target = self._remote_send_target()
         if not target:

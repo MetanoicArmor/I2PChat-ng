@@ -262,6 +262,7 @@ def test_send_media_adds_parity_for_fragmented_video_and_audio_seq_flag():
         m = _mgr()
         dg = _Dg()
         m._dg = dg  # type: ignore[assignment]
+        m._rx_packets = 1  # path already up; this checks framing, not the warmup probe
         m.state.phase = CallPhase.ACTIVE
         m.state.call_id = "c" * 16
         m._remote_send_target = lambda: "dest"  # type: ignore[method-assign]

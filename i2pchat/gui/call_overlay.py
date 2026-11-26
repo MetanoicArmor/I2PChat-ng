@@ -1021,6 +1021,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._refresh_from_state()
             return
         self._want_video_start = video
+        self._clear_video_panes()
         self._prefs = load_call_prefs()
         self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
         self.show_overlay()
@@ -1054,6 +1055,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self.window(), tr("call.title"), str(exc))
 
     def show_incoming(self, state: dict[str, Any]) -> None:
+        self._clear_video_panes()
         self.show_overlay()
         self._set_status(self._incoming_text(bool(state.get("want_video"))))
         self._accept_btn.show()
@@ -1340,6 +1342,17 @@ class CallOverlayWidget(QtWidgets.QWidget):
             status=mini_status,
         )
         self._sync_remote_placeholder(state)
+
+    def _clear_video_panes(self) -> None:
+        """A new call must not keep the previous call's last frame."""
+        self._remote_video_on = False
+        self._last_remote_video_at = 0.0
+        for view, key in (
+            (self._remote_view, "call.remote_video"),
+            (self._local_view, "call.local_video"),
+        ):
+            view.clear()
+            view.setText(tr(key))
 
     def _sync_remote_placeholder(self, state: dict[str, Any]) -> None:
         """Say so when the peer's camera is off, instead of a blank pane."""

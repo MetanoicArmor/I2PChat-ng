@@ -106,8 +106,11 @@ class AdaptiveController:
         if d_tx + d_rx > 0:
             drop_ratio = (d_tx_drop + d_rx_drop) / float(d_tx + d_rx)
 
-        # No RX while we are sending: treat as path trouble.
-        starving = d_tx >= 8 and d_rx == 0
+        # Silence after the path has already carried media is trouble.
+        # Silence before the first packet is just the datagram LeaseSet not
+        # being published yet — crushing quality then sends a tiny picture
+        # the moment the path finally opens.
+        starving = snap.rx_packets > 0 and d_tx >= 8 and d_rx == 0
         bad = starving or d_tx_drop >= 2 or d_rx_drop >= 2 or drop_ratio >= 0.08
         good = (not bad) and d_tx_drop == 0 and d_rx_drop == 0 and (d_rx > 0 or d_tx < 4)
 

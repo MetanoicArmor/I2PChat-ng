@@ -107,6 +107,7 @@ class CallController(
     private var vp8Dec: Vp8FrameDecoder? = null
     @Volatile private var gotRemoteKey = false
     @Volatile private var lastKeyReqMs = 0L
+    @Volatile private var probeAtMs = 0L
     private var lastDroppedSeen = 0
     private var videoSender: CallVideoSender? = null
     private var camera: CallCamera? = null
@@ -592,6 +593,18 @@ class CallController(
      * frames also get one XOR parity datagram and are paced so they do not burst into a tunnel.
      * Audio uses its own seq counter, flagged so the receiver can spot lost frames.
      */
+    /**
+     * Until the first inbound datagram, send at most one frame per second.
+     * i2pd drops anything sent before the peer LeaseSet exists and does not retry it.
+     */
+    private fun holdUntilPath(): Boolean {
+        if (rxPackets.get() > 0L) return false
+        val now = System.currentTimeMillis()
+        if (now - probeAtMs < 1_000L) return true
+        probeAtMs = now
+        return false
+    }
+
     private fun sendFramed(type: Int, payload: ByteArray, paced: Boolean = false): Boolean {
         val snap = _state.value
         if (snap.phase != CallPhase.Active) return false
@@ -601,6 +614,7 @@ class CallController(
             txDropped.incrementAndGet()
             return false
         }
+        if (holdUntilPath()) return false
         val isAudio = type == CallMediaFraming.TYPE_OPUS || type == CallMediaFraming.TYPE_PCM16
         val hash = CallSignals.callIdHash16(snap.callId)
         val now = (System.currentTimeMillis() and 0x7fffffff).toInt()
@@ -885,6 +899,7 @@ class CallController(
         gotRemoteKey = false
         lastKeyReqMs = 0L
         lastDroppedSeen = reassembler.droppedFrames
+        probeAtMs = 0L
         lastVideoBytes = 0L
         pliHits = 0
         playout.clear()

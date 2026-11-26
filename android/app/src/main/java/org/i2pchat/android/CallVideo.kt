@@ -465,7 +465,8 @@ class AdaptiveController(ceiling: EffectiveMedia) {
 
         val total = dTx + dRx
         val ratio = if (total > 0) (dTxDrop + dRxDrop).toDouble() / total else 0.0
-        val starving = dTx >= 8 && dRx == 0L
+        // Zero RX before the first packet means the LeaseSet is not ready, not loss.
+        val starving = rx > 0 && dTx >= 8 && dRx == 0L
         val bad = starving || dTxDrop >= 2 || dRxDrop >= 2 || ratio >= 0.08
         val good = !bad && dTxDrop == 0L && dRxDrop == 0L && (dRx > 0 || dTx < 4)
         if (bad) {
