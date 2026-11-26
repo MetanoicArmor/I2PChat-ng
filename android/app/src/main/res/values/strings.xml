@@ -289,6 +289,10 @@
     <string name="call_minimize">Minimize</string>
     <string name="call_expand">Expand</string>
     <string name="call_settings">Call settings</string>
+    <string name="call_preset">Quality preset</string>
+    <string name="call_preset_economy">Economy</string>
+    <string name="call_preset_normal">Normal</string>
+    <string name="call_preset_max">Maximum</string>
     <string name="call_audio_bitrate">Audio bitrate</string>
     <string name="call_video_bitrate">Video bitrate</string>
     <string name="call_video_fps">Video FPS</string>

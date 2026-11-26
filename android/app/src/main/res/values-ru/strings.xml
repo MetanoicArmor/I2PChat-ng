@@ -272,6 +272,10 @@
     <string name="call_minimize">Свернуть</string>
     <string name="call_expand">Развернуть</string>
     <string name="call_settings">Настройки звонка</string>
+    <string name="call_preset">Пресет качества</string>
+    <string name="call_preset_economy">Эконом</string>
+    <string name="call_preset_normal">Норма</string>
+    <string name="call_preset_max">Максимум</string>
     <string name="call_audio_bitrate">Битрейт аудио</string>
     <string name="call_video_bitrate">Битрейт видео</string>
     <string name="call_video_fps">Кадров/с видео</string>

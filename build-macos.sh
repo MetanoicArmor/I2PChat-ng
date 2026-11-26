@@ -99,6 +99,10 @@ PY
 echo "==> Проверяю синтаксис пакетов и вспомогательных скриптов"
 "${PYTHON_CMD}" -m compileall i2pchat scripts make_icon.py
 
+echo "==> Staging call codec dylibs (libopus/libvpx) if present"
+bash "$(pwd)/scripts/stage_call_codecs.sh" || true
+"${PYTHON_CMD}" -m pip install -q opuslib av 2>/dev/null || true
+
 echo "==> Собираю GUI (PyInstaller I2PChat.spec)"
 rm -rf "dist/${APP_NAME}" "build/${APP_NAME}"
 "${PYTHON_CMD}" -m PyInstaller --clean -y I2PChat.spec
@@ -106,9 +110,23 @@ rm -rf "dist/${APP_NAME}" "build/${APP_NAME}"
 echo "==> Собираю I2PChat.app"
 rm -rf "dist/${APP_NAME}.app"
 mkdir -p "dist/${APP_NAME}.app/Contents/MacOS" "dist/${APP_NAME}.app/Contents/Resources"
-cp -R "dist/${APP_NAME}" "dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}"
+# Put the PyInstaller onedir *inside MacOS/* so CFBundleExecutable is a real Mach-O.
+# A shell-script launcher under MacOS/ that exec's Resources/... breaks macOS TCC:
+# Camera/Microphone prompts never register and I2PChat never appears in
+# System Settings → Privacy → Camera.
+#
+# Layout:
+#   Contents/MacOS/I2PChat          (Mach-O)
+#   Contents/MacOS/I2PChat-tui      (Mach-O)
+#   Contents/MacOS/_internal/       (PyInstaller deps)
+#   Contents/Resources/I2PChat.icns
+rsync -a --delete "dist/${APP_NAME}/" "dist/${APP_NAME}.app/Contents/MacOS/"
+chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+if [ -f "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui" ]; then
+  chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui"
+fi
 if [ -f "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" ]; then
-  I2PD_APP_VENDOR="dist/${APP_NAME}.app/Contents/Resources/${APP_NAME}/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"
+  I2PD_APP_VENDOR="dist/${APP_NAME}.app/Contents/MacOS/vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}"
   mkdir -p "${I2PD_APP_VENDOR}"
   cp "vendor/i2pd/${I2PD_DARWIN_VENDOR_SUB}/i2pd" "${I2PD_APP_VENDOR}/i2pd"
   chmod +x "${I2PD_APP_VENDOR}/i2pd"
@@ -127,12 +145,6 @@ else
   echo "WARNING: I2PChat.icns not found, fallback to icon.png"
   cp "icon.png" "dist/${APP_NAME}.app/Contents/Resources/I2PChat.icns"
 fi
-printf '%s\n' '#!/bin/sh' "exec \"\$(dirname \"\$0\")/../Resources/${APP_NAME}/${APP_NAME}\" \"\$@\"" > "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-
-# Консольный TUI (Textual): тот же onedir, отдельный бинарник — удобно запускать из Terminal.
-printf '%s\n' '#!/bin/sh' "exec \"\$(dirname \"\$0\")/../Resources/${APP_NAME}/${APP_NAME}-tui\" \"\$@\"" > "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui"
-chmod +x "dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}-tui"
 
 # Info.plist
 cat > "dist/${APP_NAME}.app/Contents/Info.plist" <<PLIST
@@ -161,6 +173,14 @@ cat > "dist/${APP_NAME}.app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# Ad-hoc sign so TCC associates Camera/Microphone with this bundle (unsigned
+# shell-wrapped apps often never appear under Privacy → Camera).
+if command -v codesign >/dev/null 2>&1; then
+  echo "==> Ad-hoc codesign I2PChat.app (TCC)"
+  codesign --force --deep --sign - "dist/${APP_NAME}.app" 2>/dev/null || \
+    echo "WARNING: codesign failed (camera prompt may still work after MacOS/ Mach-O fix)"
+fi
 
 echo
 echo "✔ GUI собран: dist/${APP_NAME}.app (${ARCH_SUFFIX})"

@@ -9,6 +9,28 @@ object CallSignals {
     const val REJECT = "CALL_REJECT"
     const val HANGUP = "CALL_HANGUP"
     const val MEDIA = "CALL_MEDIA"
+    const val DEFAULT_CODECS = "opus,vp8,jpeg"
+
+    fun localOfferCodecs(): String {
+        val parts = mutableListOf("opus")
+        if (CallVp8Encoder.isSupported()) parts.add("vp8")
+        parts.add("jpeg")
+        return parts.joinToString(",")
+    }
+
+    fun intersectCodecs(local: String, remote: String): String {
+        val localList = local.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            .ifEmpty { DEFAULT_CODECS.split(",") }
+        val remoteSet = remote.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            .ifEmpty { DEFAULT_CODECS.split(",") }
+            .toSet()
+        val chosen = localList.filter { it in remoteSet }.toMutableList()
+        if ("jpeg" !in chosen) chosen.add("jpeg")
+        return chosen.joinToString(",").ifBlank { "jpeg" }
+    }
+
+    fun codecsInclude(codecs: String, name: String): Boolean =
+        codecs.split(",").any { it.trim().equals(name, ignoreCase = true) }
 
     fun newCallId(): String = "${System.currentTimeMillis() / 1000}-${Random.nextBytes(8).joinToString("") { "%02x".format(it) }}"
 
@@ -43,7 +65,7 @@ object CallSignals {
         val kind: String,
         val callId: String,
         val wantVideo: Boolean = false,
-        val codecs: String = "opus,jpeg",
+        val codecs: String = DEFAULT_CODECS,
         val maxBitrate: Int = 320_000,
         val datagramB32: String = "",
         val reason: String = "",
@@ -61,14 +83,14 @@ object CallSignals {
                 kind = INVITE,
                 callId = parts[1],
                 wantVideo = parts[2].equals("video", ignoreCase = true),
-                codecs = parts[3].ifBlank { "opus,jpeg" },
+                codecs = parts[3].ifBlank { DEFAULT_CODECS },
                 maxBitrate = parts[4].toIntOrNull() ?: 320_000,
                 datagramB32 = parts[5],
             ) else null
             ACCEPT -> if (parts.size >= 5) Parsed(
                 kind = ACCEPT,
                 callId = parts[1],
-                codecs = parts[2].ifBlank { "opus,jpeg" },
+                codecs = parts[2].ifBlank { DEFAULT_CODECS },
                 maxBitrate = parts[3].toIntOrNull() ?: 320_000,
                 datagramB32 = parts[4],
             ) else null

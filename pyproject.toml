@@ -33,6 +33,11 @@ build = [
     "setuptools>=84.1.0",
 ]
 dev = ["pytest"]
+# Soft call-media deps: require native libopus / FFmpeg+libvpx on the builder.
+call-media = [
+    "opuslib",
+    "av",
+]
 
 [tool.hatch.version]
 path = "VERSION"

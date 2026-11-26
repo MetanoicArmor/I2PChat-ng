@@ -122,3 +122,9 @@ debian/tmp/
 debian/python3-i2pchat/
 debian/i2pchat/
 debian/i2pchat-tui/
+
+# Call codec natives staged by scripts/stage_call_codecs.sh (keep README/.gitkeep)
+vendor/codecs/**/*.dylib
+vendor/codecs/**/*.so
+vendor/codecs/**/*.so.*
+vendor/codecs/**/*.dll

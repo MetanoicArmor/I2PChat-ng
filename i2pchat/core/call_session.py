@@ -17,6 +17,7 @@ from i2pchat.core.call_signals import (
     CALL_INVITE,
     CALL_MEDIA,
     CALL_REJECT,
+    DEFAULT_CODECS,
     CallAccept,
     CallHangup,
     CallInvite,
@@ -24,18 +25,23 @@ from i2pchat.core.call_signals import (
     CallReject,
     ParsedCallSignal,
     call_id_hash16,
+    codecs_include,
+    intersect_codecs,
     new_call_id,
     parse_call_signal,
 )
 from i2pchat.core.media_framing import (
     TYPE_OPUS,
     TYPE_PCM16,
+    TYPE_VIDEO_DELTA,
     TYPE_VIDEO_JPEG,
+    TYPE_VIDEO_KEY,
     FrameReassembler,
     MediaPacket,
     decode_media_packet,
     fragment_payload,
 )
+from i2pchat.core.video_codec import vp8_available
 from i2pchat.sam.datagram import DatagramSession, create_datagram_session, naming_lookup_b64
 
 logger = logging.getLogger(__name__)
@@ -99,11 +105,20 @@ class CallState:
     remote_datagram_b64: str = ""
     local_datagram_b32: str = ""
     local_datagram_b64: str = ""
-    codecs: str = "opus,jpeg"
+    codecs: str = DEFAULT_CODECS
     max_bitrate: int = 320_000
     minimized: bool = False
     error: str = ""
     media_ready: bool = False
+
+
+def local_offer_codecs() -> str:
+    """Advertise codecs this build can actually encode/decode."""
+    parts = ["opus"]
+    if vp8_available():
+        parts.append("vp8")
+    parts.append("jpeg")
+    return ",".join(parts)
 
 
 class CallSessionManager:
@@ -194,6 +209,8 @@ class CallSessionManager:
             "error": s.error,
             "max_bitrate": s.max_bitrate,
             "media_ready": s.media_ready,
+            "codecs": s.codecs,
+            "uses_vp8": self.uses_vp8(),
             "audio_bitrate_kbps": self.prefs.audio_bitrate_kbps,
             "video_bitrate_kbps": self.prefs.video_bitrate_kbps,
             "video_fps": self.prefs.video_fps,
@@ -219,6 +236,7 @@ class CallSessionManager:
                 local_mic=prefs.start_mic,
                 local_cam=video,
                 local_spk=prefs.start_spk,
+                codecs=local_offer_codecs(),
                 max_bitrate=prefs.max_bitrate_bps,
             )
             self._emit("outgoing")
@@ -276,9 +294,11 @@ class CallSessionManager:
                 self.state.local_cam = True
             self.state.max_bitrate = prefs.max_bitrate_bps
             token = datagram_token(dg)
+            negotiated = intersect_codecs(local_offer_codecs(), self.state.codecs)
+            self.state.codecs = negotiated
             accept = CallAccept(
                 call_id=call_id,
-                codecs="opus,jpeg",
+                codecs=negotiated,
                 max_bitrate=prefs.max_bitrate_bps,
                 datagram_b32=token,
             )
@@ -396,7 +416,9 @@ class CallSessionManager:
                 if self.state.phase != CallPhase.OUTGOING or parsed.call_id != self.state.call_id:
                     return True
                 self.state.remote_datagram_b64 = parsed.datagram_b32
-                self.state.codecs = parsed.codecs or self.state.codecs
+                self.state.codecs = intersect_codecs(
+                    local_offer_codecs(), parsed.codecs or self.state.codecs
+                )
                 self.state.max_bitrate = min(self.state.max_bitrate, parsed.max_bitrate)
                 self._apply_remote_token(parsed.datagram_b32, self._generation)
                 self.state.phase = CallPhase.ACTIVE
@@ -437,6 +459,19 @@ class CallSessionManager:
             return
         await self._send_media(TYPE_VIDEO_JPEG, jpeg, ts_ms=ts_ms)
 
+    async def send_vp8_frame(
+        self, payload: bytes, *, keyframe: bool, ts_ms: Optional[int] = None
+    ) -> None:
+        if not (self.state.local_cam or self.state.local_screen):
+            return
+        if not codecs_include(self.state.codecs, "vp8"):
+            return
+        ptype = TYPE_VIDEO_KEY if keyframe else TYPE_VIDEO_DELTA
+        await self._send_media(ptype, payload, ts_ms=ts_ms)
+
+    def uses_vp8(self) -> bool:
+        return codecs_include(self.state.codecs, "vp8") and vp8_available()
+
     async def _outgoing_setup(
         self,
         gen: int,
@@ -456,7 +491,7 @@ class CallSessionManager:
                 call_id=call_id,
                 want_audio=True,
                 want_video=video,
-                codecs="opus,jpeg",
+                codecs=local_offer_codecs(),
                 max_bitrate=prefs.max_bitrate_bps,
                 datagram_b32=token,
             )

@@ -14,6 +14,7 @@ _local_modules = [
 _icon_file = 'i2pchat.ico' if sys.platform == 'win32' else 'icon.png'
 
 _i2pd_binaries = []
+_codec_binaries = []
 if sys.platform == 'darwin':
     import platform as _platform
 
@@ -25,6 +26,10 @@ if sys.platform == 'darwin':
         _i2pd_binaries.extend(
             (dy, _i2pd_dir) for dy in glob.glob(os.path.join(_i2pd_dir, '*.dylib'))
         )
+    _codec_dir = os.path.join('vendor', 'codecs', _i2pd_sub)
+    _codec_binaries.extend(
+        (dy, _codec_dir) for dy in glob.glob(os.path.join(_codec_dir, '*.dylib'))
+    )
 elif sys.platform == 'win32':
     _i2pd_path = os.path.join('vendor', 'i2pd', 'windows-x64', 'i2pd.exe')
     if os.path.isfile(_i2pd_path):
@@ -32,6 +37,10 @@ elif sys.platform == 'win32':
     _i2pd_binaries.extend(
         (dll, os.path.join('vendor', 'i2pd', 'windows-x64'))
         for dll in glob.glob(os.path.join('vendor', 'i2pd', 'windows-x64', '*.dll'))
+    )
+    _codec_dir = os.path.join('vendor', 'codecs', 'win-x64')
+    _codec_binaries.extend(
+        (dll, _codec_dir) for dll in glob.glob(os.path.join(_codec_dir, '*.dll'))
     )
 else:
     import platform
@@ -49,6 +58,10 @@ else:
         _i2pd_binaries.extend(
             (so, _i2pd_dir) for so in glob.glob(os.path.join(_i2pd_dir, '*.so*'))
         )
+    _codec_dir = os.path.join('vendor', 'codecs', _i2pd_sub)
+    _codec_binaries.extend(
+        (so, _codec_dir) for so in glob.glob(os.path.join(_codec_dir, '*.so*'))
+    )
 
 # Set I2PCHAT_OMIT_BUNDLED_I2PD=1 for a winget/store-friendly Windows build without embedded i2pd (Microsoft pipeline AV).
 if os.environ.get("I2PCHAT_OMIT_BUNDLED_I2PD", "").strip().lower() in ("1", "true", "yes"):
@@ -70,6 +83,8 @@ _hiddenimports = _local_modules + [
     'rich', 'textual', 'pyperclip',
     'cffi', '_cffi_backend',
     'nacl', 'nacl.secret', 'nacl.public', 'nacl.signing', 'nacl.encoding', 'nacl.exceptions',
+    'opuslib',
+    'av',
 ]
 
 _pathex = [_SPECDIR]
@@ -79,7 +94,7 @@ def _analysis(entry_script):
     return Analysis(
         [entry_script],
         pathex=_pathex,
-        binaries=_i2pd_binaries,
+        binaries=_i2pd_binaries + _codec_binaries,
         datas=_analysis_datas,
         hiddenimports=_hiddenimports,
         hookspath=[],

@@ -14,7 +14,31 @@ CALL_REJECT = "CALL_REJECT"
 CALL_HANGUP = "CALL_HANGUP"
 CALL_MEDIA = "CALL_MEDIA"
 
-DEFAULT_CODECS = "opus,jpeg"
+DEFAULT_CODECS = "opus,vp8,jpeg"
+OFFER_CODECS = DEFAULT_CODECS
+
+
+def normalize_codec_list(codecs: str) -> list[str]:
+    out: list[str] = []
+    for part in (codecs or "").split(","):
+        name = part.strip().lower()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def intersect_codecs(local: str, remote: str) -> str:
+    """Intersection preserving local preference order. Always keep jpeg as last resort."""
+    local_list = normalize_codec_list(local) or normalize_codec_list(DEFAULT_CODECS)
+    remote_set = set(normalize_codec_list(remote) or normalize_codec_list(DEFAULT_CODECS))
+    chosen = [c for c in local_list if c in remote_set]
+    if "jpeg" not in chosen:
+        chosen.append("jpeg")
+    return ",".join(chosen) if chosen else "jpeg"
+
+
+def codecs_include(codecs: str, name: str) -> bool:
+    return name.strip().lower() in set(normalize_codec_list(codecs))
 
 
 def new_call_id() -> str:

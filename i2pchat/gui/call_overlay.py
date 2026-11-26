@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from PyQt6 import QtCore, QtGui, QtMultimedia, QtWidgets
 
+from i2pchat.core.call_adapt import AdaptiveController, EffectiveMedia
 from i2pchat.core.call_media import (
     FRAME_MS,
     SAMPLE_RATE,
@@ -17,8 +19,32 @@ from i2pchat.core.call_media import (
     jpeg_from_qimage,
     qimage_from_jpeg,
 )
-from i2pchat.core.call_prefs import CallPrefs, load_call_prefs, save_call_prefs
-from i2pchat.core.media_framing import TYPE_OPUS, TYPE_PCM16, TYPE_VIDEO_JPEG
+from i2pchat.core.call_prefs import (
+    PRESET_IDS,
+    PRESET_NORMAL,
+    CallPrefs,
+    load_call_prefs,
+    save_call_prefs,
+)
+from i2pchat.core.media_framing import (
+    TYPE_OPUS,
+    TYPE_PCM16,
+    TYPE_VIDEO_DELTA,
+    TYPE_VIDEO_JPEG,
+    TYPE_VIDEO_KEY,
+)
+from i2pchat.core.video_codec import (
+    Vp8Decoder,
+    Vp8Encoder,
+    qimage_to_rgb24,
+    rgb24_to_qimage,
+    vp8_available,
+)
+from i2pchat.gui.popup_geometry import (
+    disable_dwm_rounded_frame,
+    paint_popup_rounded_bg,
+    update_popup_rounded_mask,
+)
 from i2pchat.presentation.i18n import tr
 
 if TYPE_CHECKING:
@@ -29,6 +55,12 @@ logger = logging.getLogger(__name__)
 PCM_FRAMES_PER_PACKET = 3  # 3 x 20 ms PCM per DATAGRAM
 PLAY_PREBUFFER_MS = 120
 PLAY_MAX_BUFFER_MS = 500
+
+# Радиусы как у главного чата (ChatSurface / menus / buttons): macOS-style chrome.
+# Кратно сетке UI: surface 14, content 12, controls 9.
+CALL_SURFACE_RADIUS = 14
+CALL_PANE_RADIUS = 12
+CALL_CONTROL_RADIUS = 9
 
 
 class CallSettingsDialog(QtWidgets.QDialog):
@@ -46,6 +78,13 @@ class CallSettingsDialog(QtWidgets.QDialog):
         self.setWindowTitle(tr("call.settings"))
         self._prefs = prefs.clamp()
         form = QtWidgets.QFormLayout(self)
+        self._preset = QtWidgets.QComboBox(self)
+        self._preset_ids = list(PRESET_IDS)
+        for pid in self._preset_ids:
+            self._preset.addItem(tr(f"call.preset.{pid}"), pid)
+        idx = self._preset_ids.index(self._prefs.preset) if self._prefs.preset in self._preset_ids else 1
+        self._preset.setCurrentIndex(idx)
+        self._preset.currentIndexChanged.connect(self._on_preset_changed)
         self._audio = QtWidgets.QSpinBox(self)
         self._audio.setRange(12, 64)
         self._audio.setValue(self._prefs.audio_bitrate_kbps)
@@ -60,6 +99,7 @@ class CallSettingsDialog(QtWidgets.QDialog):
         self._edge = QtWidgets.QSpinBox(self)
         self._edge.setRange(160, 720)
         self._edge.setValue(self._prefs.video_max_edge)
+        form.addRow(tr("call.preset"), self._preset)
         form.addRow(tr("call.audio_bitrate"), self._audio)
         form.addRow(tr("call.video_bitrate"), self._video)
         form.addRow(tr("call.video_fps"), self._fps)
@@ -72,6 +112,15 @@ class CallSettingsDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
         self.apply_theme(theme_id)
+
+    def _on_preset_changed(self, index: int) -> None:
+        if index < 0 or index >= len(self._preset_ids):
+            return
+        tmp = CallPrefs().apply_preset(self._preset_ids[index])
+        self._audio.setValue(tmp.audio_bitrate_kbps)
+        self._video.setValue(tmp.video_bitrate_kbps)
+        self._fps.setValue(tmp.video_fps)
+        self._edge.setValue(tmp.video_max_edge)
 
     def apply_theme(self, theme_id: str) -> None:
         night = (theme_id or "night") == "night"
@@ -94,21 +143,28 @@ class CallSettingsDialog(QtWidgets.QDialog):
                 "#1d1d1f",
             )
         self.setStyleSheet(
-            f"QDialog#CallSettingsDialog {{ background-color: {bg}; color: {fg}; }}"
+            f"QDialog#CallSettingsDialog {{"
+            f"  background-color: {bg}; color: {fg};"
+            f"  border-radius: {CALL_SURFACE_RADIUS}px; }}"
             f"QDialog#CallSettingsDialog QLabel {{ color: {fg}; background: transparent; }}"
-            f"QDialog#CallSettingsDialog QSpinBox {{"
+            f"QDialog#CallSettingsDialog QSpinBox,"
+            f"QDialog#CallSettingsDialog QComboBox {{"
             f"  background: {field}; color: {fg}; border: 1px solid {border};"
-            f"  border-radius: 8px; padding: 6px 8px; min-height: 28px; }}"
+            f"  border-radius: {CALL_CONTROL_RADIUS}px; padding: 6px 8px; min-height: 28px; }}"
             f"QDialog#CallSettingsDialog QSpinBox::up-button,"
             f"QDialog#CallSettingsDialog QSpinBox::down-button {{"
             f"  background: {btn}; width: 18px; }}"
+            f"QDialog#CallSettingsDialog QComboBox QAbstractItemView {{"
+            f"  background: {field}; color: {fg}; selection-background-color: {btn}; }}"
             f"QDialog#CallSettingsDialog QPushButton {{"
             f"  background: {btn}; color: {btn_fg}; border: none;"
-            f"  border-radius: 8px; padding: 8px 14px; min-height: 28px; }}"
+            f"  border-radius: {CALL_CONTROL_RADIUS}px; padding: 8px 14px; min-height: 28px; }}"
             f"QDialog#CallSettingsDialog QPushButton:hover {{ background: {border}; }}"
         )
 
     def result_prefs(self) -> CallPrefs:
+        pid = self._preset.currentData()
+        self._prefs.preset = str(pid or PRESET_NORMAL)
         self._prefs.audio_bitrate_kbps = self._audio.value()
         self._prefs.video_bitrate_kbps = self._video.value()
         self._prefs.video_fps = self._fps.value()
@@ -117,6 +173,14 @@ class CallSettingsDialog(QtWidgets.QDialog):
 
 
 class CallMiniBar(QtWidgets.QFrame):
+    """Плавающая панель звонка.
+
+    Скругление как у ActionsPopup/EmojiPicker/ChatSurface: WA_TranslucentBackground
+    + AA paint на Win/Linux (углы HWND прозрачные). На Windows дополнительно
+    NoDropShadowWindowHint и disable_dwm_rounded_frame, иначе DWM рисует
+    прямоугольную 1 px кайму поверх border-radius.
+    """
+
     expand_requested = QtCore.pyqtSignal()
     hangup_requested = QtCore.pyqtSignal()
     toggle_mic = QtCore.pyqtSignal()
@@ -124,16 +188,28 @@ class CallMiniBar(QtWidgets.QFrame):
     toggle_cam = QtCore.pyqtSignal()
     toggle_screen = QtCore.pyqtSignal()
 
+    # Синхронно с #ChatSurface / #ActionsPopupSurface (macOS-style chrome).
+    _OUTER_RADIUS = float(CALL_SURFACE_RADIUS)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         flags = (
             QtCore.Qt.WindowType.Tool
             | QtCore.Qt.WindowType.FramelessWindowHint
             | QtCore.Qt.WindowType.WindowStaysOnTopHint
         )
+        if sys.platform.startswith("win"):
+            flags |= QtCore.Qt.WindowType.NoDropShadowWindowHint
         super().__init__(parent, flags)
         self.setObjectName("CallMiniBar")
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Прозрачный HWND: иначе QSS border-radius скругляет только заливку,
+        # а углы окна остаются непрозрачными (особенно заметно на Windows).
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setWindowFlag(QtCore.Qt.WindowType.WindowDoesNotAcceptFocus, False)
+        self._painted_bg = not sys.platform.startswith("darwin")
+        self._dwm_patched = False
+        self._popup_bg = QtGui.QColor(28, 31, 38)
+        self._popup_border = QtGui.QColor(58, 63, 75)
         self._theme_id = "night"
         self._drag_offset: Optional[QtCore.QPoint] = None
         self._user_moved = False
@@ -253,8 +329,29 @@ class CallMiniBar(QtWidgets.QFrame):
             return
         super().mouseDoubleClickEvent(event)
 
+    def _apply_linux_mask(self) -> None:
+        if self._painted_bg and sys.platform.startswith("linux"):
+            update_popup_rounded_mask(self, self._OUTER_RADIUS)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
+        if self._painted_bg:
+            paint_popup_rounded_bg(
+                self, self._popup_bg, self._popup_border, self._OUTER_RADIUS
+            )
+            return
+        super().paintEvent(event)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_linux_mask()
+
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
+        if not self._dwm_patched:
+            disable_dwm_rounded_frame(self)
+            self._dwm_patched = True
+        if self._painted_bg and sys.platform.startswith("linux"):
+            QtCore.QTimer.singleShot(0, self._apply_linux_mask)
         if not self._tick.isActive():
             self._tick.start()
         self._refresh_timer()
@@ -342,10 +439,25 @@ class CallMiniBar(QtWidgets.QFrame):
                 "#e2e7f0",
                 "#d5dce8",
             )
+        # Win/Linux: фон рисуем в paintEvent (anti-aliased), QSS только для детей.
+        # macOS: достаточно QSS border-radius на прозрачном HWND.
+        r_outer = int(self._OUTER_RADIUS)
+        r_btn = CALL_CONTROL_RADIUS
+        if self._painted_bg:
+            self._popup_bg = QtGui.QColor(bg)
+            self._popup_border = QtGui.QColor(border)
+            shell = (
+                f"QFrame#CallMiniBar {{ background: transparent; border: none;"
+                f" color: {fg}; }}"
+            )
+        else:
+            shell = (
+                f"QFrame#CallMiniBar {{ background: {bg}; border: 1px solid {border};"
+                f" border-radius: {r_outer}px; color: {fg}; }}"
+            )
         self.setStyleSheet(
-            f"QFrame#CallMiniBar {{ background: {bg}; border: 1px solid {border};"
-            f" border-radius: 12px; color: {fg}; }}"
-            f"QFrame#CallMiniBar QLabel {{ color: {fg}; background: transparent; }}"
+            shell
+            + f"QFrame#CallMiniBar QLabel {{ color: {fg}; background: transparent; }}"
             f"QFrame#CallMiniBar QLabel#CallMiniGrip {{ color: {muted}; font-size: 14px; }}"
             f"QFrame#CallMiniBar QLabel#CallMiniStatus {{"
             f" color: {fg}; font-weight: 600; font-size: 12px; }}"
@@ -354,12 +466,15 @@ class CallMiniBar(QtWidgets.QFrame):
             f"QFrame#CallMiniBar QLabel#CallMiniTimer {{"
             f" color: {fg}; font-weight: 600; font-size: 13px; padding: 0 4px; }}"
             f"QFrame#CallMiniBar QPushButton {{"
-            f" background: {btn}; color: {fg}; border: none; border-radius: 8px;"
+            f" background: {btn}; color: {fg}; border: none;"
+            f" border-radius: {r_btn}px;"
             f" min-height: 30px; padding: 4px 8px; }}"
             f"QFrame#CallMiniBar QPushButton:hover {{ background: {hover}; }}"
             "QFrame#CallMiniBar QPushButton#CallHangupButton {"
             " background: #c62828; color: white; font-weight: bold; min-width: 34px; }"
         )
+        if self._painted_bg:
+            self.update()
 
 
 class CallOverlayWidget(QtWidgets.QWidget):
@@ -501,6 +616,31 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._stats_timer.timeout.connect(self._update_stats)
         self._prefs = load_call_prefs()
         self._want_video_start = False
+        self._adapt: Optional[AdaptiveController] = None
+        self._effective = EffectiveMedia(
+            audio_bitrate_kbps=self._prefs.audio_bitrate_kbps,
+            video_bitrate_kbps=self._prefs.video_bitrate_kbps,
+            video_fps=self._prefs.video_fps,
+            video_max_edge=self._prefs.video_max_edge,
+            jpeg_quality=40,
+        )
+        self._vp8_enc: Optional[Vp8Encoder] = None
+        self._vp8_dec: Optional[Vp8Decoder] = None
+        self._force_vp8_key = False
+
+    def _ceiling_from_prefs(self) -> EffectiveMedia:
+        return EffectiveMedia(
+            audio_bitrate_kbps=self._prefs.audio_bitrate_kbps,
+            video_bitrate_kbps=self._prefs.video_bitrate_kbps,
+            video_fps=self._prefs.video_fps,
+            video_max_edge=self._prefs.video_max_edge,
+            jpeg_quality=40,
+        )
+
+    def _reset_adapt(self) -> None:
+        ceil = self._ceiling_from_prefs()
+        self._adapt = AdaptiveController(ceil)
+        self._effective = self._adapt.effective
 
     def attach_core(self, core: Any) -> None:
         self._core = core
@@ -512,38 +652,46 @@ class CallOverlayWidget(QtWidgets.QWidget):
         night = (theme_id or "night") == "night"
         self._theme_id = "night" if night else "ligth"
         if night:
-            overlay = "#10141c"
+            # Близко к #ChatSurface night (rgba(34,37,45) над #101114) + sidebar chrome.
+            overlay = "#22252d"
+            overlay_border = "#2f3541"
             text = "#e8eaed"
             muted = "#8a93a3"
-            pane = "#1a2030"
-            bar = "#161b26"
+            pane = "#2a2f3a"
+            bar = "#1c1f26"
             btn = "#2a3140"
             btn_hover = "#363e50"
-            bar_border = "#2a3140"
+            bar_border = "#2f3541"
         else:
-            # Align with THEMES["ligth"] surfaces (sidebar/chat chrome), not a hard black slab.
+            # Align with THEMES["ligth"] ChatSurface / ComposeBar chrome.
             overlay = "#f2f4f8"
+            overlay_border = "#ffffff"
             text = "#1d1d1f"
             muted = "#626875"
             pane = "#e2e7f0"
-            bar = "#e8ebf2"
-            btn = "#dde3ee"
-            btn_hover = "#cfd7e6"
+            bar = "#eaedf4"
+            btn = "#f8f9fc"
+            btn_hover = "#f0f3f8"
             bar_border = "#d0d5de"
         pal = self.palette()
         pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(overlay))
         pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(text))
         pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(text))
         self.setPalette(pal)
+        r_surf = CALL_SURFACE_RADIUS
+        r_pane = CALL_PANE_RADIUS
+        r_btn = CALL_CONTROL_RADIUS
         self.setStyleSheet(
             f"QWidget#CallOverlay {{"
-            f"  background-color: {overlay}; color: {text}; border-radius: 12px; }}"
+            f"  background-color: {overlay}; color: {text};"
+            f"  border: 1px solid {overlay_border};"
+            f"  border-radius: {r_surf}px; }}"
             f"QWidget#CallOverlay QLabel {{ color: {text}; background: transparent; }}"
             f"QWidget#CallOverlay QLabel#CallVideoPane {{"
-            f"  background-color: {pane}; border-radius: 10px; color: {muted}; }}"
+            f"  background-color: {pane}; border-radius: {r_pane}px; color: {muted}; }}"
             f"QWidget#CallOverlay QPushButton {{"
             f"  background-color: {btn}; color: {text}; border: none;"
-            f"  border-radius: 8px; padding: 8px 12px; min-height: 32px; }}"
+            f"  border-radius: {r_btn}px; padding: 8px 12px; min-height: 32px; }}"
             f"QWidget#CallOverlay QPushButton:hover {{ background-color: {btn_hover}; }}"
             "QWidget#CallOverlay QPushButton#CallHangupButton {"
             "  background-color: #c62828; color: white; font-weight: bold; }"
@@ -551,10 +699,12 @@ class CallOverlayWidget(QtWidgets.QWidget):
             "  background-color: #2e7d32; color: white; }"
             f"QWidget#CallHeaderBar {{"
             f"  background-color: {bar};"
-            "  border-top-left-radius: 12px; border-top-right-radius: 12px; }"
+            f"  border-top-left-radius: {r_surf}px;"
+            f"  border-top-right-radius: {r_surf}px; }}"
             f"QWidget#CallControlsBar {{"
             f"  background-color: {bar}; border-top: 1px solid {bar_border};"
-            "  border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }"
+            f"  border-bottom-left-radius: {r_surf}px;"
+            f"  border-bottom-right-radius: {r_surf}px; }}"
         )
         mini = getattr(self, "_mini", None)
         if mini is not None:
@@ -572,6 +722,20 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if snap.get("phase") != "active":
             return
         st = snap.get("stats") or {}
+        if self._adapt is not None:
+            prev_level = self._effective.level
+            self._effective = self._adapt.observe(st)
+            if self._effective.level != prev_level:
+                logger.info(
+                    "call adapt level=%s edge=%s fps=%s vbr=%s",
+                    self._effective.level,
+                    self._effective.video_max_edge,
+                    self._effective.video_fps,
+                    self._effective.video_bitrate_kbps,
+                )
+                if self._effective.level > prev_level:
+                    self._force_vp8_key = True
+                self._sync_screen_timer_interval()
         tx = int(st.get("tx_packets") or 0)
         rx = int(st.get("rx_packets") or 0)
         base = self._status_base
@@ -719,8 +883,10 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._prefs = dlg.result_prefs()
         save_call_prefs(self._prefs)
         self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
+        self._reset_adapt()
         if self._manager is not None:
             self._manager.prefs = self._prefs
+        self._sync_screen_timer_interval()
 
     def _toggle(self, which: str) -> None:
         if self._core is None:
@@ -957,6 +1123,10 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._media_epoch += 1
         epoch = self._media_epoch
         self._mic_denied = False
+        self._cam_denied = False
+        self._prefs = load_call_prefs()
+        self._codec = AudioCodec(self._prefs.audio_bitrate_kbps * 1000)
+        self._reset_adapt()
         self._start_audio_output()
         self._audio_timer.start()
         self._stats_timer.start()
@@ -964,6 +1134,9 @@ class CallOverlayWidget(QtWidgets.QWidget):
             QtCore.QMicrophonePermission(),
             lambda ok, e=epoch: self._on_mic_permission(ok, e),
         )
+        # Camera TCC prompt runs from _ensure_camera when local_cam is on. This only
+        # registers under Privacy → Camera when Contents/MacOS/I2PChat is a Mach-O
+        # (see build-macos.sh — shell wrappers in MacOS/ break TCC attribution).
         self._sync_capture_devices()
 
     def _audio_format(self) -> QtMultimedia.QAudioFormat:
@@ -1093,15 +1266,34 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if self._screen_timer is not None:
             return
         self._screen_timer = QtCore.QTimer(self)
-        fps = max(3, min(20, self._prefs.video_fps))
-        self._screen_timer.setInterval(max(50, int(1000 / fps)))
         self._screen_timer.timeout.connect(self._capture_screen_frame)
+        self._sync_screen_timer_interval()
         self._screen_timer.start()
+
+    def _sync_screen_timer_interval(self) -> None:
+        if self._screen_timer is None:
+            return
+        fps = max(3, min(20, self._effective.video_fps))
+        self._screen_timer.setInterval(max(50, int(1000 / fps)))
 
     def _stop_screen(self) -> None:
         if self._screen_timer is not None:
             self._screen_timer.stop()
             self._screen_timer = None
+
+    def _close_vp8(self) -> None:
+        if self._vp8_enc is not None:
+            try:
+                self._vp8_enc.close()
+            except Exception:
+                pass
+        if self._vp8_dec is not None:
+            try:
+                self._vp8_dec.close()
+            except Exception:
+                pass
+        self._vp8_enc = None
+        self._vp8_dec = None
 
     def _stop_media(self) -> None:
         self._media_epoch += 1
@@ -1110,6 +1302,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._stats_timer.stop()
         self._stop_camera()
         self._stop_screen()
+        self._close_vp8()
         if self._audio_in is not None:
             try:
                 self._audio_in.stop()
@@ -1205,26 +1398,96 @@ class CallOverlayWidget(QtWidgets.QWidget):
 
         self._spawn(_run())
 
+    def _send_vp8_task(self, payload: bytes, *, keyframe: bool) -> None:
+        mgr = self._manager
+        if mgr is None or self._video_inflight:
+            return
+        self._video_inflight = True
+        self._last_video_sent = time.monotonic()
+
+        async def _run() -> None:
+            try:
+                await mgr.send_vp8_frame(payload, keyframe=keyframe)
+            finally:
+                self._video_inflight = False
+
+        self._spawn(_run())
+
+    def _show_local_preview(self, img: QtGui.QImage) -> None:
+        pix = QtGui.QPixmap.fromImage(
+            img.scaled(
+                self._local_view.size(),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self._local_view.setPixmap(pix)
+
+    def _encode_and_send_video(self, img: QtGui.QImage, *, screen: bool = False) -> None:
+        if self._manager is None or img.isNull():
+            return
+        eff = self._effective
+        min_interval = 1.0 / max(1, eff.video_fps)
+        if self._video_inflight or time.monotonic() - self._last_video_sent < min_interval:
+            return
+        self._show_local_preview(img)
+        use_vp8 = bool(getattr(self._manager, "uses_vp8", lambda: False)())
+        if use_vp8 and vp8_available():
+            # Scale to even edge for VP8.
+            edge = eff.video_max_edge
+            w, h = img.width(), img.height()
+            m = max(w, h)
+            if m > edge > 0:
+                scale = edge / float(m)
+                img = img.scaled(
+                    max(16, int(w * scale) & ~1),
+                    max(16, int(h * scale) & ~1),
+                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                    QtCore.Qt.TransformationMode.SmoothTransformation,
+                )
+            rgb, rw, rh = qimage_to_rgb24(img)
+            try:
+                if self._vp8_enc is None:
+                    self._vp8_enc = Vp8Encoder(
+                        width=rw,
+                        height=rh,
+                        fps=eff.video_fps,
+                        bitrate_kbps=eff.video_bitrate_kbps,
+                    )
+                else:
+                    self._vp8_enc.reconfigure(
+                        width=rw,
+                        height=rh,
+                        fps=eff.video_fps,
+                        bitrate_kbps=eff.video_bitrate_kbps,
+                    )
+                payload, is_key = self._vp8_enc.encode_rgb24(
+                    rgb, width=rw, height=rh, force_key=self._force_vp8_key
+                )
+                self._force_vp8_key = False
+                if payload:
+                    self._send_vp8_task(payload, keyframe=is_key)
+                    return
+            except Exception:
+                logger.debug("vp8 encode failed; falling back to JPEG", exc_info=True)
+                self._close_vp8()
+        quality = 35 if screen else eff.jpeg_quality
+        jpeg = jpeg_from_qimage(
+            img,
+            max_edge=eff.video_max_edge,
+            quality=quality,
+            target_bytes=eff.target_frame_bytes(),
+        )
+        if jpeg:
+            self._send_jpeg_task(jpeg)
+
     def _on_local_frame(self, frame: QtMultimedia.QVideoFrame) -> None:
         if self._manager is None:
-            return
-        # Cameras deliver ~30 fps; honour the configured send rate and never queue
-        # a new frame while the previous one is still being sent.
-        min_interval = 1.0 / max(1, self._prefs.video_fps)
-        if self._video_inflight or time.monotonic() - self._last_video_sent < min_interval:
             return
         img = frame.toImage()
         if img.isNull():
             return
-        pix = QtGui.QPixmap.fromImage(img.scaled(
-            self._local_view.size(),
-            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-            QtCore.Qt.TransformationMode.SmoothTransformation,
-        ))
-        self._local_view.setPixmap(pix)
-        jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge)
-        if jpeg:
-            self._send_jpeg_task(jpeg)
+        self._encode_and_send_video(img, screen=False)
 
     def _capture_screen_frame(self) -> None:
         if self._manager is None:
@@ -1233,17 +1496,18 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if screen is None:
             return
         pix = screen.grabWindow(0)
-        img = pix.toImage()
-        self._local_view.setPixmap(
-            pix.scaled(
-                self._local_view.size(),
+        self._encode_and_send_video(pix.toImage(), screen=True)
+
+    def _show_remote_image(self, img: QtGui.QImage) -> None:
+        if img is None or img.isNull():
+            return
+        self._remote_view.setPixmap(
+            QtGui.QPixmap.fromImage(img).scaled(
+                self._remote_view.size(),
                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation,
             )
         )
-        jpeg = jpeg_from_qimage(img, max_edge=self._prefs.video_max_edge, quality=35)
-        if jpeg:
-            self._send_jpeg_task(jpeg)
 
     def _on_media_packet(self, payload: dict[str, Any]) -> None:
         if self._manager is None:
@@ -1260,10 +1524,21 @@ class CallOverlayWidget(QtWidgets.QWidget):
         elif ptype == TYPE_VIDEO_JPEG:
             img = qimage_from_jpeg(data)
             if img is not None:
-                self._remote_view.setPixmap(
-                    QtGui.QPixmap.fromImage(img).scaled(
-                        self._remote_view.size(),
-                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                        QtCore.Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
+                self._show_remote_image(img)
+        elif ptype in (TYPE_VIDEO_KEY, TYPE_VIDEO_DELTA):
+            try:
+                if self._vp8_dec is None:
+                    self._vp8_dec = Vp8Decoder()
+                decoded = self._vp8_dec.decode(data)
+            except Exception:
+                logger.debug("vp8 remote decode failed", exc_info=True)
+                self._force_vp8_key = True
+                return
+            if not decoded:
+                if ptype == TYPE_VIDEO_DELTA:
+                    self._force_vp8_key = True
+                return
+            rgb, w, h = decoded
+            img = rgb24_to_qimage(rgb, w, h)
+            if img is not None:
+                self._show_remote_image(img)

@@ -41,10 +41,13 @@ data class CallUiState(
     val minimized: Boolean = false,
     val error: String = "",
     val audioBitrateKbps: Int = 32,
-    val videoBitrateKbps: Int = 150,
-    val videoFps: Int = 5,
-    val videoMaxEdge: Int = 320,
+    val videoBitrateKbps: Int = 250,
+    val videoFps: Int = 8,
+    val videoMaxEdge: Int = 480,
+    val preset: String = "normal",
+    val codecs: String = CallSignals.DEFAULT_CODECS,
     val lastRemoteJpeg: ByteArray? = null,
+    val lastRemoteVp8: ByteArray? = null,
     val mediaReady: Boolean = false,
 )
 
@@ -81,18 +84,27 @@ class CallController(
     }
 
     fun loadPrefsIntoState() {
+        val preset = prefs.getString("preset", "normal") ?: "normal"
+        val defaults = presetValues(preset)
         _state.update {
             it.copy(
-                audioBitrateKbps = prefs.getInt("audio_bitrate_kbps", 32).coerceIn(12, 64),
-                videoBitrateKbps = prefs.getInt("video_bitrate_kbps", 150).coerceIn(50, 800),
-                videoFps = prefs.getInt("video_fps", 5).coerceIn(3, 20),
-                videoMaxEdge = prefs.getInt("video_max_edge", 320).coerceIn(160, 720),
+                preset = preset,
+                audioBitrateKbps = prefs.getInt("audio_bitrate_kbps", defaults.first).coerceIn(12, 64),
+                videoBitrateKbps = prefs.getInt("video_bitrate_kbps", defaults.second).coerceIn(50, 800),
+                videoFps = prefs.getInt("video_fps", defaults.third).coerceIn(3, 20),
+                videoMaxEdge = prefs.getInt("video_max_edge", defaults.fourth).coerceIn(160, 720),
             )
         }
     }
 
-    fun savePrefs(audio: Int, video: Int, fps: Int, edge: Int) {
+    fun applyPreset(preset: String) {
+        val (a, v, f, e) = presetValues(preset)
+        savePrefs(a, v, f, e, preset)
+    }
+
+    fun savePrefs(audio: Int, video: Int, fps: Int, edge: Int, preset: String = _state.value.preset) {
         prefs.edit()
+            .putString("preset", preset)
             .putInt("audio_bitrate_kbps", audio.coerceIn(12, 64))
             .putInt("video_bitrate_kbps", video.coerceIn(50, 800))
             .putInt("video_fps", fps.coerceIn(3, 20))
@@ -100,6 +112,16 @@ class CallController(
             .apply()
         loadPrefsIntoState()
     }
+
+    private fun presetValues(preset: String): Quadruple {
+        return when (preset) {
+            "economy" -> Quadruple(24, 100, 5, 240)
+            "max" -> Quadruple(48, 600, 15, 720)
+            else -> Quadruple(32, 250, 8, 480)
+        }
+    }
+
+    private data class Quadruple(val first: Int, val second: Int, val third: Int, val fourth: Int)
 
     fun startOutgoing(peer: String, video: Boolean) {
         scope.launch(Dispatchers.IO) {
@@ -147,9 +169,13 @@ class CallController(
                 val maxBr = (_state.value.audioBitrateKbps + _state.value.videoBitrateKbps) * 1000
                 // Full public destination: no NAMING LOOKUP needed on the peer (fresh LeaseSet is often unpublished).
                 val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
+                val negotiated = CallSignals.intersectCodecs(
+                    CallSignals.localOfferCodecs(),
+                    _state.value.codecs,
+                )
                 val ok = sendSignal(
                     peer,
-                    CallSignals.buildAccept(callId, "opus,jpeg", maxBr, token),
+                    CallSignals.buildAccept(callId, negotiated, maxBr, token),
                 )
                 if (!ok) {
                     teardown("accept failed")
@@ -160,6 +186,7 @@ class CallController(
                     it.copy(
                         phase = CallPhase.Active,
                         cam = it.wantVideo,
+                        codecs = negotiated,
                         mediaReady = ready,
                     )
                 }
@@ -240,10 +267,12 @@ class CallController(
                                 callId = parsed.callId,
                                 peer = peer,
                                 wantVideo = parsed.wantVideo,
+                                codecs = parsed.codecs,
                                 audioBitrateKbps = it.audioBitrateKbps,
                                 videoBitrateKbps = it.videoBitrateKbps,
                                 videoFps = it.videoFps,
                                 videoMaxEdge = it.videoMaxEdge,
+                                preset = it.preset,
                             )
                         }
                         setupJob?.cancel()
@@ -256,9 +285,14 @@ class CallController(
                     val snap = _state.value
                     if (snap.phase != CallPhase.Outgoing || snap.callId != parsed.callId) return@launch
                     val ready = applyRemoteToken(parsed.datagramB32)
+                    val negotiated = CallSignals.intersectCodecs(
+                        CallSignals.localOfferCodecs(),
+                        parsed.codecs,
+                    )
                     _state.update {
                         it.copy(
                             phase = CallPhase.Active,
+                            codecs = negotiated,
                             mediaReady = ready,
                         )
                     }
@@ -293,6 +327,20 @@ class CallController(
         sendFramed(dg, target, snap.callId, CallMediaFraming.TYPE_VIDEO_JPEG, jpeg)
     }
 
+    fun sendVp8(payload: ByteArray, keyframe: Boolean) {
+        val snap = _state.value
+        if (snap.phase != CallPhase.Active || !(snap.cam || snap.screen)) return
+        if (!CallSignals.codecsInclude(snap.codecs, "vp8")) return
+        val target = remoteSendTarget()
+        if (target.isEmpty()) return
+        val dg = datagram ?: return
+        val type = if (keyframe) CallMediaFraming.TYPE_VIDEO_KEY else CallMediaFraming.TYPE_VIDEO_DELTA
+        sendFramed(dg, target, snap.callId, type, payload)
+    }
+
+    fun usesVp8(): Boolean =
+        CallSignals.codecsInclude(_state.value.codecs, "vp8") && CallVp8Encoder.isSupported()
+
     private suspend fun outgoingSetup(gen: Int, peer: String, callId: String, video: Boolean) {
         var dg: SamDatagramSession? = null
         try {
@@ -312,7 +360,7 @@ class CallController(
                 val token = dg.localDestinationB64.ifBlank { dg.localB32Hint }
             val ok = sendSignal(
                 peer,
-                CallSignals.buildInvite(callId, video, "opus,jpeg", maxBr, token),
+                CallSignals.buildInvite(callId, video, CallSignals.localOfferCodecs(), maxBr, token),
             )
             if (!ok) {
                 if (generation == gen) teardown("signal failed")
@@ -475,6 +523,10 @@ class CallController(
             }
             CallMediaFraming.TYPE_VIDEO_JPEG -> {
                 _state.update { it.copy(lastRemoteJpeg = body) }
+            }
+            CallMediaFraming.TYPE_VIDEO_KEY, CallMediaFraming.TYPE_VIDEO_DELTA -> {
+                // Keep raw VP8 for optional decode path; JPEG peers still use lastRemoteJpeg.
+                _state.update { it.copy(lastRemoteVp8 = body) }
             }
         }
     }

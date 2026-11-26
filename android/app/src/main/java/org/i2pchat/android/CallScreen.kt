@@ -154,8 +154,8 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
         CallSettingsDialog(
             call = call,
             onDismiss = { showSettings = false },
-            onSave = { a, v, f, e ->
-                bridge.callController.savePrefs(a, v, f, e)
+            onSave = { a, v, f, e, preset ->
+                bridge.callController.savePrefs(a, v, f, e, preset)
                 showSettings = false
             },
         )
@@ -258,17 +258,38 @@ private fun VideoPane(
 private fun CallSettingsDialog(
     call: CallUiState,
     onDismiss: () -> Unit,
-    onSave: (audio: Int, video: Int, fps: Int, edge: Int) -> Unit,
+    onSave: (audio: Int, video: Int, fps: Int, edge: Int, preset: String) -> Unit,
 ) {
+    var preset by remember { mutableStateOf(call.preset) }
     var audio by remember { mutableIntStateOf(call.audioBitrateKbps) }
     var video by remember { mutableIntStateOf(call.videoBitrateKbps) }
     var fps by remember { mutableIntStateOf(call.videoFps) }
     var edge by remember { mutableIntStateOf(call.videoMaxEdge) }
+    fun applyPreset(id: String) {
+        preset = id
+        when (id) {
+            "economy" -> { audio = 24; video = 100; fps = 5; edge = 240 }
+            "max" -> { audio = 48; video = 600; fps = 15; edge = 720 }
+            else -> { audio = 32; video = 250; fps = 8; edge = 480 }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.call_settings)) },
         text = {
             Column {
+                Text(stringResource(R.string.call_preset))
+                Row {
+                    TextButton(onClick = { applyPreset("economy") }) {
+                        Text(stringResource(R.string.call_preset_economy))
+                    }
+                    TextButton(onClick = { applyPreset("normal") }) {
+                        Text(stringResource(R.string.call_preset_normal))
+                    }
+                    TextButton(onClick = { applyPreset("max") }) {
+                        Text(stringResource(R.string.call_preset_max))
+                    }
+                }
                 Text("${stringResource(R.string.call_audio_bitrate)}: $audio kbps")
                 Row {
                     TextButton(onClick = { audio = (audio - 4).coerceAtLeast(12) }) { Text("-") }
@@ -292,7 +313,7 @@ private fun CallSettingsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(audio, video, fps, edge) }) {
+            TextButton(onClick = { onSave(audio, video, fps, edge, preset) }) {
                 Text(stringResource(R.string.action_save))
             }
         },

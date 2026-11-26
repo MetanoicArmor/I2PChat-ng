@@ -15,7 +15,9 @@ object CallMediaFraming {
     const val MAX_PAYLOAD = 3_500
     const val MAX_FRAGMENTS = 255
     const val TYPE_OPUS = 1
+    const val TYPE_VIDEO_KEY = 2 // VP8 keyframe
     const val TYPE_VIDEO_JPEG = 3
+    const val TYPE_VIDEO_DELTA = 4 // VP8 delta
     const val TYPE_PCM16 = 5
 
     data class Packet(
