@@ -34,6 +34,15 @@ jobs:
       - name: Install project + dev tools (locked)
         run: uv sync --frozen
 
+      # PyQt6.QtGui needs libEGL on Ubuntu runners (call JPEG decode tests).
+      - name: Install Qt offscreen runtime libs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libglib2.0-0 \
+            || sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-glx libegl1-mesa libglib2.0-0
+
       - name: Run security regression test gate
         run: |
           uv run python -m unittest \

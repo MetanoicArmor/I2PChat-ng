@@ -381,9 +381,16 @@ class CallReceiveLimitTests(unittest.TestCase):
 
     def test_oversized_jpeg_is_not_decoded(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt6 import QtCore, QtGui, QtWidgets
+        try:
+            from PyQt6 import QtCore, QtGui, QtWidgets
+        except ImportError as exc:
+            self.skipTest(f"PyQt6 unavailable for JPEG decode test: {exc}")
 
         from i2pchat.core.call_media import qimage_from_jpeg
+        from i2pchat.core.media_framing import MAX_RX_FRAME_BYTES
+
+        self.assertIsNone(qimage_from_jpeg(b""))
+        self.assertIsNone(qimage_from_jpeg(b"x" * (MAX_RX_FRAME_BYTES + 1)))
 
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 

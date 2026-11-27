@@ -723,6 +723,8 @@ def test_tui_record_transfer_event_keeps_recent_entries() -> None:
 
 
 def test_tui_summary_helpers_include_core_status_lines() -> None:
+    from collections import deque
+
     from i2pchat.gui.chat_python import I2PChat, TuiStatusSnapshot
 
     class _Core:
@@ -735,6 +737,7 @@ def test_tui_summary_helpers_include_core_status_lines() -> None:
 
     app = object.__new__(I2PChat)
     app.core = _Core()
+    app._recent_transfers = deque()
     app._router_status_block = lambda: "Configured backend: system\nSelection source: TUI default\nActive runtime: external/system SAM\nActive SAM address: ('127.0.0.1', 7656)"  # type: ignore[method-assign]
     app._build_status_snapshot = lambda: TuiStatusSnapshot(  # type: ignore[method-assign]
         short="short",
@@ -751,8 +754,10 @@ def test_tui_summary_helpers_include_core_status_lines() -> None:
 
     assert "full status" in launcher
     assert "Configured backend:" in launcher
+    assert "BlindBox: on" in launcher
     assert (
         "Current peer: ppppppppppppppppppppppppppppppppppppppp" in actions
     )
     assert "Connected: no" in actions
-    assert "BlindBox: on" in media
+    assert "BlindBox: on" in actions
+    assert "Received items available to save: 0" in media
