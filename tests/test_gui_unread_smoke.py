@@ -209,8 +209,12 @@ def test_message_input_drop_local_file_routes_to_sender(
     w = ChatWindow(profile="default", theme_id=THEME_DEFAULT)
     dropped = tmp_path / "note.txt"
     dropped.write_text("hello", encoding="utf-8")
-    calls: list[str] = []
-    monkeypatch.setattr(w, "_send_local_path", lambda path: calls.append(path))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        w,
+        "_send_local_paths",
+        lambda paths, as_image=None: calls.append(list(paths)),
+    )
 
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(dropped))])
@@ -224,4 +228,4 @@ def test_message_input_drop_local_file_routes_to_sender(
 
     w.input_edit.dropEvent(event)
 
-    assert calls == [str(dropped)]
+    assert calls == [[str(dropped)]]

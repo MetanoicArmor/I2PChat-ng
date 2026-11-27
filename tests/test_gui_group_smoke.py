@@ -57,7 +57,13 @@ def _conversation_items(window: ChatWindow) -> list[str]:
     texts: list[str] = []
     for row in range(window.chat_model.rowCount()):
         item = window.chat_model.item_at(row)
-        if item is not None:
+        if item is None:
+            continue
+        # Sender labels are drawn beside the bubble (show_sender_label), not
+        # embedded in item.text — mirror that for assertions.
+        if getattr(item, "show_sender_label", False) and (item.sender or "").strip():
+            texts.append(f"{item.sender}: {item.text}")
+        else:
             texts.append(item.text)
     return texts
 
@@ -217,6 +223,8 @@ def test_create_group_dialog_saves_checked_saved_peers(
     window.core.create_group = MagicMock(return_value=created_state)  # type: ignore[method-assign]
     window._refresh_groups_list = MagicMock()  # type: ignore[method-assign]
     window._set_active_group = MagicMock(return_value=True)  # type: ignore[method-assign]
+    # Create flow opens a modal "Copy invite?" box after OK; stub it for offscreen CI.
+    window._offer_copy_group_invite = MagicMock()  # type: ignore[method-assign]
 
     def _fake_exec(dialog: QDialog) -> int:
         title_edit = dialog.findChild(QLineEdit, "GroupTitleEdit")
@@ -870,6 +878,7 @@ def test_switch_profile_resets_active_group_state_and_reloads_group_list(
     monkeypatch.setattr(window, "_refresh_offline_history_display", lambda *args, **kwargs: None)
     monkeypatch.setattr(window, "refresh_status_label", lambda: None)
     monkeypatch.setattr(window, "_refresh_connection_buttons", lambda: None)
+    monkeypatch.setattr(window, "_offer_new_profile_password", lambda: None)
 
     asyncio.run(window.switch_profile("other-profile"))
 

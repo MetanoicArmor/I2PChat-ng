@@ -11255,18 +11255,22 @@ class ChatWindow(QtWidgets.QMainWindow):
             if kind == "peer" and msg.source_peer
             else None
         )
-        active_direct_peer_key = (
-            normalize_peer_addr(self._current_history_peer() or "")
-            if not self._active_group_id
-            else None
+        # Only treat as "viewing another peer" when a real peer is selected.
+        # normalize("") → "" must not count as an active key (would hide all
+        # inbound direct messages when the address field is empty).
+        _history_peer = (
+            None if self._active_group_id else self._current_history_peer()
         )
+        active_direct_peer_key = (
+            normalize_peer_addr(_history_peer) if _history_peer else None
+        ) or None
         direct_peer_offscreen = bool(
             kind == "peer"
             and incoming_direct_peer_key
             and (
                 self._active_group_id is not None
                 or (
-                    active_direct_peer_key is not None
+                    active_direct_peer_key
                     and active_direct_peer_key != incoming_direct_peer_key
                 )
             )

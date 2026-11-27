@@ -15,6 +15,9 @@ jobs:
     env:
       PYTHONPATH: vendor
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+      # Headless CI: avoid Pulse socket hangs when QtMultimedia loads with call overlay.
+      QT_QPA_PLATFORM: offscreen
+      QT_MEDIA_BACKEND: ffmpeg
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
