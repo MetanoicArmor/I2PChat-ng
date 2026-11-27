@@ -12525,6 +12525,10 @@ class ChatWindow(QtWidgets.QMainWindow):
     def _ensure_notify_sound(self) -> None:
         if self.notify_sound is not None or not self.notify_sound_path:
             return
+        # Headless CI (offscreen) must not import QtMultimedia: its FFmpeg
+        # plugin later segfaults the GC during Textual stylesheet parse.
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return
         QSoundEffect = _load_qsoundeffect()
         if QSoundEffect is None:
             return

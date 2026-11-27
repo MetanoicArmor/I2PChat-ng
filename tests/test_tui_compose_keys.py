@@ -42,7 +42,13 @@ def test_enter_submits_without_inserting_newline() -> None:
 
 
 def test_newline_keys_insert_line_break() -> None:
-    for key in ("shift+enter", "ctrl+enter", "alt+enter", "ctrl+j"):
-        text, submitted = asyncio.run(_run(["a", key, "b"]))
+    async def _all() -> list[tuple[str, str, list[str]]]:
+        out: list[tuple[str, str, list[str]]] = []
+        for key in ("shift+enter", "ctrl+enter", "alt+enter", "ctrl+j"):
+            text, submitted = await _run(["a", key, "b"])
+            out.append((key, text, submitted))
+        return out
+
+    for key, text, submitted in asyncio.run(_all()):
         assert text == "a\nb", key
         assert submitted == [], key

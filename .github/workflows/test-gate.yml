@@ -61,4 +61,9 @@ jobs:
             tests.test_audit_remediation
 
       - name: Pytest suite
-        run: uv run pytest tests/ -q --tb=short
+        run: |
+          # Textual App.run_test and a process that already imported PyQt
+          # segfault together in GC (test_tui_compose_keys). Keep that file
+          # in a fresh interpreter.
+          uv run pytest tests/ -q --tb=short --ignore=tests/test_tui_compose_keys.py
+          uv run pytest tests/test_tui_compose_keys.py -q --tb=short
