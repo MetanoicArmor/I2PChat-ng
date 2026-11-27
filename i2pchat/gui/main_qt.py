@@ -210,10 +210,13 @@ from i2pchat.storage.contact_book import (
 )
 from i2pchat.storage.history_retention import peer_max_age_days
 
-try:
-    from PyQt6.QtMultimedia import QSoundEffect  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - мультимедиа не везде доступно
-    QSoundEffect = None  # type: ignore[assignment]
+def _load_qsoundeffect():
+    """Load QSoundEffect on demand so importing the GUI does not pull FFmpeg."""
+    try:
+        from PyQt6.QtMultimedia import QSoundEffect  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - мультимедиа не везде доступно
+        return None
+    return QSoundEffect
 
 def _read_version() -> str:
     """VERSION в корне репозитория; при запуске из trunk cwd часто не корень — ищем вверх от main_qt.py."""
@@ -12516,10 +12519,13 @@ class ChatWindow(QtWidgets.QMainWindow):
         self.notify_sound = None
         cleaned = (sound_path or "").strip()
         self.notify_sound_path = cleaned or None
-        if QSoundEffect is None or not self.notify_sound_path:
+        if not self.notify_sound_path:
             return
         if not os.path.isfile(self.notify_sound_path):
             self.notify_sound_path = None
+            return
+        QSoundEffect = _load_qsoundeffect()
+        if QSoundEffect is None:
             return
         try:
             effect = QSoundEffect(self)

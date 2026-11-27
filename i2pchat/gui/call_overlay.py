@@ -8,7 +8,7 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
-from PyQt6 import QtCore, QtGui, QtMultimedia, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from i2pchat.core.call_adapt import MAX_FRAME_BYTES, AdaptiveController, EffectiveMedia
 from i2pchat.core.call_media import (
@@ -54,6 +54,17 @@ if TYPE_CHECKING:
     from i2pchat.core.call_session import CallSessionManager
 
 logger = logging.getLogger(__name__)
+
+
+def _qt_multimedia():
+    """Import QtMultimedia only when a call actually opens a device.
+
+    Loading it at import time pulls in the FFmpeg plugin and has segfaulted
+    later GC (Textual CSS tokenize) in the headless test process.
+    """
+    from PyQt6 import QtMultimedia
+
+    return QtMultimedia
 
 PCM_FRAMES_PER_PACKET = 3  # 3 x 20 ms PCM per DATAGRAM
 PLAY_PREBUFFER_MS = 120
@@ -1452,7 +1463,8 @@ class CallOverlayWidget(QtWidgets.QWidget):
         # (see build-macos.sh — shell wrappers in MacOS/ break TCC attribution).
         self._sync_capture_devices()
 
-    def _audio_format(self) -> QtMultimedia.QAudioFormat:
+    def _audio_format(self):
+        QtMultimedia = _qt_multimedia()
         fmt = QtMultimedia.QAudioFormat()
         fmt.setSampleRate(SAMPLE_RATE)
         fmt.setChannelCount(1)
@@ -1460,6 +1472,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         return fmt
 
     def _start_audio_output(self) -> None:
+        QtMultimedia = _qt_multimedia()
         try:
             out_dev = QtMultimedia.QMediaDevices.defaultAudioOutput()
             if out_dev.isNull():
@@ -1478,6 +1491,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             self._mic_denied = True
             logger.warning("call audio: microphone permission denied")
             return
+        QtMultimedia = _qt_multimedia()
         try:
             in_dev = QtMultimedia.QMediaDevices.defaultAudioInput()
             if in_dev.isNull():
@@ -1521,6 +1535,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         )
 
     def _pick_camera_device(self) -> Any:
+        QtMultimedia = _qt_multimedia()
         devices = QtMultimedia.QMediaDevices.videoInputs()
         default = QtMultimedia.QMediaDevices.defaultVideoInput()
         if not default.isNull():
@@ -1543,6 +1558,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
             logger.warning("call video: no camera found after permission grant")
             self._set_status(tr("call.cam_denied"))
             return
+        QtMultimedia = _qt_multimedia()
         self._camera = QtMultimedia.QCamera(device, self)
         try:
             self._camera.errorOccurred.connect(self._on_camera_error)
