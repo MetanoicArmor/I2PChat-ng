@@ -62,7 +62,18 @@ jobs:
 
       - name: Pytest suite
         run: |
-          # Textual's driver segfaults in GC once this process has imported
-          # PyQt. Keep every TUI test in a fresh interpreter.
-          uv run pytest tests/ -q --tb=short --ignore-glob='tests/test_tui*.py'
+          # Importing PyQt in this process corrupts later GC (segfault 139)
+          # in unrelated tests. Qt, TUI, and the rest each get their own interpreter.
+          uv run pytest tests/ -q --tb=short \
+            --ignore-glob='tests/test_tui*.py' \
+            --ignore-glob='tests/test_gui*.py' \
+            --ignore=tests/test_compose_shortcuts.py \
+            --ignore=tests/test_popup_geometry_profile_combo.py \
+            --ignore=tests/test_call_quality.py
+          uv run pytest \
+            tests/test_gui_*.py \
+            tests/test_compose_shortcuts.py \
+            tests/test_popup_geometry_profile_combo.py \
+            tests/test_call_quality.py \
+            -q --tb=short
           uv run pytest tests/test_tui_*.py -q --tb=short
