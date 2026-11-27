@@ -12,11 +12,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -100,7 +106,12 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color(0xF010141C))
+            .background(Color(0xFF10141C))
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) {}
             .padding(16.dp),
     ) {
         Column(Modifier.fillMaxSize()) {
@@ -151,30 +162,10 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
                 )
             }
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                VideoPane(
-                    label = stringResource(R.string.call_remote_video),
-                    frame = call.remoteFrame,
-                    modifier = Modifier.weight(1f),
-                    placeholder = if (
-                        call.phase == CallPhase.Active && !call.remoteCam && !call.remoteScreen
-                    ) {
-                        stringResource(R.string.call_remote_cam_off)
-                    } else {
-                        stringResource(R.string.call_remote_video)
-                    },
-                )
-                VideoPane(
-                    label = stringResource(R.string.call_local_video),
-                    frame = call.localFrame,
-                    modifier = Modifier.weight(1f),
-                    placeholder = if (call.cam || call.screen) {
-                        stringResource(R.string.call_cam_on)
-                    } else {
-                        stringResource(R.string.call_cam_off)
-                    },
-                )
-            }
+            CallVideoStage(
+                call = call,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            )
             Spacer(Modifier.height(12.dp))
             if (call.phase == CallPhase.Incoming) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -213,7 +204,10 @@ fun CallFullScreen(bridge: ChatBridge, call: CallUiState) {
 
 @Composable
 fun CallMiniPanel(bridge: ChatBridge, call: CallUiState) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopEnd) {
+    Box(
+        Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+        contentAlignment = Alignment.TopEnd,
+    ) {
         Surface(
             modifier = Modifier
                 .padding(12.dp)
@@ -322,16 +316,76 @@ private fun CallControlsRow(bridge: ChatBridge, call: CallUiState, compact: Bool
 }
 
 @Composable
+private fun CallVideoStage(call: CallUiState, modifier: Modifier = Modifier) {
+    var focus by remember { mutableStateOf<Boolean?>(null) } // true = remote, false = local
+    val remotePlaceholder = if (
+        call.phase == CallPhase.Active && !call.remoteCam && !call.remoteScreen
+    ) {
+        stringResource(R.string.call_remote_cam_off)
+    } else {
+        stringResource(R.string.call_remote_video)
+    }
+    val localPlaceholder = if (call.cam || call.screen) {
+        stringResource(R.string.call_cam_on)
+    } else {
+        stringResource(R.string.call_cam_off)
+    }
+    val remoteLabel = stringResource(R.string.call_remote_video)
+    val localLabel = stringResource(R.string.call_local_video)
+    if (focus == null) {
+        Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            VideoPane(
+                label = remoteLabel,
+                frame = call.remoteFrame,
+                placeholder = remotePlaceholder,
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                onClick = { focus = true },
+            )
+            VideoPane(
+                label = localLabel,
+                frame = call.localFrame,
+                placeholder = localPlaceholder,
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                onClick = { focus = false },
+            )
+        }
+        return
+    }
+    val remoteFocused = focus == true
+    Box(modifier) {
+        VideoPane(
+            label = if (remoteFocused) remoteLabel else localLabel,
+            frame = if (remoteFocused) call.remoteFrame else call.localFrame,
+            placeholder = if (remoteFocused) remotePlaceholder else localPlaceholder,
+            modifier = Modifier.fillMaxSize(),
+            onClick = { focus = null },
+        )
+        VideoPane(
+            label = if (remoteFocused) localLabel else remoteLabel,
+            frame = if (remoteFocused) call.localFrame else call.remoteFrame,
+            placeholder = if (remoteFocused) localPlaceholder else remotePlaceholder,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(10.dp)
+                .size(width = 112.dp, height = 168.dp),
+            onClick = { focus = !remoteFocused },
+        )
+    }
+}
+
+@Composable
 private fun VideoPane(
     label: String,
     frame: Bitmap?,
     modifier: Modifier = Modifier,
     placeholder: String = label,
+    onClick: (() -> Unit)? = null,
 ) {
     Surface(
-        modifier = modifier.fillMaxSize(),
+        modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
         shape = RoundedCornerShape(10.dp),
         color = Color(0xFF1A2030),
+        tonalElevation = 2.dp,
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (frame != null && !frame.isRecycled) {
