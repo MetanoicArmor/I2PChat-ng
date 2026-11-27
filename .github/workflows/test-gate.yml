@@ -34,14 +34,16 @@ jobs:
       - name: Install project + dev tools (locked)
         run: uv sync --frozen
 
-      # PyQt6.QtGui needs libEGL on Ubuntu runners (call JPEG decode tests).
+      # QtGui needs EGL; QtMultimedia (call overlay) needs Pulse.
       - name: Install Qt offscreen runtime libs
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libgl1 libegl1 libglib2.0-0 \
+            libgl1 libegl1 libglib2.0-0 libpulse0 libasound2t64 \
+            libxkbcommon0 libdbus-1-3 libfontconfig1 \
             || sudo apt-get install -y --no-install-recommends \
-            libgl1-mesa-glx libegl1-mesa libglib2.0-0
+            libgl1-mesa-glx libegl1-mesa libglib2.0-0 libpulse0 libasound2 \
+            libxkbcommon0 libdbus-1-3 libfontconfig1
 
       - name: Run security regression test gate
         run: |
