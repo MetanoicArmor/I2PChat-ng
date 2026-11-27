@@ -12515,14 +12515,15 @@ class ChatWindow(QtWidgets.QMainWindow):
         asyncio.create_task(_apply_router_settings_async())
 
     def _reload_notify_sound(self, sound_path: Optional[str]) -> None:
-        """Перезагрузить кастомный звук уведомлений из файла."""
+        """Remember the notify WAV path; QtMultimedia loads only on first play."""
         self.notify_sound = None
         cleaned = (sound_path or "").strip()
         self.notify_sound_path = cleaned or None
-        if not self.notify_sound_path:
-            return
-        if not os.path.isfile(self.notify_sound_path):
+        if self.notify_sound_path and not os.path.isfile(self.notify_sound_path):
             self.notify_sound_path = None
+
+    def _ensure_notify_sound(self) -> None:
+        if self.notify_sound is not None or not self.notify_sound_path:
             return
         QSoundEffect = _load_qsoundeffect()
         if QSoundEffect is None:
@@ -12534,7 +12535,6 @@ class ChatWindow(QtWidgets.QMainWindow):
             self.notify_sound = effect
         except Exception:
             self.notify_sound = None
-            self.notify_sound_path = None
 
     def _play_notification_sound(self) -> None:
         """
@@ -12547,6 +12547,7 @@ class ChatWindow(QtWidgets.QMainWindow):
         """
         played = False
 
+        self._ensure_notify_sound()
         if self.notify_sound is not None:
             try:
                 self.notify_sound.stop()

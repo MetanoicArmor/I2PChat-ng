@@ -790,13 +790,13 @@ class CallOverlayWidget(QtWidgets.QWidget):
         self._core = None
         self._manager: Optional[Any] = None
         self._codec = AudioCodec()
-        self._audio_in: Optional[QtMultimedia.QAudioSource] = None
-        self._audio_out: Optional[QtMultimedia.QAudioSink] = None
+        self._audio_in: Optional[Any] = None
+        self._audio_out: Optional[Any] = None
         self._audio_in_io: Optional[QtCore.QIODevice] = None
         self._audio_out_io: Optional[QtCore.QIODevice] = None
-        self._camera: Optional[QtMultimedia.QCamera] = None
-        self._capture: Optional[QtMultimedia.QMediaCaptureSession] = None
-        self._video_sink: Optional[QtMultimedia.QVideoSink] = None
+        self._camera: Optional[Any] = None
+        self._capture: Optional[Any] = None
+        self._video_sink: Optional[Any] = None
         self._screen_timer: Optional[QtCore.QTimer] = None
         self._audio_timer = QtCore.QTimer(self)
         self._audio_timer.setInterval(FRAME_MS)
@@ -1845,7 +1845,7 @@ class CallOverlayWidget(QtWidgets.QWidget):
         if jpeg:
             self._send_jpeg_task(jpeg)
 
-    def _on_local_frame(self, frame: QtMultimedia.QVideoFrame) -> None:
+    def _on_local_frame(self, frame: Any) -> None:
         if self._manager is None:
             return
         img = frame.toImage()
