@@ -4,6 +4,7 @@ Versioned release write-ups for I2PChat live in this directory (`docs/releases/`
 
 | Version | Notes |
 |--------|--------|
+| **1.7.0** | [RELEASE_1.7.0.md](RELEASE_1.7.0.md) — Call quality + security parity (desktop/Android); one-way video/parity/LeaseSet warmup fixes; Android call safe insets and tap-to-expand video |
 | **1.6.3** | [RELEASE_1.6.3.md](RELEASE_1.6.3.md) — File transfer serialize + auto-accept + multi-file/`/savefile`; Android themed chat wallpapers; media viewer survives rotation; emoji caret; screenshots |
 | **1.6.2** | [RELEASE_1.6.2.md](RELEASE_1.6.2.md) — Avatars sync; TUI `//` and `/reply N text`; Android media/time/emoji/delete/SAM reconnect; chat FGS keeps session in background (#46); Firejail; signed checksums |
 | **1.6.1** | [RELEASE_1.6.1.md](RELEASE_1.6.1.md) — Connect after hang-up; Android inbound after Disconnect; TOFU keeps inbound through Accept |
